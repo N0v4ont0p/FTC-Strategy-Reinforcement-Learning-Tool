@@ -84,6 +84,8 @@ export interface Hooks {
   filter?: (w: World, intents: Map<number, RobotCommand>) => Map<number, RobotCommand>;
   perturb?: (w: World) => boolean; // returns true if it changed anything this tick
   after?: (w: World, applied: Map<number, RobotCommand>) => void;
+  /** end the run now (a training episode's early "death"); the world is left as it is */
+  stop?: (w: World) => boolean;
 }
 
 export type Controller = (w: World) => Map<number, RobotCommand>;
@@ -94,6 +96,7 @@ export interface MatchRun {
   /** false once layer C touched the world — the replay then only reproduces the commands */
   replayExact: boolean;
   settled: boolean;
+  stopped: boolean; // ended by hooks.stop
 }
 
 /** Step one match to DSIM's own "final" moment: through `post` until the settle clock decides,
@@ -111,6 +114,7 @@ export function runMatch(
   const cap = opts.maxTicks ?? 20000;
   let exact = true;
   let settled = false;
+  let stopped = false;
   for (let n = 0; n < cap; n++) {
     const tick = w.tick + 1;
     const intents = controller(w);
@@ -124,12 +128,16 @@ export function runMatch(
     rec?.record(tick, applied);
     if (hooks.perturb?.(w)) exact = false;
     hooks.after?.(w, applied);
+    if (hooks.stop?.(w)) {
+      stopped = true;
+      break;
+    }
     if (settleStep(clock, w, bbSettled)) {
       settled = true;
       break;
     }
   }
-  return { world: w, replay: rec ? rec.finish() : null, replayExact: exact, settled };
+  return { world: w, replay: rec ? rec.finish() : null, replayExact: exact, settled, stopped };
 }
 
 /** The solo record score DSIM shows: own total minus the fouls the OTHER alliance earned off us. */

@@ -610,6 +610,30 @@ Harness: `harness/{dsim,profiles,filters,perturb,guards,control,export,pool,work
 6. **The envelope depended on the turret's leftover yaw** (43 north-only spots) → the turret settles 1 s before every measurement; now mirror-exact.
 7. A stale reference to DSIM's HIVE state (DSIM replaces `hives[a]` every tick) → read fresh.
 
+**TRAINING PLATFORM RESULT (2026-09-22): BUILT — gate 23/23** (`train/check.ts`; user guide `TRAINING.md`). Foundations are complete; no real training has been run. Solo training is the next step.
+
+| piece | what it is |
+|---|---|
+| `train/obs.ts` | 69-feature observation from DSIM state + the S1 envelope; robot-relative; alliance-mirrored (red = blue proven exact); carries the profile vector |
+| `train/net.ts`, `train/policy.ts` | 69→64→64→6 MLP (9,350 parameters), 10 Hz decisions, every driver control, human-player button edge-triggered |
+| `train/episode.ts` | one life = one DSIM match (or its AUTO) on the REAL-v0 profile sampled per life, with layers B + C and every guard. Deaths: crash (G417) or stall (20 s without progress). Fitness = DSIM score + annealed shaping − penalties, reconciled exactly |
+| `train/algos.ts` | OpenAI-ES (mirrored pairs, centered ranks, Adam) and deep-GA (elitism, truncation, mutation); seeded, bit-exact save/restore |
+| `train/engine.ts` | unlimited generation loop: common seeds per generation, atomic checkpoints, AUTO → full-match curriculum, champion re-recorded as a DSIM replay + paste snippet, per-robot paths per generation. Stop + resume = never stopped (proven) |
+| `train/server.ts` | local HTTP + Server-Sent Events (Node stdlib only, 127.0.0.1), path traversal refused |
+| `train/cli.ts` | `npm run train`: full-screen terminal dashboard, keys p / o / q, graceful stop |
+| `viewer/` | web viewer drawn by DSIM's own renderers (read-only imports). Generation swarm with deaths marked, champion match re-simulated by DSIM's `ReplayPlayer` in the browser, fitness + death charts (validated palette, hover, table view), honeycomb of every generation. Built with DSIM's own Vite; no new dependency |
+
+**Caught and fixed while building it:**
+- follow-live reset each replay to 0:00
+- the chart grew on every redraw (canvas height attribute read back after DPR scaling)
+- the progress bar animated `width` → `transform`
+- improvised screen-up vector → DSIM's exact `screenUpWorld`
+- the ES unit test's threshold → derived from signal-to-noise theory
+
+**Not built yet, deliberately:**
+- PPO and DAgger. They belong with the S3 planner-teacher (PLAN §8 S4) and PyTorch is deferred: 127 MB, the user's network.
+- Duo and 4-robot training (§6, §8 S5–S7). The engine and episode code are written for any robot count, but only solo is wired up.
+
 ### 14.3 Is the whole pipeline planned, with room to keep improving?
 
 **Planned:**

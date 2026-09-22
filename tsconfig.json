@@ -10,7 +10,8 @@
     "resolveJsonModule": true,
     "lib": [
       "ES2022",
-      "DOM"
+      "DOM",
+      "DOM.Iterable"
     ],
     "typeRoots": [
       "./dsim-main/node_modules/@types"
@@ -23,6 +24,12 @@
     "isolatedModules": true
   },
   "include": [
-    "harness/**/*.ts"
+    "harness/**/*.ts",
+    "train/**/*.ts",
+    "viewer/src/**/*.ts"
+  ],
+  "exclude": [
+    "train/public",
+    "train/_smoke.ts"
   ]
 }

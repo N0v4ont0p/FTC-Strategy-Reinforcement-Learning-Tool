@@ -1,5 +1,5 @@
-// Run many jobs across persistent worker processes (harness/worker.ts). 8 workers measured best
-// on the M5 (4 performance + 6 efficiency cores, S-1 step h).
+// Worker processes (harness/worker.ts) that stay alive across batches. 8 workers measured best on
+// the M5 (4 performance + 6 efficiency cores, S-1 step h). A job names a harness module + function.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -9,44 +9,89 @@ const here = dirname(fileURLToPath(import.meta.url));
 const TSX = join(here, '..', 'dsim-main', 'node_modules', '.bin', 'tsx');
 
 export interface Job {
-  module: string; // file in harness/, e.g. 'jobs.ts'
+  module: string; // path under harness/, e.g. 'jobs.ts' or '../train/episode.ts'
   fn: string;
   args: unknown;
 }
 
-export async function runPool<T>(jobs: Job[], workers = 8, onDone?: (done: number, total: number) => void): Promise<T[]> {
-  const results = new Array<T>(jobs.length);
-  let next = 0;
-  let done = 0;
-  const procs: ChildProcess[] = [];
-  await Promise.all(
-    Array.from({ length: Math.min(workers, jobs.length) }, () =>
-      new Promise<void>((resolveW, rejectW) => {
-        const p = spawn(TSX, [join(here, 'worker.ts')], { stdio: ['pipe', 'pipe', 'inherit'] });
-        procs.push(p);
-        let current = -1;
-        const feed = (): void => {
-          if (next >= jobs.length) {
-            p.stdin!.end();
-            resolveW();
-            return;
-          }
-          current = next++;
-          p.stdin!.write(JSON.stringify({ id: current, ...jobs[current] }) + '\n');
-        };
-        createInterface({ input: p.stdout! }).on('line', (line) => {
-          const msg = JSON.parse(line) as { ready?: boolean; id: number; ok: boolean; result?: T; error?: string };
-          if (msg.ready) return feed();
-          if (!msg.ok) return rejectW(new Error(`job ${msg.id} failed: ${msg.error}`));
-          results[msg.id] = msg.result as T;
-          onDone?.(++done, jobs.length);
-          feed();
-        });
-        p.on('exit', (code) => {
-          if (code && next <= jobs.length && current >= 0 && results[current] === undefined) rejectW(new Error(`worker exited ${code}`));
-        });
+interface Slot {
+  p: ChildProcess;
+  ready: Promise<void>;
+  busy: boolean;
+}
+
+export class WorkerPool {
+  private slots: Slot[] = [];
+  private waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private nextId = 0;
+  private closed = false;
+
+  constructor(readonly size = 8) {
+    for (let i = 0; i < size; i++) this.slots.push(this.start());
+  }
+
+  private start(): Slot {
+    const p = spawn(TSX, [join(here, 'worker.ts')], { stdio: ['pipe', 'pipe', 'inherit'] });
+    let markReady!: () => void;
+    const slot: Slot = { p, ready: new Promise<void>((r) => (markReady = r)), busy: false };
+    createInterface({ input: p.stdout! }).on('line', (line) => {
+      const msg = JSON.parse(line) as { ready?: boolean; id: number; ok: boolean; result?: unknown; error?: string };
+      if (msg.ready) return markReady();
+      const w = this.waiting.get(msg.id);
+      this.waiting.delete(msg.id);
+      slot.busy = false;
+      if (!w) return;
+      if (msg.ok) w.resolve(msg.result);
+      else w.reject(new Error(`job ${msg.id} failed: ${msg.error}`));
+    });
+    p.on('exit', (code) => {
+      if (this.closed) return;
+      // a worker must never vanish silently: fail everything in flight
+      for (const [, w] of this.waiting) w.reject(new Error(`worker exited with code ${code}`));
+      this.waiting.clear();
+    });
+    return slot;
+  }
+
+  private run<T>(slot: Slot, job: Job): Promise<T> {
+    const id = this.nextId++;
+    slot.busy = true;
+    return new Promise<T>((resolve, reject) => {
+      this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      slot.p.stdin!.write(JSON.stringify({ id, ...job }) + '\n');
+    });
+  }
+
+  /** run every job; results in job order. `onDone` fires per finished job (progress bars). */
+  async map<T>(jobs: Job[], onDone?: (done: number, total: number, result: T, index: number) => void): Promise<T[]> {
+    await Promise.all(this.slots.map((s) => s.ready));
+    const out = new Array<T>(jobs.length);
+    let next = 0;
+    let done = 0;
+    await Promise.all(
+      this.slots.map(async (slot) => {
+        while (next < jobs.length) {
+          const i = next++;
+          out[i] = await this.run<T>(slot, jobs[i]);
+          onDone?.(++done, jobs.length, out[i], i);
+        }
       }),
-    ),
-  ).finally(() => procs.forEach((p) => p.kill()));
-  return results;
+    );
+    return out;
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const s of this.slots) s.p.kill();
+  }
+}
+
+/** one-shot convenience: a pool for this batch only */
+export async function runPool<T>(jobs: Job[], workers = 8, onDone?: (done: number, total: number) => void): Promise<T[]> {
+  const pool = new WorkerPool(Math.min(workers, Math.max(1, jobs.length)));
+  try {
+    return await pool.map<T>(jobs, onDone ? (d, t) => onDone(d, t) : undefined);
+  } finally {
+    pool.close();
+  }
 }

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BIOBUZZ Evolution</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand"><span class="mark" aria-hidden="true"></span><span class="title">BIOBUZZ Evolution</span></div>
+      <div class="runline" id="runline">connecting…</div>
+      <div class="status" id="status" role="status"></div>
+      <div class="ctl">
+        <button id="btnPause" type="button">Pause training</button>
+        <button id="btnStop" type="button" class="quiet">Stop</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="stage" aria-label="Field">
+        <div class="stagebar">
+          <div class="modes" role="tablist" aria-label="Field view">
+            <button id="modeSwarm" role="tab" aria-selected="true" type="button">Generation swarm</button>
+            <button id="modeChamp" role="tab" aria-selected="false" type="button">Champion match</button>
+          </div>
+          <div class="genpick">
+            <button id="genPrev" type="button" aria-label="Previous generation">◀</button>
+            <span id="genLabel">—</span>
+            <button id="genNext" type="button" aria-label="Next generation">▶</button>
+            <label class="follow"><input id="follow" type="checkbox" checked /> follow live</label>
+          </div>
+        </div>
+        <div class="canvaswrap">
+          <canvas id="field" aria-label="Robots on the BIOBUZZ field"></canvas>
+          <div class="overlay" id="overlay"></div>
+        </div>
+        <div class="transport">
+          <button id="play" type="button">Pause</button>
+          <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Match time" />
+          <span id="clock" class="mono">0:00</span>
+          <div class="speeds" role="group" aria-label="Playback speed">
+            <button data-speed="1" type="button">1×</button>
+            <button data-speed="4" type="button" class="on">4×</button>
+            <button data-speed="16" type="button">16×</button>
+          </div>
+        </div>
+        <div class="legend" id="fieldLegend"></div>
+      </section>
+
+      <aside class="side">
+        <div class="counters">
+          <div class="big"><span class="k">robots spawned</span><span class="v mono" id="spawned">0</span></div>
+          <div class="pair">
+            <div><span class="k">died</span><span class="v mono" id="died">0</span><span class="sub" id="diedSplit"></span></div>
+            <div><span class="k">survived a full life</span><span class="v mono" id="survived">0</span></div>
+          </div>
+          <div class="pair">
+            <div><span class="k">generation</span><span class="v mono" id="gen">0</span><span class="sub" id="stage"></span></div>
+            <div><span class="k">throughput</span><span class="v mono" id="rpm">—</span><span class="sub">robots / min</span></div>
+          </div>
+          <div class="progress" aria-label="This generation"><div id="progFill"></div><span id="progText" class="mono"></span></div>
+        </div>
+
+        <div class="card">
+          <div class="cardhead"><h2>Fitness by generation</h2><button id="tableToggle" type="button" class="link">Show table</button></div>
+          <canvas id="chartFit" height="170" aria-label="Fitness by generation: best, mean and median"></canvas>
+          <div class="chartlegend" id="fitLegend"></div>
+          <div id="fitTable" class="table" hidden></div>
+        </div>
+
+        <div class="card">
+          <div class="cardhead"><h2>How each generation's robots ended</h2></div>
+          <canvas id="chartDeaths" height="96" aria-label="Deaths by cause per generation"></canvas>
+          <div class="chartlegend" id="deathLegend"></div>
+        </div>
+
+        <div class="card champ">
+          <div class="cardhead"><h2>Champion</h2><span class="sub" id="champGen"></span></div>
+          <div id="champBody" class="champbody">No champion yet — the first generation is still being born.</div>
+          <div class="row">
+            <button id="watchChamp" type="button">Watch champion match</button>
+            <button id="copySnippet" type="button" class="quiet">Copy DSIM snippet</button>
+          </div>
+          <p class="hint" id="snippetHint">Paste the snippet into the console on the DSIM page (Safari: Develop → Show Web Inspector), then open Records → Career.</p>
+        </div>
+
+        <div class="log" id="log" aria-live="polite"></div>
+      </aside>
+
+      <section class="combwrap" aria-label="Every generation so far">
+        <div class="combhead"><h2>Every generation so far</h2><span class="sub">one cell per generation · brighter = higher best score · click a cell to replay it</span><div class="ramp" id="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div>
+        <canvas id="comb" aria-label="Honeycomb of generations"></canvas>
+      </section>
+    </main>
+    <div id="tip" class="tip" role="tooltip" hidden></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

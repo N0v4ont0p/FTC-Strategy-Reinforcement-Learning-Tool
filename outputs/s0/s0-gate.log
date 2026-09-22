@@ -35,10 +35,9 @@ PASS  8 G407: DSIM warning is counted as a violation
 PASS  9 same seed, every layer on → identical world (full JSON)
 PASS  10 crash test: 800 random-agent matches on sampled REAL-v0 robots, all settle with every invariant
 PASS  10 forced-miss count matches the sampled accuracies (within 3 sigma) — 2380 missed of 11954, expected 2345 ± 124
-      800 matches in 318 s = 9068 matches/hour on 8 workers
+      800 matches in 478 s = 6023 matches/hour on 8 workers
       random-agent score: median 28, max 71; tips/match 0.89
       random agent's rule hits (expected, it is random): G417 15670, G409 14, G407 231, G426 0, G427C 0
       DSIM oddities seen: fast element 14601, embedded element 1398
 PASS  10 filters never let a conservative-rule HP violation through (G426, G427C = 0)
-
 S0 GATE: ALL PASS

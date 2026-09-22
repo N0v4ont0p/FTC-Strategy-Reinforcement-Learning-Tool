@@ -1,0 +1,44 @@
+{
+  "id": "DREAM",
+  "label": "The DSIM builder build (screenshots 2026-09-22) — the ceiling, not the team's robot.",
+  "status": "fixed",
+  "spec": {
+    "name": "Robie Mcrobotface",
+    "teamName": "Reflection",
+    "teamNumber": 19859,
+    "drivetrain": "mecanum",
+    "driveRpm": 510,
+    "massLb": 24.1,
+    "length": 14.5,
+    "width": 16,
+    "intake": "sloped",
+    "ballStorage": 4,
+    "intakeMount": "frontback",
+    "scoreMode": "twinturret",
+    "shooterMount": "front",
+    "bbMech": { "launcher": { "kind": "twinturret", "mount": "front", "mount2": "back", "hoodDeg": 75 }, "lift": { "kind": "vslide", "mount": "frontleft" } }
+  },
+  "expect": {
+    "drivetrain": "mecanum",
+    "launcher": "twinturret",
+    "launcherMount": "front",
+    "launcherMount2": "back",
+    "lift": "vslide@frontleft",
+    "intakeMount": "frontback",
+    "ballStorage": 4
+  },
+  "limits": {
+    "fireRate": 13,
+    "aimSettle": 0,
+    "vFire": 100,
+    "tSecure": 0,
+    "vIntake": 100,
+    "intakeSuccess": 1,
+    "intakeRetry": 0.4,
+    "turretYawRange": 360,
+    "turretSlew": 7,
+    "turretHome": 0,
+    "hpDelay": 0
+  },
+  "perturb": { "shotAccuracy": 1 }
+}

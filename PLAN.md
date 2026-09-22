@@ -566,6 +566,30 @@ unproven base.
 - **Solo red score is non-zero** (10) from staged GARDEN/zone elements. Record score = blue total − red's foul points; red's points are irrelevant.
 - **Downloads:** one package per command, only what the next stage needs (user's internet went down on a batched install).
 
+**S0 RESULT (2026-09-22): PASS — 38/38 checks** (`harness/s0-check.ts`, log `outputs/s0/s0-gate.log`).
+Harness: `harness/{dsim,profiles,filters,perturb,guards,control,export,pool,worker,jobs,pin,geom,rng}.ts`, profiles `profiles/{real-v0,dream}.json`. `dsim.ts` is the ONLY file that imports DSIM.
+
+| area | proven |
+|---|---|
+| pin | re-pinned 610 files (`a95f38ea…`): now skips `.impeccable/` (a design-tool hook writes a cache into dsim-main) and symlinks (9 skill links). Verified by mtime that nothing else changed |
+| profiles | REAL-v0 and DREAM coerce exactly as asked; 300 envelope samples, zero silent clamps. DSIM-legal REAL-v0 envelope: L 13.5–15, W 14.5–17, RPM 200–600, mass ≥ 21.3 |
+| assists | the SIM reads the setup's assists (`spawn.ts` 807–810); `spec.assists` is UI-only |
+| layer B | at DREAM limits + no rule holds it is an exact identity (full JSON); every gate unit-tested: intake speed/dwell/failure, fire speed/settle/rate, turret travel + slew, human-player delay / AUTO hold / G427 C hold with 2-tick lookahead, driver reaction + 10 Hz hold |
+| replays | filtered + human-tier runs replay bit-exact in DSIM; exported file re-verifies |
+| layer C | miss = vertical speed capped so the apex stays under the CELL opening (certain at any range). **Scaling horizontal speed was tried first and scored 2 of 4 "misses"** — DSIM's descending accept window is long. Forced-miss counts match sampled accuracy within 3σ (2,380 vs 2,345 ± 124) |
+| guards | each rule verified to fire AND not to fire on the legal twin: G417 frame contact, G409 (HIVE spills only, not landed shots), G407, G426, G427 C |
+| determinism | same seed with every layer on → identical world |
+| crash test | 800 random-agent matches on sampled robots: all settle, 56 elements, finite, zero invalid-state; ~9–12k matches/hour on 8 persistent workers |
+
+**DSIM physics oddities, measured (informational; a strategy must not profit from them):**
+- A struck ball faster than ANY point of the robot (speed + spin × corner radius) by > 10 in/s occurs ~18× per random match, mostly a ball squeezed between robot and wall, ejected at DSIM's 90 in/s cap (feedback 000 #3). The first two detector versions over-counted (absolute threshold; centre speed ignoring spin) — fixed and tested.
+- A ball > 1 in inside a solid chassis face for ≥ 0.5 s occurs ~1.7× per random match, up to ~3 in overlap (feedback 000 #2 reports ~2.1 in).
+
+**Decisions made in S0:**
+- Human-player entry in AUTO: held until TELEOP by default (G401 "indirectly interact" ambiguity); a switch exists, and its value is reported separately.
+- G427 C enforced in the filter: no human-player entry while any robot covers or is about to cover the drop area.
+- The plan's 10k-match crash test ran as 800 here (short-command rule); a 10k run is one command for the user's terminal: `dsim-main/node_modules/.bin/tsx harness/s0-check.ts --matches 10000`.
+
 ### 14.3 Is the whole pipeline planned, with room to keep improving?
 
 **Planned:**

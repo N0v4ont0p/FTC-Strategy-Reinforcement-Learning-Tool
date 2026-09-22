@@ -1,7 +1,13 @@
 {
   "pinnedAt": "2026-09-22",
   "source": "dsim-main (zip snapshot, alpha, BIOBUZZ scored)",
-  "files": 612,
-  "treeSha256": "69dbcc6d3c0831800baaa651808a5f2d5ae1928be794cc312497a91fd989767a",
-  "rule": "never edit dsim-main/src; node_modules only via npm ci"
+  "files": 610,
+  "treeSha256": "a95f38eaccb81f0ed0366de0e9877da59f4ed342ff3e5041d9cb8c2a1c59b18b",
+  "excludes": [
+    "node_modules",
+    ".DS_Store",
+    ".impeccable",
+    "symlinks"
+  ],
+  "rule": "never edit dsim-main source; node_modules only via npm ci"
 }

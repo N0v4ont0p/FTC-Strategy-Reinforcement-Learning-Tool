@@ -1,0 +1,46 @@
+{
+  "id": "REAL-v0",
+  "label": "Team 19859 concept — twin turret, hopper 4, no FLOWER scoring, back intake, mecanum. Not built: performance is a range.",
+  "status": "provisional (no measurements; PLAN.md §2.3)",
+  "spec": {
+    "name": "REAL-v0",
+    "teamName": "Reflection",
+    "teamNumber": 19859,
+    "drivetrain": "mecanum",
+    "driveRpm": { "min": 300, "max": 600, "nominal": 435 },
+    "massLb": { "min": 22, "max": 42, "nominal": 30 },
+    "length": { "min": 13.5, "max": 15, "nominal": 15 },
+    "width": { "min": 14.5, "max": 17, "nominal": 16 },
+    "intake": "sloped",
+    "ballStorage": 4,
+    "intakeMount": "back",
+    "scoreMode": "twinturret",
+    "shooterMount": "front",
+    "bbMech": { "launcher": { "kind": "twinturret", "mount": "front", "mount2": "back", "hoodDeg": 75 }, "lift": null }
+  },
+  "expect": {
+    "drivetrain": "mecanum",
+    "launcher": "twinturret",
+    "launcherMount": "front",
+    "launcherMount2": "back",
+    "lift": null,
+    "intakeMount": "back",
+    "ballStorage": 4
+  },
+  "limits": {
+    "fireRate": { "min": 2, "max": 13, "nominal": 5, "unit": "shots/s; 13 = DSIM's own clock" },
+    "aimSettle": { "min": 0, "max": 1.0, "nominal": 0.3, "unit": "s slow before a shot releases" },
+    "vFire": { "min": 0, "max": 100, "nominal": 20, "unit": "in/s max speed while firing; 100 = unlimited" },
+    "tSecure": { "min": 0, "max": 0.5, "nominal": 0.15, "unit": "s of slow intake before capture" },
+    "vIntake": { "min": 10, "max": 100, "nominal": 40, "unit": "in/s max speed to capture; 100 = unlimited" },
+    "intakeSuccess": { "min": 0.7, "max": 1.0, "nominal": 0.9, "unit": "probability an intake attempt works first time" },
+    "intakeRetry": { "min": 0.4, "max": 0.4, "nominal": 0.4, "unit": "s lost on a failed attempt" },
+    "turretYawRange": { "min": 180, "max": 360, "nominal": 270, "unit": "deg of travel centred on home; 360 = unlimited" },
+    "turretSlew": { "min": 2, "max": 7, "nominal": 4, "unit": "rad/s" },
+    "turretHome": { "min": 0, "max": 0, "nominal": 0, "unit": "deg vs robot front, both turrets (shooters face front)" },
+    "hpDelay": { "min": 0.5, "max": 2.0, "nominal": 1.0, "unit": "s from cue to human-player entry" }
+  },
+  "perturb": {
+    "shotAccuracy": { "min": 0.6, "max": 1.0, "nominal": 0.85, "unit": "probability a released shot lands (layer C)" }
+  }
+}

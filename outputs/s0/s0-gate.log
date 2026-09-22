@@ -1,0 +1,44 @@
+PASS  1 pin: dsim-main source unchanged since pinning — 610 files, a95f38eaccb8…
+PASS  2 REAL-v0 nominal: DSIM built exactly what was asked
+PASS  2 DREAM: DSIM built exactly the builder robot
+PASS  2 REAL-v0 envelope: 300 samples, every one built as asked (no silent clamps)
+PASS  3 robot assists: robot-centric, aim assist on, auto-intake off, auto-fire off
+PASS  4 layer B with ideal limits changes nothing (full-JSON identical)
+PASS  5 REAL-v0 + human driver model: replay reproduces score, hash, ticks — score 29, hash 326901394
+PASS  5 exported replay file re-verifies identically
+PASS  6 intake blocked above vIntake
+PASS  6 intake passes only after tSecure of slow driving — first at tick 8
+PASS  6 failed intake attempt costs intakeRetry — first at tick 25 (0.4 s = 24)
+PASS  6 fire blocked above vFire
+PASS  6 fire waits aimSettle after slowing — first at tick 17 (0.3 s = 18)
+PASS  6 fire-rate cap: 0.3 s after a shot blocked, 0.5 s allowed at 2/s
+PASS  6 turret: target outside travel never fires
+PASS  6 turret: reachable target fires after slewing at turretSlew — first at tick 15, expected ~16
+PASS  6 HP: press during AUTO is held while hpInAuto=forbid
+PASS  6 HP: TELEOP press arrives after hpDelay, exactly once — at tick 60
+PASS  6 HP: press held while a robot covers the drop zone (G427 C)
+PASS  6 HP: press held for a robot about to enter the drop zone this tick
+PASS  6 driver: input reaches the robot 0.25 s late, on the 10 Hz grid — tick 24
+PASS  6 driver: one-tick human-player press survives the hold window
+PASS  7 accuracy 1.0: preloads tip the HIVE in AUTO — tips 1
+PASS  7 accuracy 0.0: every launched element misses (no TIP, CELL untouched) — launched 4, cell holds 3
+PASS  7 a perturbed run is flagged replay-inexact
+PASS  8 G417: driving into the HIVE frame is flagged
+PASS  8 a robot that never moves has no violations — {}
+PASS  8 G409: capture 10 ticks after a spill is flagged
+PASS  8 anomaly: an unexplained 100 in/s ground element is flagged
+PASS  8 anomaly: an element buried in the chassis for 0.5 s is flagged once
+PASS  8 anomaly: a ball pushed at robot speed, or rolling on after the robot stops, is NOT flagged
+PASS  8 G409: catching a landed missed shot is NOT flagged
+PASS  8 G426 (conservative): a press that reached DSIM in AUTO is flagged
+PASS  8 G407: DSIM warning is counted as a violation
+PASS  9 same seed, every layer on → identical world (full JSON)
+PASS  10 crash test: 800 random-agent matches on sampled REAL-v0 robots, all settle with every invariant
+PASS  10 forced-miss count matches the sampled accuracies (within 3 sigma) — 2380 missed of 11954, expected 2345 ± 124
+      800 matches in 318 s = 9068 matches/hour on 8 workers
+      random-agent score: median 28, max 71; tips/match 0.89
+      random agent's rule hits (expected, it is random): G417 15670, G409 14, G407 231, G426 0, G427C 0
+      DSIM oddities seen: fast element 14601, embedded element 1398
+PASS  10 filters never let a conservative-rule HP violation through (G426, G427C = 0)
+
+S0 GATE: ALL PASS

@@ -4,6 +4,7 @@
   "type": "module",
   "description": "BIOBUZZ strategy/pathing AI on top of a pinned, unmodified DSIM (see PLAN.md)",
   "scripts": {
+    "start": "dsim-main/node_modules/.bin/tsx train/studio.ts",
     "train": "dsim-main/node_modules/.bin/tsx train/cli.ts",
     "viewer:build": "dsim-main/node_modules/.bin/vite build viewer --config viewer/vite.config.ts --logLevel warn",
     "typecheck": "dsim-main/node_modules/.bin/tsc -p tsconfig.json",
@@ -11,6 +12,7 @@
     "lab:s1": "dsim-main/node_modules/.bin/tsx harness/s1/run.ts",
     "check:s1": "dsim-main/node_modules/.bin/tsx harness/s1/check.ts",
     "check:train": "dsim-main/node_modules/.bin/tsx train/check.ts",
-    "pin": "dsim-main/node_modules/.bin/tsx harness/pin.ts"
+    "pin": "dsim-main/node_modules/.bin/tsx harness/pin.ts",
+    "imitate": "dsim-main/node_modules/.bin/tsx train/imitate.ts"
   }
 }

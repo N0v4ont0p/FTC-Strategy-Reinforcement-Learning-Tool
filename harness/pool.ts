@@ -45,6 +45,7 @@ export class WorkerPool {
       else w.reject(new Error(`job ${msg.id} failed: ${msg.error}`));
     });
     p.on('exit', (code) => {
+      markReady(); // a worker killed before it was ready must not leave map() waiting forever
       if (this.closed) return;
       // a worker must never vanish silently: fail everything in flight
       for (const [, w] of this.waiting) w.reject(new Error(`worker exited with code ${code}`));
@@ -65,12 +66,13 @@ export class WorkerPool {
   /** run every job; results in job order. `onDone` fires per finished job (progress bars). */
   async map<T>(jobs: Job[], onDone?: (done: number, total: number, result: T, index: number) => void): Promise<T[]> {
     await Promise.all(this.slots.map((s) => s.ready));
+    if (this.closed) throw new Error('aborted');
     const out = new Array<T>(jobs.length);
     let next = 0;
     let done = 0;
     await Promise.all(
       this.slots.map(async (slot) => {
-        while (next < jobs.length) {
+        while (next < jobs.length && !this.closed) {
           const i = next++;
           out[i] = await this.run<T>(slot, jobs[i]);
           onDone?.(++done, jobs.length, out[i], i);
@@ -80,9 +82,12 @@ export class WorkerPool {
     return out;
   }
 
+  /** kill every worker; anything still running is rejected with 'aborted' (never left hanging) */
   close(): void {
     this.closed = true;
     for (const s of this.slots) s.p.kill();
+    for (const [, w] of this.waiting) w.reject(new Error('aborted'));
+    this.waiting.clear();
   }
 }
 

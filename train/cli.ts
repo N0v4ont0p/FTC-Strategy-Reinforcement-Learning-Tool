@@ -1,11 +1,13 @@
-// `npm run train` — the training launcher and live terminal dashboard. Independent of Claude.
-//   npm run train -- --name solo --algo es --pop 256          (resumes if the run exists)
+// `npm run train` — train from the terminal with a live dashboard (the studio, ./start.sh, is the
+// full UI; this starts training immediately). Independent of Claude.
+//   npm run train -- --name solo --algo ga --pop 128          (resumes if the run exists)
 //   npm run train -- --name solo2 --fresh                     (refuses to touch an existing run)
 // Keys: [p] pause/resume  [o] open the viewer  [q] stop after this generation (checkpointed)
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { Engine, ROOT, defaultConfig, type GenSummary, type RunConfig } from './engine';
+import { init } from '../harness/dsim';
 import { startServer } from './server';
 import type { AlgoName } from './algos';
 
@@ -17,13 +19,13 @@ const arg = (k: string, d?: string): string | undefined => {
 };
 const flag = (k: string): boolean => argv.includes(`--${k}`);
 if (flag('help')) {
-  console.log(`npm run train -- [--name solo] [--algo es|ga] [--pop 256] [--workers 8] [--stage curriculum|auto|full]
-                 [--driver human|oracle] [--profile profiles/real-v0.json] [--fixed-robot] [--seed 1]
-                 [--port 4747] [--max-gens 0] [--fresh] [--no-open] [--plain]`);
+  console.log(`npm run train -- [--name solo] [--algo ga|es] [--pop 128] [--workers 8] [--stage full|auto|curriculum]
+                 [--driver oracle|human] [--init imitation|random] [--profile profiles/real-v0.json] [--fixed-robot]
+                 [--seed 1] [--port 4747] [--max-gens 0] [--fresh] [--no-open] [--plain]`);
   process.exit(0);
 }
 const name = arg('name', 'solo')!;
-const algo = (arg('algo', 'es') as AlgoName) ?? 'es';
+const algo = (arg('algo', 'ga') as AlgoName) ?? 'ga';
 if (algo !== 'es' && algo !== 'ga') throw new Error('--algo must be es or ga');
 const runDir = join(ROOT, 'runs', name);
 const exists = existsSync(join(runDir, 'checkpoint.json'));
@@ -39,6 +41,7 @@ if (arg('stage')) cfg.stage = arg('stage') as RunConfig['stage'];
 if (arg('driver')) cfg.driver = arg('driver') as RunConfig['driver'];
 if (arg('profile')) cfg.profile = arg('profile')!;
 if (flag('fixed-robot')) cfg.sampleProfile = false;
+if (arg('init')) cfg.init = arg('init') as RunConfig['init'];
 cfg.maxGens = Number(arg('max-gens', '0'));
 const port = Number(arg('port', '4747'));
 
@@ -48,7 +51,9 @@ if (!existsSync(join(ROOT, 'train/public/index.html'))) {
   execFileSync(join(ROOT, 'dsim-main/node_modules/.bin/vite'), ['build', join(ROOT, 'viewer'), '--config', join(ROOT, 'viewer/vite.config.ts'), '--logLevel', 'error'], { stdio: 'inherit' });
 }
 
-const engine = new Engine(cfg, true);
+await init();
+const engine = exists ? Engine.open(name) : Engine.create(cfg, (s) => console.log(s));
+if (exists && (arg('workers') || arg('max-gens'))) engine.setConfig({ ...(arg('workers') ? { workers: cfg.workers } : {}), ...(arg('max-gens') ? { maxGens: cfg.maxGens } : {}) });
 // a resumed run keeps the settings it was created with — never silently ignore a flag that asks
 // for something else
 if (exists) {
@@ -67,7 +72,7 @@ if (exists) {
     process.exit(1);
   }
 }
-const server = startServer(engine, port);
+const server = startServer(port, engine);
 const plain = flag('plain') || !process.stdout.isTTY;
 
 // ---------- live state ----------
@@ -193,10 +198,11 @@ process.on('SIGTERM', quit);
 const timer = setInterval(draw, 250);
 if (!flag('no-open') && !plain) spawn('open', [server.url], { stdio: 'ignore', detached: true }).unref();
 
-await engine.run();
+engine.start();
+await new Promise<void>((r) => engine.once('stopped', () => r()));
 clearInterval(timer);
 draw();
 restore();
-server.close();
+await server.close();
 console.log(`\nstopped at generation ${engine.gen}; checkpoint saved in ${runDir}. Resume with: npm run train -- --name ${name}`);
 process.exit(0);

@@ -12,14 +12,17 @@ import { BB_DEFAULT_SPEC } from '../dsim-main/src/games/biobuzz/coerce';
 import { createBiobuzzWorld } from '../dsim-main/src/games/biobuzz/spawn';
 import { biobuzzStep } from '../dsim-main/src/games/biobuzz/step';
 import { bbSettled } from '../dsim-main/src/games/biobuzz/settle';
-import { bbActiveStartLegal } from '../dsim-main/src/games/biobuzz/start';
+import { bbActiveStartLegal, bbEvalStart } from '../dsim-main/src/games/biobuzz/start';
+import { bbAimTarget, bbCellSideOf, bbFlowerAtIntake } from '../dsim-main/src/games/biobuzz/play';
+import { bbMouths } from '../dsim-main/src/games/biobuzz/robot';
+import { BB_TIP_RELEASE_S, BB_TIP_SWING_S } from '../dsim-main/src/games/biobuzz/hive';
 import { newSettleClock, settleStep } from '../dsim-main/src/sim/settle';
 import { ReplayRecorder, verifyReplay, worldResult, type Replay, type ReplayResult } from '../dsim-main/src/sim/replay';
 import { localizeCommand } from '../dsim-main/src/net/protocol';
 import { ZERO_CMD } from '../dsim-main/src/sim/goal';
 
 export type { Alliance, Replay, ReplayResult, RobotCommand, RobotSpec, RobotState, StartPose, Vec2, World };
-export { BB, C, ZERO_CMD, biobuzzStep, driveParams, footprintCorners, footprintExtents, localizeCommand, verifyReplay, worldResult };
+export { BB, BB_TIP_RELEASE_S, BB_TIP_SWING_S, C, ZERO_CMD, bbAimTarget, bbCellSideOf, bbEvalStart, bbFlowerAtIntake, bbMouths, biobuzzStep, driveParams, footprintCorners, footprintExtents, localizeCommand, verifyReplay, worldResult };
 
 export const DT = C.SIM_DT;
 
@@ -153,5 +156,9 @@ export interface BbState {
   hives: Record<Alliance, { up: 'north' | 'south'; contents: number[]; tips: number; tipping: number; released: boolean }>;
   nectarStock: Record<Alliance, number>;
   nectarDue: Record<Alliance, number>;
+  /** 'ok' = the human-player button would enter a NECTAR now */
+  nectarWhy: Record<Alliance, string>;
+  /** FLOWER stacks, bottom first (element ids), in BB.BB_FLOWERS order */
+  flowers: { stack: number[] }[];
 }
 export const bb = (w: World): BbState => (w as unknown as { biobuzz: BbState }).biobuzz;

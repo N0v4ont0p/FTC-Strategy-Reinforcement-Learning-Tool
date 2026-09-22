@@ -14,7 +14,7 @@ export const K_NEAR = 6; // nearest collectable elements seen
 
 // scoring spots measured in S1 (REAL-v0, turret settled) — blue frame
 type Spot = { x: number; y: number };
-const SPOTS: Record<'north' | 'south', Spot[]> = (() => {
+export const SPOTS: Record<'north' | 'south', Spot[]> = (() => {
   const env = JSON.parse(readFileSync(join(root, 'outputs/s1/envelope.json'), 'utf8')) as Record<string, { x: number; y: number; entered: boolean }[]>;
   return {
     north: env['REAL-v0:north'].filter((c) => c.entered).map(({ x, y }) => ({ x, y })),

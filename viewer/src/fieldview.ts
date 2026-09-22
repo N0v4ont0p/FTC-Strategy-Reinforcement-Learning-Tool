@@ -1,27 +1,45 @@
 // THE FIELD — drawn by DSIM's own BIOBUZZ renderers (read-only imports), from the blue drivers' wall
 // exactly as DSIM's camera does (translate → scale(s, −s) → rotate(viewAngle)).
-//   · swarm mode: every robot of one generation, replayed from its recorded path
-//   · champion mode: the best-ever match re-simulated in DSIM's own ReplayPlayer
-import type { Replay } from '../../dsim-main/src/sim/replay';
-import type { RobotState, Vec2, World } from '../../dsim-main/src/types';
+//   · swarm: every robot of one generation from its recorded path — turrets, hopper, and a line to
+//     what it chose to do next, coloured by the option
+//   · focus: ONE life redrawn EXACTLY as it was trained — every element, the HIVE, the score —
+//     from frames recorded inside the training episode itself (so forced misses are shown as they
+//     happened; a DSIM replay can differ there)
+import type { Artifact, RobotState, Vec2, World } from '../../dsim-main/src/types';
 import { drawBiobuzzField, drawHiveCanopy } from '../../dsim-main/src/games/biobuzz/drawField';
 import { drawBiobuzzRobot } from '../../dsim-main/src/games/biobuzz/drawRobot';
 import { drawBiobuzzBalls } from '../../dsim-main/src/games/biobuzz/draw';
 import { viewAngleOf } from '../../dsim-main/src/sim/field';
 import { rot } from '../../dsim-main/src/math';
-import { AUTO_START, TRACK_STRIDE, decodeTrack, type GenFile } from './data';
+import { AUTO_START, OPTIONS, TRACK_FIELDS, TRACK_STRIDE, decodeTrack, type FocusFile, type Frames, type GenFile, type Individual } from './data';
 
 const VIEW = viewAngleOf('blue');
 /** world-space "screen up", exactly DSIM's Camera.screenUpWorld(): rot({0, 1}, −viewAngle) */
 const UP: Vec2 = rot({ x: 0, y: 1 }, -VIEW);
 const css = (v: string): string => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const COLOR: Record<string, string> = { y: 'yellow', r: 'red', b: 'blue' };
 
 interface Ghost {
+  ind: Individual;
   path: Float32Array;
-  deathTick: number;
-  death: string;
-  rank: number;
   spec: RobotState['spec'];
+  shots: number[]; // ticks of shots that went in
+}
+
+export interface FrameInfo {
+  mode: 'swarm' | 'focus';
+  tick: number;
+  end: number;
+  alive: number;
+  total: number;
+  // focus only
+  phase?: string;
+  phaseLeft?: number;
+  score?: number;
+  hopper?: string;
+  option?: string;
+  optionKind?: number;
+  tips?: number;
 }
 
 export class FieldView {
@@ -32,20 +50,22 @@ export class FieldView {
   private dpr = 1;
   private scale = 1;
   private field: World | null = null;
-  private ghosts: Ghost[] = [];
   private template: RobotState | null = null;
-  mode: 'swarm' | 'champion' = 'swarm';
+  private ghosts: Ghost[] = [];
+  mode: 'swarm' | 'focus' = 'swarm';
   tick = AUTO_START;
   endTick = AUTO_START;
   speed = 4;
   playing = true;
   gen: GenFile | null = null;
-  // champion
-  private player: import('../../dsim-main/src/sim/replay').ReplayPlayer | null = null;
-  private replay: Replay | null = null;
-  champMeta: { title?: string; score?: number; replayExact?: boolean } = {};
-  onFrame: (info: { alive: number; total: number; tick: number; end: number }) => void = () => {};
-  /** called when a swarm replay reaches its end and loops — the place to switch generations */
+  // focus
+  focus: FocusFile | null = null;
+  private fw: World | null = null;
+  private fi = -1; // index of the last applied frame
+  private fr: Frames | null = null;
+  private tipsAt: number[] = [];
+  onFrame: (info: FrameInfo) => void = () => {};
+  /** a replay reached its end and loops — the place to switch generations */
   onLoop: () => void = () => {};
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -78,7 +98,7 @@ export class FieldView {
     ctx.rotate(VIEW);
   }
 
-  /** the static field (mat, tape, HIVE, FLOWERS, staged elements) once per resize */
+  /** the static field (mat, tape, HIVE, FLOWERS, staged elements) once per resize — swarm backdrop */
   private renderFieldLayer(): void {
     if (!this.field || !this.w) return;
     this.fieldLayer.width = this.canvas.width;
@@ -90,66 +110,99 @@ export class FieldView {
     drawBiobuzzField(c, this.field, UP);
   }
 
+  // ─────────────────────────────── loading ───────────────────────────────
   loadGeneration(g: GenFile): void {
     this.gen = g;
     this.mode = 'swarm';
     const base = this.template!;
-    this.ghosts = g.individuals.map((ind, rank) => {
+    this.ghosts = g.individuals.map((ind) => {
       const spec = { ...base.spec };
       if (ind.point['spec.length']) spec.length = ind.point['spec.length'];
       if (ind.point['spec.width']) spec.width = ind.point['spec.width'];
-      return { path: decodeTrack(ind.track), deathTick: ind.deathTick, death: ind.death, rank, spec };
+      return { ind, path: decodeTrack(ind.track), spec, shots: (ind.events ?? []).filter((e) => e[1] === 'shotIn').map((e) => e[0]) };
     });
-    this.endTick = Math.max(AUTO_START + 60, ...this.ghosts.map((q) => q.deathTick)) + 90;
+    this.endTick = Math.max(AUTO_START + 60, ...this.ghosts.map((q) => q.ind.deathTick)) + 60;
     this.tick = AUTO_START;
   }
 
-  async loadChampion(data: { meta: { title?: string; score?: number; replayExact?: boolean }; replay: Replay }): Promise<void> {
-    const [{ initPhysics }, { ReplayPlayer }] = await Promise.all([import('../../dsim-main/src/sim/physicsEngine'), import('../../dsim-main/src/sim/replay')]);
-    await initPhysics();
-    this.replay = data.replay;
-    this.champMeta = data.meta;
-    this.player = new ReplayPlayer(data.replay);
-    this.mode = 'champion';
-    this.tick = 0;
-    this.endTick = data.replay.ticks;
+  loadFocus(f: FocusFile): void {
+    this.focus = f;
+    this.fr = f.frames;
+    this.mode = 'focus';
+    this.tipsAt = f.events.filter((e) => e[1] === 'tip').map((e) => e[0]);
+    this.resetFocus();
+    this.tick = f.frames.f[0]?.t ?? 0;
+    this.endTick = f.frames.f[f.frames.f.length - 1]?.t ?? 0;
+    this.seekFocus(this.tick);
   }
 
-  /** jump to a tick (champion mode re-simulates from the start when going backwards) */
-  async seek(t: number): Promise<void> {
-    if (this.mode === 'swarm') {
-      this.tick = t;
-      return;
+  private resetFocus(): void {
+    const fr = this.fr!;
+    const w = structuredClone(this.field!);
+    const r = w.robots[0];
+    r.spec = fr.spec as RobotState['spec'];
+    r.hopper = [];
+    w.balls = fr.meta.map(([id, color, rad]) => {
+      const b = { id, color, pos: { x: 0, y: 0 }, z: 0, vel: { x: 0, y: 0 }, vz: 0, state: { kind: 'ground' } } as unknown as Artifact & { r?: number };
+      if (rad !== null) b.r = rad;
+      return b;
+    });
+    this.fw = w;
+    this.fi = -1;
+  }
+
+  /** apply recorded frames up to tick t (going backwards re-applies from the start) */
+  private seekFocus(t: number): void {
+    const fr = this.fr!;
+    if (this.fi >= 0 && fr.f[this.fi].t > t) this.resetFocus();
+    const w = this.fw!;
+    const r = w.robots[0];
+    while (this.fi + 1 < fr.f.length && fr.f[this.fi + 1].t <= t) {
+      const q = fr.f[++this.fi];
+      r.pos = { x: q.r[0], y: q.r[1] };
+      r.heading = q.r[2];
+      r.turretHeading = q.r[3];
+      r.bbTurret2Heading = q.r[4];
+      r.bbTurretPitch = q.r[5];
+      r.bbTurret2Pitch = q.r[6];
+      r.hopper = [...q.h].map((c) => COLOR[c] ?? 'yellow') as RobotState['hopper'];
+      for (let i = 0; i < w.balls.length && 3 * i + 2 < q.b.length; i++) {
+        const b = w.balls[i];
+        b.pos = { x: q.b[3 * i], y: q.b[3 * i + 1] };
+        b.z = q.b[3 * i + 2];
+      }
+      for (const [i, st] of q.s ?? []) if (w.balls[i]) w.balls[i].state = st as Artifact['state'];
+      if (q.g) (w as unknown as { biobuzz: unknown }).biobuzz = structuredClone(q.g);
+      w.tick = q.t;
     }
-    if (!this.replay) return;
-    const { ReplayPlayer } = await import('../../dsim-main/src/sim/replay');
-    if (!this.player || t < this.player.world.tick) this.player = new ReplayPlayer(this.replay);
-    while (this.player.world.tick < t && this.player.stepOnce());
-    this.tick = this.player.world.tick;
+  }
+
+  /** jump to a tick */
+  seek(t: number): void {
+    this.tick = Math.max(0, Math.min(this.endTick, t));
+    if (this.mode === 'focus' && this.fr) this.seekFocus(this.tick);
   }
 
   /** advance by one animation frame */
   step(dtMs: number): void {
     if (!this.playing) return;
     const ticks = Math.max(1, Math.round((dtMs / 1000) * 60 * this.speed));
-    if (this.mode === 'swarm') {
-      this.tick += ticks;
-      if (this.tick > this.endTick) {
-        this.tick = AUTO_START;
-        this.onLoop();
-      }
-    } else if (this.player) {
-      for (let k = 0; k < ticks && this.player.stepOnce(); k++);
-      this.tick = this.player.world.tick;
+    this.tick += ticks;
+    if (this.tick > this.endTick) {
+      this.tick = this.mode === 'swarm' ? AUTO_START : (this.fr?.f[0]?.t ?? 0);
+      if (this.mode === 'focus') this.resetFocus();
+      this.onLoop();
     }
+    if (this.mode === 'focus' && this.fr) this.seekFocus(this.tick);
   }
 
+  // ─────────────────────────────── drawing ───────────────────────────────
   draw(): void {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = '#0e0b08';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    if (this.mode === 'champion' && this.player) return this.drawChampion();
+    if (this.mode === 'focus') return this.drawFocus();
     ctx.drawImage(this.fieldLayer, 0, 0);
     if (!this.gen || !this.template) return;
     this.apply(ctx);
@@ -157,33 +210,83 @@ export class FieldView {
     const n = this.ghosts.length;
     let alive = 0;
     const r = this.template;
-    // back to front: weakest first, champion last (on top)
+    const lines = Math.min(n, 24); // the top robots show what they are going for
+    // back to front: weakest first, the generation's best last (on top)
     for (let k = n - 1; k >= 0; k--) {
       const g = this.ghosts[k];
-      const pose = poseAt(g.path, Math.min(T, g.deathTick));
-      if (!pose) continue;
-      if (T <= g.deathTick) {
+      const p = sampleAt(g.path, Math.min(T, g.ind.deathTick));
+      if (!p) continue;
+      if (T <= g.ind.deathTick) {
         alive++;
-        r.pos = { x: pose[0], y: pose[1] };
-        r.heading = pose[2];
-        r.turretHeading = pose[2];
-        r.bbTurret2Heading = pose[2] + Math.PI;
+        const a = k === 0 ? 1 : k < Math.max(3, n * 0.1) ? 0.75 : 0.3;
+        if (k < lines) this.intent(g, p, T, a);
+        r.pos = { x: p[0], y: p[1] };
+        r.heading = p[2];
+        r.turretHeading = p[3];
+        r.bbTurret2Heading = p[4];
+        r.hopper = Array.from({ length: Math.round(p[5]) }, () => 'yellow') as RobotState['hopper'];
         r.spec = g.spec;
         ctx.save();
-        ctx.globalAlpha = k === 0 ? 1 : k < Math.max(3, n * 0.1) ? 0.7 : 0.26;
-        if (k === 0) this.halo(pose);
+        ctx.globalAlpha = a;
+        if (k === 0) this.halo(p);
         drawBiobuzzRobot(ctx, r, false, [], UP);
         ctx.restore();
-      } else if (g.death !== 'survived' && T - g.deathTick < 120) {
-        this.deathMark(pose, g.death, 1 - (T - g.deathTick) / 120);
+        if (g.shots.some((s) => s <= T && T - s < 12)) this.flash(p, a);
+      } else if (g.ind.death !== 'survived' && T - g.ind.deathTick < 120) {
+        this.deathMark(p, g.ind.death, 1 - (T - g.ind.deathTick) / 120);
       }
     }
     if (this.ghosts[0]) this.trail(this.ghosts[0], T);
     if (this.field) drawHiveCanopy(ctx, this.field);
-    this.onFrame({ alive, total: n, tick: T, end: this.endTick });
+    this.onFrame({ mode: 'swarm', alive, total: n, tick: T, end: this.endTick });
   }
 
-  private halo(p: Float32Array | number[]): void {
+  /** a thin line from the robot to what it is going for, in that option's colour */
+  private intent(g: Ghost, p: ArrayLike<number>, T: number, a: number): void {
+    const d = g.ind.decisions;
+    if (!d?.length) return;
+    let lo = 0;
+    let hi = d.length - 1;
+    if (d[0][0] > T) return;
+    while (lo < hi) {
+      const m = (lo + hi + 1) >> 1;
+      if (d[m][0] <= T) lo = m;
+      else hi = m - 1;
+    }
+    const q = d[lo];
+    const opt = OPTIONS[q[1]];
+    if (!opt) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = a * 0.9;
+    ctx.strokeStyle = opt.color;
+    ctx.fillStyle = opt.color;
+    ctx.lineWidth = 0.6;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(p[0], p[1]);
+    ctx.lineTo(q[2], q[3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(q[2], q[3], 1.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  private flash(p: ArrayLike<number>, a: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = css('--honey-hi') || '#f6d38a';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(p[0], p[1], 11, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private halo(p: ArrayLike<number>): void {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = 1;
@@ -197,24 +300,25 @@ export class FieldView {
 
   private trail(g: Ghost, T: number): void {
     const ctx = this.ctx;
-    const end = Math.min(T, g.deathTick);
+    const F = TRACK_FIELDS;
+    const end = Math.min(T, g.ind.deathTick);
     const i1 = Math.floor(end / TRACK_STRIDE) - 1;
-    const i0 = Math.max(0, i1 - 60);
+    const i0 = Math.max(0, i1 - 100);
     if (i1 <= i0) return;
     ctx.save();
     ctx.strokeStyle = css('--honey') || '#e9a23b';
     ctx.lineWidth = 0.9;
     ctx.globalAlpha = 0.8;
     ctx.beginPath();
-    for (let i = i0; i <= i1 && 3 * i + 1 < g.path.length; i++) {
-      if (i === i0) ctx.moveTo(g.path[3 * i], g.path[3 * i + 1]);
-      else ctx.lineTo(g.path[3 * i], g.path[3 * i + 1]);
+    for (let i = i0; i <= i1 && F * i + 1 < g.path.length; i++) {
+      if (i === i0) ctx.moveTo(g.path[F * i], g.path[F * i + 1]);
+      else ctx.lineTo(g.path[F * i], g.path[F * i + 1]);
     }
     ctx.stroke();
     ctx.restore();
   }
 
-  private deathMark(p: Float32Array | number[], kind: string, a: number): void {
+  private deathMark(p: ArrayLike<number>, kind: string, a: number): void {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = Math.max(0, a);
@@ -238,33 +342,78 @@ export class FieldView {
     ctx.restore();
   }
 
-  private drawChampion(): void {
+  private drawFocus(): void {
     const ctx = this.ctx;
-    const w = this.player!.world;
+    const w = this.fw;
+    const fr = this.fr;
+    if (!w || !fr || this.fi < 0) return;
     this.apply(ctx);
     drawBiobuzzField(ctx, w, UP);
+    const q = fr.f[this.fi];
+    // what it is going for
+    if (q.o) {
+      const opt = OPTIONS[q.o[0]];
+      if (opt) {
+        const r0 = w.robots[0];
+        ctx.save();
+        ctx.strokeStyle = opt.color;
+        ctx.fillStyle = opt.color;
+        ctx.lineWidth = 0.9;
+        ctx.setLineDash([3, 2]);
+        ctx.beginPath();
+        ctx.moveTo(r0.pos.x, r0.pos.y);
+        ctx.lineTo(q.o[2], q.o[3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(q.o[2], q.o[3], 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
     for (const r of w.robots) {
       const held = w.balls.filter((b) => b.state.kind === 'held' && (b.state as { robot: number }).robot === r.id);
-      drawBiobuzzRobot(ctx, r, false, held, UP, w);
+      drawBiobuzzRobot(ctx, r, q.r[7] === 1, held, UP, w);
     }
     drawBiobuzzBalls(ctx, w, UP);
-    this.onFrame({ alive: 1, total: 1, tick: w.tick, end: this.endTick });
-  }
-
-  champWorld(): World | null {
-    return this.player?.world ?? null;
+    drawHiveCanopy(ctx, w);
+    this.onFrame({
+      mode: 'focus',
+      alive: 1,
+      total: 1,
+      tick: q.t,
+      end: this.endTick,
+      phase: q.m[0],
+      phaseLeft: q.m[1],
+      score: Math.max(0, q.m[2] - q.m[3]),
+      hopper: q.h,
+      option: q.o?.[1],
+      optionKind: q.o?.[0],
+      tips: this.tipsAt.filter((t) => t <= q.t).length,
+    });
   }
 }
 
-/** interpolated pose at tick t from a path sampled every TRACK_STRIDE ticks (first sample = tick 6) */
-function poseAt(path: Float32Array, t: number): number[] | null {
-  const n = path.length / 3;
+/** interpolated sample at tick t from a track sampled every TRACK_STRIDE ticks (first = tick 3) */
+function sampleAt(path: Float32Array, t: number): number[] | null {
+  const F = TRACK_FIELDS;
+  const n = path.length / F;
   if (n === 0) return null;
   const f = t / TRACK_STRIDE - 1;
   const i = Math.max(0, Math.min(n - 1, Math.floor(f)));
   const j = Math.min(n - 1, i + 1);
   const a = Math.max(0, Math.min(1, f - i));
-  const h0 = path[3 * i + 2];
-  const dh = Math.atan2(Math.sin(path[3 * j + 2] - h0), Math.cos(path[3 * j + 2] - h0));
-  return [path[3 * i] + (path[3 * j] - path[3 * i]) * a, path[3 * i + 1] + (path[3 * j + 1] - path[3 * i + 1]) * a, h0 + dh * a];
+  const lerpA = (k: number): number => {
+    const h0 = path[F * i + k];
+    return h0 + Math.atan2(Math.sin(path[F * j + k] - h0), Math.cos(path[F * j + k] - h0)) * a;
+  };
+  return [
+    path[F * i] + (path[F * j] - path[F * i]) * a,
+    path[F * i + 1] + (path[F * j + 1] - path[F * i + 1]) * a,
+    lerpA(2),
+    lerpA(3),
+    lerpA(4),
+    path[F * i + 5],
+    path[F * i + 6],
+  ];
 }

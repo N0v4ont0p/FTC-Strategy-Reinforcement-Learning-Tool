@@ -24,6 +24,10 @@ Order: **SOLO first** (baseline, then teach), then DUO, then full 4-robot matche
 | 2026-09-22 | real robot: one operator, with a 1-operator and a 2-operator mode; **DSIM = 1 operator**. DSIM is used for **pathing and strategy**, not joystick skill → the human tier keeps reaction/decision limits; gamepad-ergonomics modeling is low priority (#11, §3) |
 | 2026-09-22 | team practices little in DSIM → outputs must stand on their own: playbooks, AUTO, path cards (#15) |
 | 2026-09-22 | downloads approved (#21); all other §14.4 defaults accepted; "full push": S-1 → S0 → S1 run back-to-back, each gate checked before the next |
+| 2026-09-22 | user ran the first trainer: robots never shot. Decision: robots get SKILLS (S2-lite) and evolution learns the ORDER of options (field / loading zone / FLOWER / shoot / human player / park) — the S3 option level, pulled forward |
+| 2026-09-22 | start pose fixed: back to the blue wall just right of FLOWER F3 (bottom right in DSIM's view), facing the field (user) — replaces cycling the 4 DSIM anchors |
+| 2026-09-22 | human replays now ALLOWED as a warm start: the team's own world-record-level DSIM runs in `Training data/` (front+back intake build) → imitation network → generation 0 |
+| 2026-09-22 | the studio: `./start.sh` starts everything, trains nothing until asked; checkpoints, rewind, fork, step, abort, live settings, evaluation, lineage; no playback speed options |
 
 Facts marked **(code)** were read from DSIM source on 2026-09-22 (zip snapshot, no git), and are
 re-verified in S0 against the pinned copy.
@@ -633,6 +637,47 @@ Harness: `harness/{dsim,profiles,filters,perturb,guards,control,export,pool,work
 **Not built yet, deliberately:**
 - PPO and DAgger. They belong with the S3 planner-teacher (PLAN §8 S4) and PyTorch is deferred: 127 MB, the user's network.
 - Duo and 4-robot training (§6, §8 S5–S7). The engine and episode code are written for any robot count, but only solo is wired up.
+
+**STUDIO + SKILLS RESULT (2026-09-22): BUILT — gate 41/41** (`train/check.ts`; user guide `TRAINING.md`). Not trained yet: the user presses Start.
+
+Why: the first trainer's raw-joystick robots never shot. DSIM's aim assist releases a shot only when it will land in the UP cell, so a random network almost never held balls, stood on the correct side and pressed fire at the same time. Firing looked useless, so it learned not to fire.
+
+| piece | what it is |
+|---|---|
+| `train/skills.ts` | the pilot: S1 visibility-graph planner + S1 speed law, a 0.08/0.16/0.25 s look-ahead that stops a turning corner hitting the HIVE frame (G417), stuck detection. Skills: collect a loose element with either intake end on a clear approach (square to walls), FLOWER retrieval (intake end square into the foot), shoot from turn-safe measured spots (failed spots avoided 20 s), human player, just-in-time park. Fire gate = the aimed cell will be TAKING when the shot arrives (`hiveTakingSide`, release at 2 s of the 4 s swing) |
+| `train/policy.ts` | option scorer: (69 global + 14 option features) → 16 → 1; argmax over the options available now. Greedy baseline for comparison. Intake runs whenever there is room (driver auto-intake) |
+| `train/imitate.ts` | replays → demonstrations (every human pickup / FLOWER pull / first shot / HP entry = one decision, labelled against our option list at the previous decision's state) → listwise softmax fit with early stopping; 2,141 decisions from 6 replays; held-out agreement 46% vs 11% chance |
+| `train/algos.ts` | GA with ids, parents, operator (elite / mutant / cross / seed), genes changed; uniform crossover; tournament selection; seeded from a network; live `setConfig`. ES kept |
+| `train/engine.ts` | runs manager: start / pause / resume / stop / abort a generation / step N; named + automatic + pinned checkpoints (state + history, gzip); REWIND (present saved first; re-running is bit-exact, proven); FORK; live settings with validation, logged, refused for run-defining ones; held-out EVALUATION with 95% CI; exact frames of every generation's best robot and the champion; legacy runs refused with a reason |
+| `train/server.ts`, `train/studio.ts`, `start.sh` | studio server (API + SSE, 127.0.0.1), launcher that starts the studio + DSIM alpha and trains nothing until asked; Ctrl-C / closing the terminal stops everything |
+| `viewer/` | the studio: run picker, controls, whole-generation swarm with per-robot intent lines coloured by option (validated 6-colour palette), exact-frame replays (Best of generation / Champion) with a live HUD, score chart with reference lines (your best replay, greedy baseline), fitness, deaths, strategy-mix chart, honeycomb, Checkpoints / Settings / Evaluate / Lineage / Log panels; playback paced to training (no speed buttons) |
+
+**Measured (REAL-v0 sampled per life, all limits, misses and guards on):**
+- Greedy baseline: mean 184 over 16 matches, 8.3 tips, 0 crashes, 1 stall.
+- Generation 0 from the imitation seed: best 368, and mutants beat the seed.
+- A full match costs ~1.8 s of CPU, ~95% of it DSIM physics.
+
+**The team's replays:** 730–825 points and 38 tips each, on a 600 RPM front+back intake build: a tip every 4.0 s (the swing time). The loop:
+1. Take the tipped cell's spill.
+2. Cross to the new up side.
+3. Shoot through the other cell's swing.
+
+**Caught and fixed while building it:**
+- Balls against walls jammed the approach. Fixed with a clear-approach search.
+- Paths were planned with the half-diagonal, so goals near the frame sat inside no-go zones and the robot pinned itself to the frame. Fixed with half-width + 4 in planning plus look-ahead safety.
+- The fire gate refused all firing during a swing. That cost 53 s a match; firing all through the swing then wasted 30%. Now it predicts the taking cell.
+- Parking left 26 s early. It now leaves just in time.
+- Human-player presses were spammed.
+- Shooting spots out of turret reach for some sampled robots were retried forever. They are now avoided.
+- The imitation fit overfit after ~50 epochs. Early stopping fixed it.
+- AUTO-only episodes ran through the transition.
+- Pool abort could hang before workers were ready.
+- Mid-generation checkpoints could capture half-updated totals. They are now deferred to the end of the generation.
+
+**Not built yet, deliberately:**
+- Sweeping multi-ball pickups and shooting while crossing the field (the next skill upgrades).
+- Duo and 4-robot play.
+- PPO/DAgger (needs PyTorch).
 
 ### 14.3 Is the whole pipeline planned, with room to keep improving?
 

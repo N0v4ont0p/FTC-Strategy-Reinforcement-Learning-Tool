@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dsim-alpha",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd \"/Users/georgehu/Downloads/FTC/FTC Sim autonomous/dsim-main\" && VITE_APP_CHANNEL=alpha exec \"/Users/georgehu/Downloads/FTC/FTC Sim autonomous/dsim-main/node_modules/.bin/vite\" --port 5173 --strictPort"
+      ],
+      "port": 5173
+    }
+  ]
+}

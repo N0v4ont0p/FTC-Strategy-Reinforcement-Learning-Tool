@@ -1,0 +1,9 @@
+{
+  "name": "biobuzz-ai",
+  "private": true,
+  "type": "module",
+  "description": "BIOBUZZ strategy/pathing AI on top of a pinned, unmodified DSIM (see PLAN.md)",
+  "scripts": {
+    "s1check": "dsim-main/node_modules/.bin/tsx harness/s1-check.ts"
+  }
+}

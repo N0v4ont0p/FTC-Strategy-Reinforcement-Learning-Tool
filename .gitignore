@@ -1,0 +1,7 @@
+dsim-main/
+.venv/
+node_modules/
+*.pdf
+.DS_Store
+outputs/**/*.bin
+.impeccable/

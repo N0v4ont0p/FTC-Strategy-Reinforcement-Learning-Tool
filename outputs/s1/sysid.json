@@ -1,0 +1,194 @@
+{
+ "REAL-v0": {
+  "eff": {
+   "vmax": 81.50775560413618,
+   "strafeMult": 0.8,
+   "accel": 232.96000000000004,
+   "maxTurn": 8.354498533008773,
+   "turnAccel": 33.28,
+   "draw": 0
+  },
+  "cases": [
+   {
+    "name": "forward full then release",
+    "maxSpeedErr": 0.0001038123793222212,
+    "maxPosErr": 0.00012213648950165634,
+    "ticks": 114
+   },
+   {
+    "name": "reverse full then release",
+    "maxSpeedErr": 0.0001038123793222212,
+    "maxPosErr": 0.00012095595396388603,
+    "ticks": 114
+   },
+   {
+    "name": "strafe full then release",
+    "maxSpeedErr": 0.00006286140141575913,
+    "maxPosErr": 0.00012959368054410447,
+    "ticks": 114
+   },
+   {
+    "name": "diagonal (sum saturation halves both)",
+    "maxSpeedErr": 0.000022315164579128316,
+    "maxPosErr": 0.0003606615787964249,
+    "ticks": 114
+   },
+   {
+    "name": "half stick forward",
+    "maxSpeedErr": 0.000021862238543945978,
+    "maxPosErr": 0.0001950777627865996,
+    "ticks": 150
+   },
+   {
+    "name": "rotate full then release (rad/s, rad)",
+    "maxSpeedErr": 0.000015355905121028357,
+    "maxPosErr": 0.000005212497045303119,
+    "ticks": 80
+   }
+  ]
+ },
+ "DREAM": {
+  "eff": {
+   "vmax": 93.38898016712155,
+   "strafeMult": 0.8,
+   "accel": 241.72436594403888,
+   "maxTurn": 9.722550354807076,
+   "turnAccel": 34.532052277719835,
+   "draw": 0.022727272727272728
+  },
+  "cases": [
+   {
+    "name": "forward full then release",
+    "maxSpeedErr": 0.00011960211186590186,
+    "maxPosErr": 0.0001692789684888396,
+    "ticks": 114
+   },
+   {
+    "name": "reverse full then release",
+    "maxSpeedErr": 0.00011960211186590186,
+    "maxPosErr": 0.000141622413311282,
+    "ticks": 114
+   },
+   {
+    "name": "strafe full then release",
+    "maxSpeedErr": 0.00010481568386566664,
+    "maxPosErr": 0.00016147428165780298,
+    "ticks": 114
+   },
+   {
+    "name": "diagonal (sum saturation halves both)",
+    "maxSpeedErr": 0.00006281874910907523,
+    "maxPosErr": 0.0002485394160999235,
+    "ticks": 114
+   },
+   {
+    "name": "half stick forward",
+    "maxSpeedErr": 0.00002383262566496569,
+    "maxPosErr": 0.0004212604906470574,
+    "ticks": 150
+   },
+   {
+    "name": "rotate full then release (rad/s, rad)",
+    "maxSpeedErr": 0.000005184505578625931,
+    "maxPosErr": 9.241598637466097e-7,
+    "ticks": 80
+   }
+  ]
+ },
+ "REAL-v0-slow": {
+  "eff": {
+   "vmax": 56.21224524423185,
+   "strafeMult": 0.8,
+   "accel": 241.28000000000003,
+   "maxTurn": 5.573697100862001,
+   "turnAccel": 34.46857142857143,
+   "draw": 0
+  },
+  "cases": [
+   {
+    "name": "forward full then release",
+    "maxSpeedErr": 0.00010714057134464383,
+    "maxPosErr": 0.00008387761218031642,
+    "ticks": 114
+   },
+   {
+    "name": "reverse full then release",
+    "maxSpeedErr": 0.00010714057134464383,
+    "maxPosErr": 0.00011046189458374656,
+    "ticks": 114
+   },
+   {
+    "name": "strafe full then release",
+    "maxSpeedErr": 0.00003933222876639775,
+    "maxPosErr": 0.00008347722849322281,
+    "ticks": 114
+   },
+   {
+    "name": "diagonal (sum saturation halves both)",
+    "maxSpeedErr": 0.00002264954321025051,
+    "maxPosErr": 0.0003099692011321582,
+    "ticks": 114
+   },
+   {
+    "name": "half stick forward",
+    "maxSpeedErr": 0.000010829106479981476,
+    "maxPosErr": 0.0004592160260692424,
+    "ticks": 150
+   },
+   {
+    "name": "rotate full then release (rad/s, rad)",
+    "maxSpeedErr": 0.000004999818382422916,
+    "maxPosErr": 0.0000013079394880259746,
+    "ticks": 80
+   }
+  ]
+ },
+ "REAL-v0-fast": {
+  "eff": {
+   "vmax": 106.80326596404052,
+   "strafeMult": 0.8,
+   "accel": 218.7970909090909,
+   "maxTurn": 11.399999999999999,
+   "turnAccel": 31.256727272727275,
+   "draw": 0.05
+  },
+  "cases": [
+   {
+    "name": "forward full then release",
+    "maxSpeedErr": 0.0001264444198199044,
+    "maxPosErr": 0.00008963814994977781,
+    "ticks": 114
+   },
+   {
+    "name": "reverse full then release",
+    "maxSpeedErr": 0.0001264444198199044,
+    "maxPosErr": 0.00012253991387467522,
+    "ticks": 114
+   },
+   {
+    "name": "strafe full then release",
+    "maxSpeedErr": 0.0001426801305033365,
+    "maxPosErr": 0.00017259903571620328,
+    "ticks": 114
+   },
+   {
+    "name": "diagonal (sum saturation halves both)",
+    "maxSpeedErr": 0.000043162771148056236,
+    "maxPosErr": 0.00031709210091614804,
+    "ticks": 114
+   },
+   {
+    "name": "half stick forward",
+    "maxSpeedErr": 0.000042544657645748885,
+    "maxPosErr": 0.00031155248655068135,
+    "ticks": 150
+   },
+   {
+    "name": "rotate full then release (rad/s, rad)",
+    "maxSpeedErr": 0.000015882702527392212,
+    "maxPosErr": 0.00000592565225485607,
+    "ticks": 80
+   }
+  ]
+ }
+}

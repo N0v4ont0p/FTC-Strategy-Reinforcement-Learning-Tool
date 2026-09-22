@@ -7,6 +7,7 @@ import * as BB from '../dsim-main/src/games/biobuzz/config';
 import { initPhysics } from '../dsim-main/src/sim/physicsEngine';
 import { coerceSpec, type RobotSetup } from '../dsim-main/src/sim/spawn';
 import { footprintCorners, footprintExtents } from '../dsim-main/src/sim/field';
+import { driveParams } from '../dsim-main/src/sim/drivetrain';
 import { BB_DEFAULT_SPEC } from '../dsim-main/src/games/biobuzz/coerce';
 import { createBiobuzzWorld } from '../dsim-main/src/games/biobuzz/spawn';
 import { biobuzzStep } from '../dsim-main/src/games/biobuzz/step';
@@ -18,7 +19,7 @@ import { localizeCommand } from '../dsim-main/src/net/protocol';
 import { ZERO_CMD } from '../dsim-main/src/sim/goal';
 
 export type { Alliance, Replay, ReplayResult, RobotCommand, RobotSpec, RobotState, StartPose, Vec2, World };
-export { BB, C, ZERO_CMD, footprintCorners, footprintExtents, localizeCommand, verifyReplay, worldResult };
+export { BB, C, ZERO_CMD, biobuzzStep, driveParams, footprintCorners, footprintExtents, localizeCommand, verifyReplay, worldResult };
 
 export const DT = C.SIM_DT;
 
@@ -62,6 +63,17 @@ export function newMatch(seed: number, seats: Seat[]): World {
       throw new Error(`G304: illegal start pose for robot ${s.id}: ${JSON.stringify(s.startPose)}`);
   const w = createBiobuzzWorld('match', seed, setupsOf(seats));
   w.match.preCountdown = C.PRE_COUNTDOWN;
+  return w;
+}
+
+/** A LAB world: DSIM's own free-drive mode (phase 'freeplay', robots always enabled, no clock),
+ * for measurements only (S1). Not a match: nothing scored here is ever reported as a score. */
+export function labWorld(seed: number, seats: Seat[], keepElements = false): World {
+  const w = createBiobuzzWorld('free', seed, setupsOf(seats));
+  if (!keepElements) {
+    w.balls.length = 0; // DSIM's own smoke scenes clear a field this way
+    for (const r of w.robots) r.hopper = []; // no held element may point at a removed ball
+  }
   return w;
 }
 

@@ -590,6 +590,26 @@ Harness: `harness/{dsim,profiles,filters,perturb,guards,control,export,pool,work
 - G427 C enforced in the filter: no human-player entry while any robot covers or is about to cover the drop area.
 - The plan's 10k-match crash test ran as 800 here (short-command rule); a 10k run is one command for the user's terminal: `dsim-main/node_modules/.bin/tsx harness/s0-check.ts --matches 10000`.
 
+**S1 RESULT (2026-09-22): PASS — every gate check** (`harness/s1/{drive,sysid,lab,paths,jobs,run,check}.ts`; data and full report in `outputs/s1/`, `outputs/s1/REPORT.md`).
+
+- **Drive model = DSIM**, to < 5e-4 in and in/s in every step test (forward, reverse, strafe, diagonal, half stick, spin) for all 4 robots. It uses DSIM's own `driveParams` + `motorStep` + power draw, plus one measured constant: DSIM's position trails by 0.44 tick.
+- **Travel-time table:** 17 key poses × 4 robots (REAL-v0 nominal / slow corner / fast corner, DREAM) = 832 trips, all arriving.
+  - Every trip is DSIM-measured, re-run identically, and at or above a provable lower bound (median gap 19–34%).
+  - Slow ≥ nominal ≥ fast holds on every identical trip.
+  - Routes are seeded by a visibility-graph planner (both HIVE legs, 4 FLOWER feet), then tuned by cross-entropy search scored in DSIM, and cross-seeded between robots.
+  - REAL-v0 median trip 1.93 s, longest 3.27 s.
+- **Shooting envelope:** 2-in grid, both cells, REAL and DREAM. ~1,280 scoring spots per cell, all outboard of the up cell, and north = exact mirror of south wherever both are placeable (3,250 spots, 0 differ). About the same number of spots release a shot that MISSES, because DSIM aims at the nearer cell.
+- **Spill:** 80 real tips; 7 elements spill per first tip, resting around (12.4, ±57.4); north/south mirror within 1 in.
+
+**Mistakes the S1 gate caught and fixed (kept here so they are not repeated):**
+1. System-ID start points drove into walls → placements chosen so the motion stays clear.
+2. The heading controller limit-cycled at ±0.39 rad/s against DSIM's 1/127 stick quantization → brake-aware heading profile + 0.3° deadband.
+3. Travel jammed on FLOWER feet and walls (29/208) → perpendicular depart/approach points, visibility-graph seeding, up to 4 waypoints, corridor starts.
+4. A shooting pose was picked beside a FLOWER foot and the robot could not turn there → shooting poses must be clear at every heading.
+5. **The "provable" bound was beaten by crashing into walls.** DSIM stops a robot dead at any speed → trips may not hit anything above 20 in/s (`IMPACT_MAX`), and the bound for wall-adjacent goals only asks for ≤ 20 in/s there.
+6. **The envelope depended on the turret's leftover yaw** (43 north-only spots) → the turret settles 1 s before every measurement; now mirror-exact.
+7. A stale reference to DSIM's HIVE state (DSIM replaces `hives[a]` every tick) → read fresh.
+
 ### 14.3 Is the whole pipeline planned, with room to keep improving?
 
 **Planned:**

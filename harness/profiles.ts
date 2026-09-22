@@ -5,7 +5,7 @@ import { coerce, type RobotSpec } from './dsim';
 import type { Rng } from './rng';
 
 type Num = number | { min: number; max: number; nominal: number };
-interface ProfileFile {
+export interface ProfileFile {
   id: string;
   label: string;
   spec: Record<string, unknown>;
@@ -47,6 +47,18 @@ const isRange = (v: unknown): v is { min: number; max: number; nominal: number }
   typeof v === 'object' && v !== null && 'min' in v && 'max' in v;
 
 export const loadProfile = (path: string): ProfileFile => JSON.parse(readFileSync(path, 'utf8')) as ProfileFile;
+
+/** the same profile with some spec/limits/perturb values pinned (e.g. an envelope corner) —
+ * keys like 'spec.driveRpm', 'limits.fireRate' */
+export function pinned(p: ProfileFile, fix: Record<string, number>, id?: string): ProfileFile {
+  const q = JSON.parse(JSON.stringify(p)) as ProfileFile;
+  for (const [k, v] of Object.entries(fix)) {
+    const [grp, key] = k.split('.') as ['spec' | 'limits' | 'perturb', string];
+    (q[grp] as Record<string, unknown>)[key] = v;
+  }
+  if (id) q.id = id;
+  return q;
+}
 
 /** `rng` absent → nominal point; present → uniform sample of every range. */
 export function resolve(p: ProfileFile, rng?: Rng): Resolved {

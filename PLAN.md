@@ -28,6 +28,12 @@ Order: **SOLO first** (baseline, then teach), then DUO, then full 4-robot matche
 | 2026-09-22 | start pose fixed: back to the blue wall just right of FLOWER F3 (bottom right in DSIM's view), facing the field (user) — replaces cycling the 4 DSIM anchors |
 | 2026-09-22 | human replays now ALLOWED as a warm start: the team's own world-record-level DSIM runs in `Training data/` (front+back intake build) → imitation network → generation 0 |
 | 2026-09-22 | the studio: `./start.sh` starts everything, trains nothing until asked; checkpoints, rewind, fork, step, abort, live settings, evaluation, lineage; no playback speed options |
+| 2026-09-22 | viewer has two states: LIVE (follows training, paced to it, no controls) and REPLAY (generation best / champion at 1× or 2×); generation picker and "follow live" removed (user) |
+| 2026-09-22 | full run management (rename, duplicate, delete, sizes), checkpoint rename + bulk delete, presets ("Full push" etc.), training-data panel (include, add, refresh), Quit button that stops everything and closes the tabs (user) |
+| 2026-09-22 | AUTO order must not be fixed by the replays: generation 0 gets 25 % random robots; **15 % behaviour mutations** every generation (user's number), each proven to change choices |
+| 2026-09-22 | skills v2 from the world-record replays: GROUP sweeps (commit to a cluster), cross to the other CELL the moment a tip starts, fire from wherever a shot can land |
+| 2026-09-22 | replays used during training, not only at generation 0: STUDENTS (lesson on replays + champion's decisions), share adapted by measured success (user: "a small percentage learn from that … other generations would know") |
+| 2026-09-22 | champion = best mean over fixed validation matches (not one match) |
 
 Facts marked **(code)** were read from DSIM source on 2026-09-22 (zip snapshot, no git), and are
 re-verified in S0 against the pinned copy.
@@ -678,6 +684,28 @@ Why: the first trainer's raw-joystick robots never shot. DSIM's aim assist relea
 - Sweeping multi-ball pickups and shooting while crossing the field (the next skill upgrades).
 - Duo and 4-robot play.
 - PPO/DAgger (needs PyTorch).
+
+**STUDIO v3 RESULT (2026-09-22): BUILT — gate 62/62** (`train/check.ts`; guide `TRAINING.md`).
+
+What changed, and why:
+
+| piece | change |
+|---|---|
+| skills v2 (`train/skills.ts`) | from the world-record replays: GROUP sweeps (single-linkage clusters < 16 in; commit to the group, nearest-next, skip a slow element not the group) — 1.7–1.8 elements per group decision; cross to the other CELL the moment a tip starts (`targetCell`); fire from wherever the measured envelope says a shot lands; speed caps from the profile (vIntake for captures, vFire when firing while collecting) |
+| frame safety | the command is extrapolated only up to its goal (a robot sent next to the frame reversed forever — 3 of 4 greedy matches stalled); the robot's own motion is still extrapolated in full: 0 crashes in 64 mixed robots |
+| network (`train/net.ts`, `train/policy.ts`) | option scorer + a linear SKIP (one gene = one option preference) + 3 STYLE genes the skills read (fire while collecting: hold, min speed; re-decide at a tip). Defaults measured: re-deciding mid-sweep lost 7 % → default off |
+| `train/bc.ts` | listwise behaviour cloning on decisions (obs once + option features), Adam, lessons, probe disagreement |
+| replays (`train/imitate.ts`) | group-aware labels (a sweep = one decision; a shot counts only when no pickup follows within 1 s); cached DATA SETS by key, never deleted, pinned per run; include/exclude, upload, refresh in a worker. 583 decisions from 7 replays; held-out agreement 55.7 % vs 20.9 % chance |
+| GA (`train/algos.ts`) | behaviour mutations (15 %, each proven to change ≥ 10 % of probe choices or a style setting — 100 % did); STUDENTS (lesson on replays + champion's decisions); adaptive students' share from measured success (adaptive pursuit); random newcomers; champion kept (hall of fame); generation 0 = seed + mutants + behaviour mutations + 25 % random |
+| engine | champion = best mean over fixed validation matches (re-validated when stage / matches / robot / penalties change); experience = champion's own decisions; presets; checkpoint rename + bulk delete; run rename / duplicate / sizes; abort keeps settings changed mid-generation; data set switches only between generations (rewinds stay exact) |
+| studio | LIVE (paced to training, no controls) vs REPLAY (generation best / champion at 1× or 2×, pause, restart, scrub); Runs, Training data, presets, "What works" panels; Quit button (stops training, DSIM, the server; closes the studio/DSIM tabs via AppleScript, compile-checked) |
+
+**Measured:**
+- Greedy order, 12 identical matches (same seeds, same sampled robots): **207 vs 152** points before (+36 %, better in 12/12), 9.7 vs 7.0 tips, same 21 % misses, 0 crashes.
+- 6 generations × 48 robots (balanced settings): champion on 16 held-out matches **237 ± 38 vs greedy 199 ± 27**, 12/16 paired wins. Students reached the top quarter more often than plain mutants, so their share grew 10 % → 29 %.
+- Throughput on the laptop: ~120 matches/min; validation adds ~20 % at 128 robots.
+
+**Caught and fixed while building it:** the frame look-ahead oscillation above; bans after a failed group; tour length bug; behaviour mutations that could not be verified (style genes now must cross a threshold, network ones strengthened up to 10 tries); the oldest run has no version field (now read as version 1); `hidden` overridden by a component's display rule (global fix).
 
 ### 14.3 Is the whole pipeline planned, with room to keep improving?
 

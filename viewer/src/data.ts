@@ -1,18 +1,23 @@
 // Shapes the server sends, and small helpers. Types come from the engine itself (type-only import).
-import type { CheckpointMeta, EvalResult, GenSummary, RunConfig } from '../../train/engine';
+import type { CheckpointMeta, EvalResult, GenSummary, Preset, RunConfig, RunInfo, Val } from '../../train/engine';
 import type { Death, Frames, Parts } from '../../train/episode';
 import type { Lineage } from '../../train/algos';
-export type { CheckpointMeta, EvalResult, GenSummary, RunConfig, Death, Frames, Parts, Lineage };
+export type { CheckpointMeta, EvalResult, GenSummary, Preset, RunConfig, RunInfo, Val, Death, Frames, Parts, Lineage };
 
-export interface RunSummary {
-  name: string;
+export type RunSummary = RunInfo;
+export interface RunData {
+  key: string;
+  onDisk: boolean;
+  latest: string;
+  experience: number;
+}
+export interface Champion {
+  fitness: number;
+  score: number;
   gen: number;
-  algo: string;
-  pop: number;
-  bestFitness: number | null;
-  bestScore: number | null;
-  updated: string;
-  legacy?: boolean;
+  parts: Parts;
+  id: number;
+  val: Val | null;
 }
 export interface RunState {
   name: string;
@@ -23,17 +28,28 @@ export interface RunState {
   running: boolean;
   paused: boolean;
   phase: 'idle' | 'generation' | 'evaluating' | 'paused';
-  bestEver: { fitness: number; score: number; gen: number; parts: Parts; id: number } | null;
+  bestEver: Champion | null;
   history: GenSummary[];
   events: { time: string; gen: number; text: string }[];
   checkpoints: CheckpointMeta[];
   evals: EvalResult[];
+  data: RunData;
+}
+export interface DataInfo {
+  dir: string;
+  files: { name: string; size: number; included: boolean; info?: { score: number; events: number; samples: number; unmatched: number; error?: string } }[];
+  latest: string;
+  built: boolean;
+  fitted: { agree: number; chance: number; holdout: string; samples: number } | null;
+  refreshing: boolean;
 }
 export interface State {
   run: RunState | null;
   runs: RunSummary[];
   reference: { files: { name: string; score: number }[]; holdoutAgree: number; chance: number } | null;
   defaults: RunConfig;
+  presets: Preset[];
+  data: DataInfo;
 }
 export interface Status {
   running: boolean;
@@ -42,6 +58,7 @@ export interface Status {
   gen: number;
   stage: 'auto' | 'full';
   config: RunConfig;
+  data: RunData;
 }
 
 export interface Individual extends Lineage {
@@ -55,6 +72,7 @@ export interface Individual extends Lineage {
   decisions: [number, number, number, number, number][];
   point: Record<string, number>;
   parts: Parts;
+  val?: Val;
 }
 export interface GenFile {
   gen: number;
@@ -70,6 +88,7 @@ export interface FocusFile {
   lineage: Lineage;
   frames: Frames;
   events: [number, string][];
+  val?: Val | null;
 }
 
 /** base64 Float32 → numbers */
@@ -94,6 +113,7 @@ export async function post<T = { ok: boolean }>(url: string, body: unknown = {})
 }
 
 export const fmt = (n: number): string => Math.round(n).toLocaleString('en-US');
+export const bytes = (n: number): string => (n < 1e6 ? `${Math.max(1, Math.round(n / 1e3))} KB` : n < 1e9 ? `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB` : `${(n / 1e9).toFixed(1)} GB`);
 export const TRACK_STRIDE = 3; // ticks between swarm samples (train/episode.ts)
 export const TRACK_FIELDS = 7; // x, y, heading, turret, turret2, hopper, option kind
 export const AUTO_START = 240; // DSIM's 4 s pre-match countdown, in ticks
@@ -101,10 +121,25 @@ export const AUTO_START = 240; // DSIM's 4 s pre-match countdown, in ticks
 /** what the robot chose to do — the six options (train/skills.ts OPTION_KINDS order), each with a
  * colour from the validated dark categorical palette (dataviz check: all pass on #1d1813) */
 export const OPTIONS = [
-  { key: 'field', label: 'collect off the field', color: '#3987e5' },
-  { key: 'lz', label: 'collect in the loading zone', color: '#d95926' },
+  { key: 'field', label: 'sweep a group on the field', color: '#3987e5' },
+  { key: 'lz', label: 'sweep the loading zone', color: '#d95926' },
   { key: 'flower', label: 'pull POLLEN from a FLOWER', color: '#199e70' },
   { key: 'shoot', label: 'shoot', color: '#c98500' },
   { key: 'hp', label: 'human player NECTAR', color: '#d55181' },
   { key: 'park', label: 'park', color: '#9085e9' },
 ] as const;
+
+/** how an individual was made, in words */
+export const OP_LABEL: Record<string, string> = {
+  init: 'random (generation 0)',
+  seed: 'fitted to your replays',
+  elite: 'elite (kept unchanged)',
+  champion: 'champion (always kept)',
+  mutant: 'mutant',
+  cross: 'crossover',
+  macro: 'behaviour mutation',
+  student: 'student (lesson from replays)',
+  random: 'random newcomer',
+  'es+': 'ES sample',
+  'es-': 'ES sample',
+};

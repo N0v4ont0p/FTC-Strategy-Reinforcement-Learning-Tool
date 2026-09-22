@@ -7,3 +7,4 @@ outputs/**/*.bin
 .impeccable/
 runs/
 train/public/
+scratch-tmp/

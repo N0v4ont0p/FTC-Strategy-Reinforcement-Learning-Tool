@@ -72,7 +72,14 @@ if (exists) {
     process.exit(1);
   }
 }
-const server = startServer(port, engine);
+const server = startServer(port, engine, {
+  // the studio's Quit button: discard the generation in progress and leave
+  onQuit: () =>
+    void engine.halt(true).then(() => {
+      restore();
+      process.exit(0);
+    }),
+});
 const plain = flag('plain') || !process.stdout.isTTY;
 
 // ---------- live state ----------
@@ -90,7 +97,7 @@ engine.on('generation', (g: GenSummary) => {
   if (plain)
     console.log(`gen ${g.gen} [${g.stage}] best ${g.best.toFixed(1)} mean ${g.mean.toFixed(1)} score ${g.bestScore} · deaths crash ${g.deaths.crash} stall ${g.deaths.stall} survived ${g.deaths.survived} · ${g.robotsPerMin.toFixed(0)} robots/min`);
 });
-engine.on('best', (b) => say(`NEW CHAMPION — fitness ${b.fitness.toFixed(1)}, score ${b.score}, generation ${b.gen}`));
+engine.on('best', (b) => say(`NEW CHAMPION — fitness ${b.fitness.toFixed(1)}, score ${b.score.toFixed(1)}${b.val ? ` (mean of ${b.val.n} validation matches ± ${b.val.ci95.toFixed(1)})` : ''}, generation ${b.gen}`));
 engine.on('log', (s: string) => say(s));
 say(exists ? `resumed "${name}" at generation ${engine.gen}` : `new run "${name}" (${cfg.algo.toUpperCase()}, population ${cfg.pop})`);
 say(`viewer: ${server.url}`);
@@ -154,7 +161,7 @@ function draw(): void {
   L.push(rule('CHAMPION'));
   if (be) {
     const p = be.parts;
-    L.push(`  ${b(c(GOLD, `fitness ${be.fitness.toFixed(1)}`))}  ${c(DIM, '·')}  DSIM score ${b(String(be.score))}  ${c(DIM, '·')}  born generation ${be.gen}`);
+    L.push(`  ${b(c(GOLD, `fitness ${be.fitness.toFixed(1)}`))}  ${c(DIM, '·')}  DSIM score ${b(be.score.toFixed(1))}${be.val ? c(DIM, ` ± ${be.val.ci95.toFixed(1)} over ${be.val.n} validation matches`) : ''}  ${c(DIM, '·')}  born generation ${be.gen}`);
     L.push(`  ${c(DIM, `pickups ${p.pickups} · shots in ${p.shotsIn} · tips ${p.tips} · human-player ${p.hp} · wasted shots ${p.wasted} · violations ${p.violations}`)}`);
   } else L.push(`  ${c(DIM, 'none yet — the first generation is being born')}`);
   L.push('');

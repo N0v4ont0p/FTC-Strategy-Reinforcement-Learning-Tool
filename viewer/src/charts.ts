@@ -201,7 +201,7 @@ export class LineChart {
     showTip(
       e.clientX,
       e.clientY,
-      `<b>generation ${q.gen}</b><br>${this.series.map((s) => `${s.label} ${this.val(q, s).toFixed(1)}${this.unit}`).join(' · ')}<br><span class="t">best robot made by</span> ${q.bestOp ?? '—'}`,
+      `<b>generation ${q.gen}</b><br>${this.series.map((s) => `${s.label} ${this.val(q, s).toFixed(1)}${this.unit}`).join(' · ')}<br><span class="t">best robot made by</span> ${q.bestOp ?? '—'}${q.champScore !== undefined ? `<br><span class="t">champion</span> ${q.champScore.toFixed(1)} ± ${(q.champCi ?? 0).toFixed(1)} (validated)` : ''}`,
     );
     this.draw();
   }
@@ -269,10 +269,10 @@ export const CHOICE_PARTS = OPTIONS.map((o, k) => ({ label: o.label, color: o.co
 /** the table view (accessibility: every charted number, as text) */
 export function historyTable(h: GenSummary[]): string {
   const rows = h.slice(-200).reverse();
-  return `<table><thead><tr><th>gen</th><th>best fit</th><th>mean fit</th><th>best score</th><th>mean score</th><th>tips</th><th>crash</th><th>stall</th><th>lived</th><th>best made by</th></tr></thead><tbody>${rows
+  return `<table><thead><tr><th>gen</th><th>best fit</th><th>mean fit</th><th>best score</th><th>mean score</th><th>champion</th><th>tips</th><th>crash</th><th>stall</th><th>lived</th><th>students</th><th>best made by</th></tr></thead><tbody>${rows
     .map(
       (q) =>
-        `<tr><td>${q.gen}</td><td>${q.best.toFixed(1)}</td><td>${q.mean.toFixed(1)}</td><td>${q.bestScore}</td><td>${q.meanScore.toFixed(1)}</td><td>${(q.meanTips ?? 0).toFixed(1)}</td><td>${q.deaths.crash}</td><td>${q.deaths.stall}</td><td>${q.deaths.survived}</td><td>${q.bestOp ?? ''}</td></tr>`,
+        `<tr><td>${q.gen}</td><td>${q.best.toFixed(1)}</td><td>${q.mean.toFixed(1)}</td><td>${q.bestScore}</td><td>${q.meanScore.toFixed(1)}</td><td>${(q.champScore ?? 0).toFixed(0)} ± ${(q.champCi ?? 0).toFixed(0)}</td><td>${(q.meanTips ?? 0).toFixed(1)}</td><td>${q.deaths.crash}</td><td>${q.deaths.stall}</td><td>${q.deaths.survived}</td><td>${Math.round(100 * (q.imitShare ?? 0))}%</td><td>${q.bestOp ?? ''}</td></tr>`,
     )
     .join('')}</tbody></table>`;
 }

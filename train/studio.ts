@@ -5,7 +5,7 @@
 //   · DSIM itself (alpha channel, local)   http://localhost:5173  — to watch champions in the real app
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { init } from '../harness/dsim';
 import { ROOT } from './engine';
 import { startServer } from './server';
@@ -36,7 +36,7 @@ if (!existsSync(built) || Math.max(newest(join(ROOT, 'viewer')), statSync(join(R
 }
 
 await init(); // DSIM physics, for the imitation fit and the field the viewer draws
-const studio = startServer(port);
+const studio = startServer(port, undefined, { onQuit: () => void quit(true) });
 
 const children: ChildProcess[] = [];
 if (!flag('no-dsim')) {
@@ -75,14 +75,36 @@ const timer = setInterval(() => {
   last = s;
 }, 500);
 
+/** close the studio's and DSIM's browser tabs (Safari and Chrome, whichever are running). macOS
+ * asks once whether the terminal may control the browser; if that is declined, the page shows
+ * "Studio closed" and the tab stays for you to close. */
+function closeTabs(): Promise<void> {
+  const urls = [`http://localhost:${port}`, `http://127.0.0.1:${port}`, `http://localhost:${dsimPort}`];
+  const test = urls.map((u) => `(u starts with "${u}")`).join(' or ');
+  const script = (app: string, tabs: string) => `if application "${app}" is running then
+  tell application "${app}"
+    repeat with w in (every window)
+      repeat with i from (count of ${tabs} of w) to 1 by -1
+        set u to URL of ${tabs.replace(/s$/, '')} i of w
+        if ${test} then close ${tabs.replace(/s$/, '')} i of w
+      end repeat
+    end repeat
+  end tell
+end if`;
+  const run = (src: string): Promise<void> => new Promise((r) => execFile('osascript', ['-e', src], { timeout: 4000 }, () => r()));
+  return Promise.all([run(script('Safari', 'tabs')), run(script('Google Chrome', 'tabs'))]).then(() => undefined);
+}
+
 let quitting = false;
-async function quit(): Promise<void> {
+async function quit(fromStudio = false): Promise<void> {
   if (quitting) process.exit(130);
   quitting = true;
   clearInterval(timer);
   console.log(`\n  ${D}stopping… (a generation in progress is discarded; the run keeps its last checkpoint)${R}`);
   for (const c of children) c.kill();
   await studio.close();
+  if (fromStudio && process.platform === 'darwin') await closeTabs();
+  console.log(`  ${D}studio closed.${R}`);
   process.exit(0);
 }
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => void quit());

@@ -36,7 +36,7 @@ export const OBS_NAMES: string[] = [
   'x', 'y', 'cosH', 'sinH', 'vFwd', 'vLeft', 'omega',
   'hopPollen', 'hopNectar', 'topIsNectar', 'hopEmpty',
   'phPre', 'phAuto', 'phTransition', 'phTeleop', 'phPost', 'phaseLeft', 'matchLeft', 'nectarUnlocked',
-  'upNorth', 'cellPollen', 'cellNectar', 'tipping', 'tips', 'hpStock', 'hpDue', 'pollenToTip',
+  'upNorth', 'cellPollen', 'cellNectar', 'tipping', 'tips', 'hpStock', 'hpDue', 'pollenToTip', 'released', 'targetNorth',
   'inEnvelope', 'spotFwd', 'spotLeft', 'spotDist',
   ...Array.from({ length: K_NEAR }, (_, k) => [`e${k}Fwd`, `e${k}Left`, `e${k}Dist`, `e${k}Nectar`]).flat(),
   'lzFwd', 'lzLeft', 'lzDist', 'frameDist', 'score',
@@ -100,11 +100,15 @@ export function encode(w: World, r: RobotState, prof: Resolved, out: Float32Arra
   put(B.nectarStock[own] / 5);
   put(B.nectarDue[own] / 5);
   put(Math.max(0, (BB.BB_TIP_POLLEN[Math.min(cellN, BB.BB_TIP_POLLEN.length - 1)] ?? 0) - cellP) / 8);
-  put(inEnvelope(upBlue, px, py) ? 1 : 0);
-  // nearest measured scoring spot for the up cell
+  put(hive.released ? 1 : 0);
+  // where shots should go: the up cell, or the other one once a tip has started (skills.ts targetCell)
+  const target = hive.tipping > 0 ? (upBlue === 'north' ? 'south' : 'north') : upBlue;
+  put(target === 'north' ? 1 : -1);
+  put(inEnvelope(target, px, py) ? 1 : 0);
+  // nearest measured scoring spot for that cell
   let best: Spot | null = null;
   let bd = Infinity;
-  for (const sp of SPOTS[upBlue]) {
+  for (const sp of SPOTS[target]) {
     const d = (sp.x - px) ** 2 + (sp.y - py) ** 2;
     if (d < bd) {
       bd = d;

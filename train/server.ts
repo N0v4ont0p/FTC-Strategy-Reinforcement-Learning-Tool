@@ -1,13 +1,15 @@
 // THE STUDIO SERVER — static viewer + JSON API + a Server-Sent Events stream, Node stdlib only,
 // bound to 127.0.0.1 (this machine only). It manages runs: one is open at a time; training starts
-// only when asked (from the viewer or `npm run train`).
+// only when asked (from the viewer or `npm run train`). It also manages the training data (the
+// replays in "Training data/") and can shut the whole studio down.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { createBiobuzzWorldForViewer } from './field';
-import { Engine, RUNS, ROOT, defaultConfig, deleteRun, listRuns, type RunConfig } from './engine';
-import { imitationReport } from './imitate';
-import type { AlgoName } from './algos';
+import { Engine, NAME_RE, PRESETS, RUNS, ROOT, checkRun, defaultConfig, deleteRun, listRuns, renameRun, type RunConfig } from './engine';
+import { DATA_DIR, currentKey, dataFiles, excluded, hasSet, imitationReport, setExcluded } from './imitate';
+import { runPool } from '../harness/pool';
+import { validate, type AlgoName } from './algos';
 
 const PUBLIC = join(ROOT, 'train', 'public');
 const LAST = join(RUNS, '.last');
@@ -37,8 +39,9 @@ export interface Studio {
   close: () => Promise<void>;
 }
 
-export function startServer(port: number, first?: Engine): Studio {
+export function startServer(port: number, first?: Engine, opts: { onQuit?: () => void } = {}): Studio {
   let engine: Engine | null = first ?? null;
+  let refreshing: Promise<unknown> | null = null;
   const streams = new Set<ServerResponse>();
   const send = (type: string, data: unknown): void => {
     const msg = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -48,8 +51,11 @@ export function startServer(port: number, first?: Engine): Studio {
 
   const wire = (e: Engine): void => {
     e.on('progress', (p) => send('progress', p));
-    e.on('generation', (g) => send('generation', g));
-    e.on('best', (b) => send('best', { fitness: b.fitness, score: b.score, gen: b.gen, parts: b.parts, id: b.id }));
+    e.on('generation', (g) => {
+      send('generation', g);
+      send('runs', listRuns()); // generation, champion and size in the run list
+    });
+    e.on('best', (b) => send('best', { fitness: b.fitness, score: b.score, gen: b.gen, parts: b.parts, id: b.id, val: b.val }));
     e.on('log', (l) => send('log', l));
     e.on('checkpoints', () => send('checkpoints', e.listCheckpoints()));
     e.on('eval', (r) => send('eval', r));
@@ -61,13 +67,29 @@ export function startServer(port: number, first?: Engine): Studio {
 
   function status() {
     const e = engine;
-    return e ? { running: e.running, paused: e.paused, phase: e.phase, gen: e.gen, stage: e.stage, config: e.config } : null;
+    return e ? { running: e.running, paused: e.paused, phase: e.phase, gen: e.gen, stage: e.stage, config: e.config, data: e.data } : null;
+  }
+  /** the training data: every replay, what the current data set made of it, and the fit */
+  function data() {
+    const rep = imitationReport();
+    const latest = currentKey();
+    const fitted = rep && rep.dataKey === latest ? rep : null;
+    const byName = new Map((rep?.files ?? []).map((f) => [f.name, f]));
+    return {
+      dir: DATA_DIR,
+      files: dataFiles().map((f) => ({ ...f, ...(byName.has(f.name) ? { info: byName.get(f.name) } : {}) })),
+      latest,
+      built: hasSet(latest),
+      fitted: fitted ? { agree: fitted.holdout.agree, chance: fitted.holdout.chance, holdout: fitted.holdout.file, samples: fitted.train.samples + fitted.holdout.samples } : null,
+      refreshing: !!refreshing,
+    };
   }
   function state() {
     const e = engine;
     const imit = imitationReport();
     const reference = imit ? { files: imit.files.map((f) => ({ name: f.name, score: f.score })), holdoutAgree: imit.holdout.agree, chance: imit.holdout.chance } : null;
-    if (!e) return { run: null, runs: listRuns(), reference, defaults: defaultConfig('new-run') };
+    const common = { runs: listRuns(), reference, defaults: defaultConfig('new-run'), presets: PRESETS, data: data() };
+    if (!e) return { run: null, ...common };
     const b = e.bestEver;
     return {
       run: {
@@ -79,15 +101,14 @@ export function startServer(port: number, first?: Engine): Studio {
         running: e.running,
         paused: e.paused,
         phase: e.phase,
-        bestEver: b ? { fitness: b.fitness, score: b.score, gen: b.gen, parts: b.parts, id: b.id } : null,
+        bestEver: b ? { fitness: b.fitness, score: b.score, gen: b.gen, parts: b.parts, id: b.id, val: b.val } : null,
         history: e.history(),
         events: e.events().slice(-200),
         checkpoints: e.listCheckpoints(),
         evals: e.evals().slice(-50),
+        data: e.data,
       },
-      runs: listRuns(),
-      reference,
-      defaults: defaultConfig('new-run'),
+      ...common,
     };
   }
 
@@ -106,6 +127,28 @@ export function startServer(port: number, first?: Engine): Studio {
     return engine;
   };
 
+  /** rebuild the data set from the included replays and refit, in a worker (the server stays live) */
+  const refresh = (rebuild: boolean): Promise<unknown> => {
+    if (refreshing) return refreshing;
+    const n = dataFiles().filter((f) => f.included).length;
+    say(n ? `training data: re-simulating ${n} replay${n > 1 ? 's' : ''} and refitting (≈ ${Math.max(10, 3 * n)} s)…` : 'training data: no replays included');
+    refreshing = runPool<{ key: string; log: string[] } | null>([{ module: '../train/imitate.ts', fn: 'refreshJob', args: { rebuild } }], 1)
+      .then(([r]) => {
+        for (const l of r?.log ?? []) say(l);
+        const d = data();
+        say(r ? `training data ready: ${d.fitted ? `the fitted network agrees with a held-out replay ${(100 * d.fitted.agree).toFixed(0)}% of the time (chance ${(100 * d.fitted.chance).toFixed(0)}%)` : 'fitted'}` : 'training data: nothing to learn from');
+        if (engine && engine.data.key !== (r?.key ?? '')) engine.useData(r?.key ?? '');
+      })
+      .catch((e: Error) => say(`training data refresh failed: ${e.message}`))
+      .finally(() => {
+        refreshing = null;
+        send('data', data());
+        send('status', status());
+      });
+    send('data', data());
+    return refreshing;
+  };
+
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(body));
@@ -114,12 +157,12 @@ export function startServer(port: number, first?: Engine): Studio {
     res.writeHead(200, { 'content-type': type ?? MIME[extname(p)] ?? 'application/octet-stream', 'cache-control': 'no-store', ...(gz ? { 'content-encoding': 'gzip' } : {}) });
     res.end(readFileSync(p));
   };
-  const body = (req: IncomingMessage): Promise<Record<string, unknown>> =>
+  const body = (req: IncomingMessage, limit = 1e6): Promise<Record<string, unknown>> =>
     new Promise((resolve, reject) => {
       let b = '';
       req.on('data', (c) => {
         b += c;
-        if (b.length > 1e6) reject(new HttpError(413, 'request too large'));
+        if (b.length > limit) reject(new HttpError(413, 'request too large'));
       });
       req.on('end', () => {
         try {
@@ -129,6 +172,7 @@ export function startServer(port: number, first?: Engine): Studio {
         }
       });
     });
+  const bad = (err: unknown): HttpError => (err instanceof HttpError ? err : new HttpError(400, (err as Error).message));
   let field: unknown = null;
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -145,14 +189,29 @@ export function startServer(port: number, first?: Engine): Studio {
     if (p === '/api/state') return json(res, 200, state());
     if (p === '/api/field') return json(res, 200, (field ??= createBiobuzzWorldForViewer('profiles/real-v0.json')));
 
+    // shut everything down (the studio process, DSIM, training); the page closes itself
+    if (p === '/api/quit' && post) {
+      if (!opts.onQuit) throw new HttpError(409, 'this studio was started without a quit handler — close its terminal');
+      json(res, 200, { ok: true });
+      send('quit', {});
+      setTimeout(() => opts.onQuit!(), 100);
+      return;
+    }
+
     // runs
     if (p === '/api/runs' && !post) return json(res, 200, listRuns());
     if (p === '/api/runs' && post) {
       const b = await body(req);
       if (engine?.running) throw new HttpError(409, `"${engine.name}" is training — stop it before creating another run`);
       const algo = (b.algo === 'es' ? 'es' : 'ga') as AlgoName;
-      const cfg: RunConfig = { ...defaultConfig(String(b.name ?? ''), algo) };
-      for (const k of ['pop', 'seed', 'workers', 'episodes'] as const) if (b[k] !== undefined) cfg[k] = Number(b[k]);
+      let cfg: RunConfig = { ...defaultConfig(String(b.name ?? ''), algo) };
+      if (typeof b.preset === 'string' && b.preset) {
+        const pr = PRESETS.find((q) => q.id === b.preset);
+        if (!pr) throw new HttpError(400, 'unknown preset');
+        cfg = { ...cfg, ...pr.change, preset: pr.id };
+      }
+      for (const k of ['pop', 'seed', 'workers', 'episodes'] as const) if (b[k] !== undefined && b[k] !== '' && b[k] !== null) cfg[k] = Number(b[k]);
+      if (b.pop !== undefined && cfg.algo === 'ga') cfg.elite = Math.min(cfg.elite, Math.max(0, cfg.pop - 2));
       if (b.init === 'random' || b.init === 'imitation') cfg.init = b.init;
       if (b.driver === 'human' || b.driver === 'oracle') cfg.driver = b.driver;
       if (b.stage === 'auto' || b.stage === 'full' || b.stage === 'curriculum') cfg.stage = b.stage;
@@ -161,13 +220,16 @@ export function startServer(port: number, first?: Engine): Studio {
         cfg.profile = b.profile;
       }
       if (typeof b.sampleProfile === 'boolean') cfg.sampleProfile = b.sampleProfile;
-      say(`creating run "${cfg.name}"${cfg.init === 'imitation' ? ' (fitting your replays if they changed — up to ~20 s)' : ''}…`);
-      await new Promise((r) => setImmediate(r)); // let the log line go out first
+      const err = (NAME_RE.test(cfg.name) ? null : 'run names use letters, digits, - and _ (up to 48)') ?? validate(cfg) ?? checkRun(cfg);
+      if (err) throw new HttpError(400, err);
+      // the replays are fitted in a worker first, so the studio stays responsive
+      if (currentKey() && (!hasSet(currentKey()) || imitationReport()?.dataKey !== currentKey())) await refresh(false);
+      say(`creating run "${cfg.name}"…`);
       let e: Engine;
       try {
         e = Engine.create(cfg, say);
       } catch (err) {
-        throw new HttpError(400, (err as Error).message);
+        throw bad(err);
       }
       engine?.removeAllListeners();
       engine = e;
@@ -194,11 +256,110 @@ export function startServer(port: number, first?: Engine): Studio {
         engine.removeAllListeners();
         engine = null;
       }
-      deleteRun(name);
+      try {
+        deleteRun(name);
+      } catch (err) {
+        throw bad(err);
+      }
       send('reset', state());
       return json(res, 200, { ok: true });
     }
+    if (p === '/api/runs/rename' && post) {
+      const b = await body(req);
+      const from = String(b.name ?? '');
+      const to = String(b.to ?? '');
+      const wasOpen = engine?.name === from;
+      if (wasOpen && engine!.running) throw new HttpError(409, 'stop training before renaming this run');
+      if (wasOpen) {
+        engine!.removeAllListeners();
+        engine = null;
+      }
+      try {
+        renameRun(from, to);
+      } catch (err) {
+        if (wasOpen) open(from);
+        throw bad(err);
+      }
+      if (wasOpen) open(to);
+      else send('reset', state());
+      return json(res, 200, { ok: true, name: to });
+    }
+    if (p === '/api/runs/duplicate' && post) {
+      const b = await body(req);
+      const from = String(b.name ?? '');
+      const to = String(b.to ?? '');
+      try {
+        if (engine?.name === from) engine.fork('now', to);
+        else {
+          if (!NAME_RE.test(to)) throw new Error('run names use letters, digits, - and _ (up to 48)');
+          if (existsSync(join(RUNS, to))) throw new Error(`run "${to}" already exists`);
+          if (!NAME_RE.test(from) || !existsSync(join(RUNS, from, 'checkpoint.json'))) throw new Error(`no run called "${from}"`);
+          const tmp = `_copy-${Date.now().toString(36)}`;
+          cpSync(join(RUNS, from), join(RUNS, tmp), { recursive: true });
+          renameRun(tmp, to);
+        }
+      } catch (err) {
+        throw bad(err);
+      }
+      send('runs', listRuns());
+      return json(res, 200, { ok: true, name: to });
+    }
     if (p === '/api/profiles') return json(res, 200, readdirSync(join(ROOT, 'profiles')).filter((f) => f.endsWith('.json')).map((f) => `profiles/${f}`));
+
+    // training data
+    if (p === '/api/data' && !post) return json(res, 200, data());
+    if (p === '/api/data/refresh' && post) {
+      if (!refreshing) void refresh(true);
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/data/include' && post) {
+      const b = await body(req);
+      const name = String(b.name ?? '');
+      if (!dataFiles().some((f) => f.name === name)) throw new HttpError(404, 'no such replay');
+      const ex = new Set(excluded());
+      if (b.included === false) ex.add(name);
+      else ex.delete(name);
+      setExcluded([...ex]);
+      send('data', data());
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/data/upload' && post) {
+      const b = await body(req, 8e6);
+      const name = String(b.name ?? '').replace(/[^A-Za-z0-9_.-]/g, '_');
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}\.json$/.test(name)) throw new HttpError(400, 'the file must be a .json DSIM replay');
+      if (existsSync(join(DATA_DIR, name))) throw new HttpError(409, `"${name}" is already in the training data`);
+      let rep: { game?: string; mode?: string; setups?: { spec?: unknown }[]; tracks?: unknown };
+      try {
+        rep = JSON.parse(String(b.content ?? ''));
+      } catch {
+        throw new HttpError(400, 'that file is not JSON');
+      }
+      if (rep.game !== 'biobuzz' || rep.mode !== 'match' || !Array.isArray(rep.setups) || rep.setups.length !== 1 || !rep.setups[0]?.spec || typeof rep.tracks !== 'object')
+        throw new HttpError(400, 'that is not a solo BIOBUZZ match replay from DSIM (Records → the run → ↓ Data)');
+      writeFileSync(join(DATA_DIR, name), String(b.content));
+      say(`training data: added ${name} — press Refresh to learn from it`);
+      send('data', data());
+      return json(res, 200, { ok: true, name });
+    }
+    if (p === '/api/data/use' && post) {
+      try {
+        need().useData(currentKey());
+      } catch (err) {
+        throw bad(err);
+      }
+      return json(res, 200, { ok: true });
+    }
+
+    // presets
+    if (p === '/api/presets' && !post) return json(res, 200, PRESETS);
+    if (p === '/api/presets/apply' && post) {
+      const b = await body(req);
+      try {
+        return json(res, 200, { ok: true, changed: need().applyPreset(String(b.id ?? '')) });
+      } catch (err) {
+        throw bad(err);
+      }
+    }
 
     // training control
     if (p === '/api/control' && post) {
@@ -225,7 +386,12 @@ export function startServer(port: number, first?: Engine): Studio {
       const m = need().checkpoint(String(b.label ?? '').trim() || `gen ${need().gen}`);
       return json(res, 200, { ok: true, saved: m, deferred: !m });
     }
-    const ck = p.match(/^\/api\/checkpoints\/([a-z0-9-]+)\/(rewind|fork|pin|delete)$/);
+    if (p === '/api/checkpoints/delete-many' && post) {
+      const b = await body(req);
+      if (b.which !== 'auto' && b.which !== 'unpinned') throw new HttpError(400, 'which must be auto or unpinned');
+      return json(res, 200, { ok: true, deleted: need().deleteCheckpoints(b.which) });
+    }
+    const ck = p.match(/^\/api\/checkpoints\/([a-z0-9-]+)\/(rewind|fork|pin|delete|rename)$/);
     if (ck && post) {
       const e = need();
       const b = await body(req);
@@ -235,16 +401,20 @@ export function startServer(port: number, first?: Engine): Studio {
           e.pinCheckpoint(ck[1], b.pinned !== false);
           return json(res, 200, { ok: true });
         }
+        if (ck[2] === 'rename') {
+          e.renameCheckpoint(ck[1], String(b.label ?? ''));
+          return json(res, 200, { ok: true });
+        }
         if (ck[2] === 'delete') {
           e.deleteCheckpoint(ck[1]);
           return json(res, 200, { ok: true });
         }
         const name = e.fork(ck[1] === 'now' ? 'now' : ck[1], String(b.name ?? ''), (b.overrides ?? {}) as Partial<RunConfig>);
-        if (b.open) open(name);
         send('runs', listRuns());
+        if (b.open) open(name);
         return json(res, 200, { ok: true, name });
       } catch (err) {
-        throw err instanceof HttpError ? err : new HttpError(400, (err as Error).message);
+        throw bad(err);
       }
     }
 
@@ -254,7 +424,7 @@ export function startServer(port: number, first?: Engine): Studio {
       try {
         return json(res, 200, { ok: true, changed: need().setConfig((await body(req)) as Partial<RunConfig>) });
       } catch (err) {
-        throw err instanceof HttpError ? err : new HttpError(400, (err as Error).message);
+        throw bad(err);
       }
     }
 
@@ -276,7 +446,7 @@ export function startServer(port: number, first?: Engine): Studio {
     const g = p.match(/^\/api\/gen\/(\d+)(\/frames)?$/);
     if (g) {
       const f = join(need().dir, 'gens', g[2] ? `${g[1]}.frames.json.gz` : `${g[1]}.json`);
-      if (!existsSync(f)) throw new HttpError(404, 'that generation is not on disk (the last 300 and every 100th are kept)');
+      if (!existsSync(f)) throw new HttpError(404, `generation ${g[1]} is not on disk (the last ${need().config.keepGens} and every 100th are kept)`);
       return g[2] ? file(res, f, 'application/json', true) : file(res, f);
     }
     if (p === '/api/best/frames') {
@@ -293,7 +463,7 @@ export function startServer(port: number, first?: Engine): Studio {
     // exports
     if (p === '/api/export/metrics.csv') {
       const h = need().history();
-      const cols = ['gen', 'stage', 'best', 'mean', 'median', 'p90', 'bestScore', 'meanScore', 'meanTips', 'meanLifeS', 'wallS', 'robotsPerMin', 'bestEver', 'bestEverScore', 'meanMuts', 'bestOp'] as const;
+      const cols = ['gen', 'stage', 'best', 'mean', 'median', 'p90', 'bestScore', 'meanScore', 'champScore', 'champCi', 'meanTips', 'meanLifeS', 'wallS', 'robotsPerMin', 'bestEver', 'bestEverScore', 'imitShare', 'meanMuts', 'bestOp'] as const;
       const rows = h.map((q) => cols.map((c) => String((q as unknown as Record<string, unknown>)[c] ?? '')).join(','));
       res.writeHead(200, { 'content-type': 'text/csv', 'content-disposition': `attachment; filename="${need().name}-metrics.csv"` });
       return void res.end([cols.join(','), ...rows].join('\n'));
@@ -302,7 +472,7 @@ export function startServer(port: number, first?: Engine): Studio {
       const e = need();
       if (!e.bestEver) throw new HttpError(404, 'no champion yet');
       res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${e.name}-champion.json"` });
-      return void res.end(JSON.stringify({ run: e.name, gen: e.bestEver.gen, fitness: e.bestEver.fitness, score: e.bestEver.score, net: 'train/policy.ts SHAPE', genome: e.bestEver.genome, config: e.config }, null, 1));
+      return void res.end(JSON.stringify({ run: e.name, gen: e.bestEver.gen, fitness: e.bestEver.fitness, score: e.bestEver.score, validation: e.bestEver.val, net: 'train/policy.ts SHAPE', genome: e.bestEver.genome, config: e.config }, null, 1));
     }
 
     // static viewer (path traversal refused)
@@ -324,7 +494,7 @@ export function startServer(port: number, first?: Engine): Studio {
     try {
       open(readFileSync(LAST, 'utf8').trim());
     } catch {
-      /* it was deleted: start with none open */
+      /* it was deleted or is an old version: start with none open */
     }
   }
   return {
@@ -333,6 +503,7 @@ export function startServer(port: number, first?: Engine): Studio {
     open,
     close: async () => {
       await engine?.halt(true);
+      await refreshing;
       for (const s of streams) s.end();
       server.close();
     },

@@ -1,17 +1,28 @@
 // A small multilayer perceptron with a flat parameter vector (what evolution mutates).
 // tanh hidden layers, linear output. Float32 end to end; deterministic.
+// Optional extras on the same flat vector, in this order after the MLP:
+//   · a linear SKIP from every input straight to the output — one gene then moves one preference
+//     (e.g. "FLOWER first") without going through the hidden layer, so a mutation can change a
+//     behaviour cleanly;
+//   · STYLE genes the network never reads: parameters the skills read (train/policy.ts STYLE).
 export interface NetShape {
-  sizes: number[]; // e.g. [N_OBS, 64, 64, N_ACT]
+  sizes: number[]; // e.g. [N_IN, 16, 1]
+  skip?: boolean;
+  style?: number;
 }
 
-export function paramCount(s: NetShape): number {
+export function mlpCount(s: NetShape): number {
   let n = 0;
   for (let l = 0; l + 1 < s.sizes.length; l++) n += s.sizes[l] * s.sizes[l + 1] + s.sizes[l + 1];
   return n;
 }
+export const skipOffset = (s: NetShape): number => mlpCount(s);
+export const styleOffset = (s: NetShape): number => mlpCount(s) + (s.skip ? s.sizes[0] : 0);
+export const paramCount = (s: NetShape): number => styleOffset(s) + (s.style ?? 0);
 
-/** Xavier-style initialization from a seeded normal source */
-export function initParams(s: NetShape, gauss: () => number): Float32Array {
+/** Xavier-style initialization from a seeded normal source; skip weights start at 0, style genes
+ * at `style` (their defaults) or 0 */
+export function initParams(s: NetShape, gauss: () => number, style?: readonly number[]): Float32Array {
   const p = new Float32Array(paramCount(s));
   let o = 0;
   for (let l = 0; l + 1 < s.sizes.length; l++) {
@@ -21,6 +32,7 @@ export function initParams(s: NetShape, gauss: () => number): Float32Array {
     for (let j = 0; j < fin * fout; j++) p[o++] = gauss() * k;
     o += fout; // biases start at 0
   }
+  if (style) p.set(style, styleOffset(s));
   return p;
 }
 
@@ -48,7 +60,19 @@ export class Mlp {
       }
       o = bias + nout;
     }
-    return this.bufs[S.length - 1];
+    const out = this.bufs[S.length - 1];
+    if (this.shape.skip) {
+      const k = skipOffset(this.shape);
+      let v = 0;
+      for (let i = 0; i < S[0]; i++) v += this.p[k + i] * x[i];
+      out[0] += v;
+    }
+    return out;
+  }
+  /** the style genes (raw; the reader maps them to their ranges) */
+  style(): Float32Array {
+    const o = styleOffset(this.shape);
+    return this.p.subarray(o, o + (this.shape.style ?? 0));
   }
 }
 

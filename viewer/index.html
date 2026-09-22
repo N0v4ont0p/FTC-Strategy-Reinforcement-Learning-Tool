@@ -23,6 +23,7 @@
         <button id="btnStop" type="button" class="quiet" title="Finish this generation, save, stop">Stop</button>
         <button id="btnAbort" type="button" class="quiet danger" title="Throw away the generation in progress and stop">Abort generation</button>
       </div>
+      <button id="btnQuit" type="button" class="quiet danger quit" title="Stop training, DSIM and the studio, and close this tab">Quit studio</button>
     </header>
     <div class="topprog" aria-label="Progress"><div id="progFill"></div><span id="progText" class="mono"></span></div>
 
@@ -30,16 +31,11 @@
       <section class="stage" aria-label="Field">
         <div class="stagebar">
           <div class="modes" role="tablist" aria-label="Field view">
-            <button id="modeSwarm" role="tab" aria-selected="true" type="button">Whole generation</button>
-            <button id="modeFocus" role="tab" aria-selected="false" type="button">Best of generation</button>
+            <button id="modeLive" role="tab" aria-selected="true" type="button">Live</button>
+            <button id="modeBest" role="tab" aria-selected="false" type="button">Generation best</button>
             <button id="modeChamp" role="tab" aria-selected="false" type="button">Champion</button>
           </div>
-          <div class="genpick">
-            <button id="genPrev" type="button" aria-label="Previous generation">◀</button>
-            <span id="genLabel">—</span>
-            <button id="genNext" type="button" aria-label="Next generation">▶</button>
-            <label class="follow"><input id="follow" type="checkbox" checked /> follow live</label>
-          </div>
+          <div class="viewinfo" id="viewInfo"></div>
         </div>
         <div class="canvaswrap">
           <canvas id="field" aria-label="Robots on the BIOBUZZ field"></canvas>
@@ -50,11 +46,21 @@
             <button id="btnNew2" type="button">Create a run</button>
           </div>
         </div>
-        <div class="transport">
+        <div class="transport" id="transportLive">
+          <span class="livebadge"><i aria-hidden="true"></i>Live</span>
+          <div class="livebar" aria-hidden="true"><div id="liveFill"></div></div>
+          <span id="clockLive" class="mono">0:00</span>
+          <span id="pace" class="mono pace" title="The whole newest generation, replayed as fast as training runs, so the field keeps up with it"></span>
+        </div>
+        <div class="transport" id="transportReplay" hidden>
           <button id="play" type="button" class="quiet">Pause</button>
+          <button id="restart" type="button" class="quiet" aria-label="Restart from the beginning">↺</button>
           <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Match time" />
           <span id="clock" class="mono">0:00</span>
-          <span id="pace" class="mono pace" title="Playback keeps pace with training: each generation's replay lasts about as long as the next generation takes to run"></span>
+          <div class="seg" role="radiogroup" aria-label="Playback speed">
+            <button type="button" role="radio" data-speed="1" aria-checked="true">1×</button>
+            <button type="button" role="radio" data-speed="2" aria-checked="false">2×</button>
+          </div>
         </div>
         <div class="legend" id="fieldLegend"></div>
       </section>
@@ -62,8 +68,10 @@
       <aside class="side">
         <div class="tabs" role="tablist" aria-label="Panels">
           <button role="tab" aria-selected="true" data-tab="overview" type="button">Overview</button>
+          <button role="tab" aria-selected="false" data-tab="runs" type="button">Runs</button>
           <button role="tab" aria-selected="false" data-tab="checkpoints" type="button">Checkpoints</button>
           <button role="tab" aria-selected="false" data-tab="settings" type="button">Settings</button>
+          <button role="tab" aria-selected="false" data-tab="data" type="button">Training data</button>
           <button role="tab" aria-selected="false" data-tab="evaluate" type="button">Evaluate</button>
           <button role="tab" aria-selected="false" data-tab="lineage" type="button">Lineage</button>
           <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
@@ -81,6 +89,17 @@
               <div><span class="k">throughput</span><span class="v mono" id="rpm">—</span><span class="sub">robots / min</span></div>
             </div>
           </div>
+          <div class="card champ">
+            <div class="cardhead"><h2>Champion</h2><span class="sub" id="champGen"></span></div>
+            <div id="champBody" class="champbody">No champion yet.</div>
+            <div class="row">
+              <button id="watchChamp" type="button">Watch champion</button>
+              <button id="copySnippet" type="button" class="quiet">Copy DSIM snippet</button>
+              <a id="dlChamp" class="btnlink" href="/api/export/champion.json" download>Download network</a>
+              <a id="dlCsv" class="btnlink" href="/api/export/metrics.csv" download>Metrics CSV</a>
+            </div>
+            <p class="hint" id="snippetHint">The champion is the robot with the best mean over the run's fixed validation matches, not one lucky match. To see it in DSIM (http://localhost:5173), paste the snippet into the console (Safari: Develop → Show Web Inspector), then open Records → Career.</p>
+          </div>
           <div class="card">
             <div class="cardhead"><h2>DSIM score by generation</h2><button id="tableToggle" type="button" class="link">Show table</button></div>
             <canvas id="chartScore" height="170" aria-label="DSIM score by generation, with reference lines"></canvas>
@@ -97,16 +116,13 @@
             <canvas id="chartDeaths" height="70" aria-label="Deaths by cause per generation"></canvas>
             <div class="chartlegend" id="deathLegend"></div>
           </div>
-          <div class="card champ">
-            <div class="cardhead"><h2>Champion</h2><span class="sub" id="champGen"></span></div>
-            <div id="champBody" class="champbody">No champion yet.</div>
-            <div class="row">
-              <button id="watchChamp" type="button">Watch champion</button>
-              <button id="copySnippet" type="button" class="quiet">Copy DSIM snippet</button>
-              <a id="dlChamp" class="btnlink" href="/api/export/champion.json" download>Download network</a>
-              <a id="dlCsv" class="btnlink" href="/api/export/metrics.csv" download>Metrics CSV</a>
-            </div>
-            <p class="hint" id="snippetHint">Open DSIM (http://localhost:5173, started with the studio), paste the snippet into the console (Safari: Develop → Show Web Inspector), then open Records → Career.</p>
+        </div>
+
+        <div class="panel" data-panel="runs" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>Runs on this Mac</h2><button id="btnNew3" type="button" class="quiet">New run</button></div>
+            <div id="runsList" class="runlist"></div>
+            <p class="hint">Rename and delete need training stopped on that run. Duplicate makes an independent copy with the same history and checkpoints. Runs from older versions can only be deleted.</p>
           </div>
         </div>
 
@@ -117,34 +133,67 @@
               <input id="ckLabel" type="text" maxlength="80" placeholder="name it, e.g. before bigger mutations" aria-label="Checkpoint name" />
               <button type="submit">Save checkpoint</button>
             </form>
-            <p class="hint">A checkpoint is the whole run between two generations: every robot, the algorithm, the settings and the history. Rewinding saves the present first, so a rewind can be undone.</p>
+            <p class="hint">A checkpoint is the whole run between two generations: every robot, the algorithm, the settings, the champion and the history. Rewinding saves the present first, so a rewind can be undone.</p>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Checkpoints</h2><span class="sub" id="ckCount"></span></div>
+            <div class="row"><button id="ckDelAuto" type="button" class="quiet danger">Delete all automatic</button><button id="ckDelUnpinned" type="button" class="quiet danger">Delete all unpinned</button></div>
             <div id="ckList" class="cklist"></div>
           </div>
         </div>
 
         <div class="panel" data-panel="settings" hidden>
-          <form id="cfgForm" class="card">
-            <div class="cardhead"><h2>Evolution</h2><span class="sub" id="cfgAlgo"></span></div>
-            <div class="fields" id="cfgEvo"></div>
-            <div class="cardhead"><h2>What counts</h2></div>
-            <div class="fields" id="cfgFit"></div>
-            <div class="cardhead"><h2>The robots' world</h2></div>
-            <div class="fields" id="cfgWorld"></div>
-            <div class="cardhead"><h2>Housekeeping</h2></div>
-            <div class="fields" id="cfgHouse"></div>
-            <div class="row"><button type="submit">Apply changes</button><button type="button" id="cfgReset" class="quiet">Undo edits</button></div>
-            <p class="hint" id="cfgHint">Changes apply from the next generation, go into the log, and are part of every checkpoint after them.</p>
-            <p class="hint" id="cfgFixed"></p>
-          </form>
+          <div class="card">
+            <div class="cardhead"><h2>How to train</h2><span class="sub" id="presetNow"></span></div>
+            <div id="presetList" class="presets" role="radiogroup" aria-label="Training presets"></div>
+            <div id="presetDiff" class="sub diff"></div>
+            <div class="row"><button id="presetApply" type="button" disabled>Apply preset</button></div>
+            <p class="hint">A preset sets how hard and how the run trains: robots per generation, matches per robot, how the champion is proven, mutations, students. What the robots play (episodes, driver, robot, hints, penalties) is never touched. Applies from the next generation.</p>
+          </div>
+          <details class="card adv" id="advanced">
+            <summary><h2>Every setting</h2><span class="sub" id="cfgAlgo"></span></summary>
+            <form id="cfgForm" class="advform">
+              <div class="cardhead"><h2>Population and selection</h2></div>
+              <div class="fields" id="cfgEvo"></div>
+              <div class="cardhead"><h2>Mutations and learning from replays</h2></div>
+              <div class="fields" id="cfgLearn"></div>
+              <div class="cardhead"><h2>Accuracy</h2></div>
+              <div class="fields" id="cfgAcc"></div>
+              <div class="cardhead"><h2>What counts</h2></div>
+              <div class="fields" id="cfgFit"></div>
+              <div class="cardhead"><h2>The robots' world</h2></div>
+              <div class="fields" id="cfgWorld"></div>
+              <div class="cardhead"><h2>Housekeeping</h2></div>
+              <div class="fields" id="cfgHouse"></div>
+              <div class="row"><button type="submit">Apply changes</button><button type="button" id="cfgReset" class="quiet">Undo edits</button></div>
+              <p class="hint">Changes apply from the next generation, go into the log, and are part of every checkpoint after them.</p>
+              <p class="hint" id="cfgFixed"></p>
+            </form>
+          </details>
+        </div>
+
+        <div class="panel" data-panel="data" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>Training data</h2><span class="sub" id="dataState"></span></div>
+            <p class="sub">Your DSIM replays in <span class="mono">Training data/</span>. Each one is re-simulated in DSIM and every decision in it (which group, FLOWER, shoot, human player) becomes a lesson. Generation 0 starts from a network fitted to them, and every generation a share of robots are <b>students</b>: a parent that takes a short lesson from these replays and from the champion's own decisions. How big that share is follows how well students do.</p>
+            <div id="dataList" class="datalist"></div>
+            <div class="row">
+              <button id="dataRefresh" type="button">Refresh training data</button>
+              <label class="btnlink upload">Add replays…<input id="dataUpload" type="file" accept=".json,application/json" multiple hidden /></label>
+            </div>
+            <p class="hint" id="dataRun"></p>
+            <p class="hint">Refresh re-simulates the ticked replays and refits (a few seconds per replay); the open run then learns from the new set from its next generation. In DSIM, save a replay with Records → the run → ↓ Data.</p>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>What the students achieve</h2></div>
+            <div id="studentStats" class="sub"></div>
+          </div>
         </div>
 
         <div class="panel" data-panel="evaluate" hidden>
           <form id="evalForm" class="card">
             <div class="cardhead"><h2>Evaluate a policy</h2></div>
-            <p class="hint">Full matches on held-out seeds (never used in training), no hints in the score. Runs between generations.</p>
+            <p class="hint">Full matches on held-out seeds (never used in training or validation), no hints in the score. Runs between generations.</p>
             <div class="fields">
               <label>Policy <select id="evalTarget"></select></label>
               <label>Matches <input id="evalN" type="number" min="1" max="2000" value="32" /></label>
@@ -159,10 +208,14 @@
 
         <div class="panel" data-panel="lineage" hidden>
           <div class="card">
+            <div class="cardhead"><h2>What works</h2><span class="sub">share of each kind of child that made the top quarter</span></div>
+            <div id="opStats" class="opstats"></div>
+          </div>
+          <div class="card">
             <div class="cardhead"><h2>How generation <span id="linGen">—</span> was made</h2></div>
             <div id="linOps" class="ops"></div>
             <div id="linTable" class="table tall"></div>
-            <p class="hint">elite = carried over unchanged · mutant = a parent with some genes nudged · cross = genes mixed from two parents, then nudged · seed = the network fitted to your replays. Parent ranks are in the previous generation.</p>
+            <p class="hint">elite = kept unchanged · champion = the validated best, always kept · mutant = small nudges to some genes · crossover = genes mixed from two parents · behaviour mutation = a large change proven to alter what it chooses (or a skill setting) · student = a parent after a lesson from your replays · random = a brand-new robot. "Behaviour" is the share of test decisions where it now chooses differently from its parent.</p>
           </div>
         </div>
 
@@ -178,7 +231,7 @@
         <div class="combhead"><h2>What the robots choose to do</h2><span class="sub">share of decisions per generation, whole population · the order is what evolution learns</span></div>
         <canvas id="chartChoice" height="90" aria-label="Share of each option chosen per generation"></canvas>
         <div class="chartlegend" id="choiceLegend"></div>
-        <div class="combhead gap"><h2>Every generation so far</h2><span class="sub">one cell per generation · brighter = higher best score · click to replay it</span><div class="ramp" id="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div>
+        <div class="combhead gap"><h2>Every generation so far</h2><span class="sub">one cell per generation · brighter = higher best score · click to replay its best robot</span><div class="ramp" id="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div>
         <canvas id="comb" aria-label="Honeycomb of generations"></canvas>
       </section>
     </main>
@@ -188,9 +241,10 @@
         <h2 id="newTitle">New run</h2>
         <div class="fields">
           <label>Name <input name="name" required pattern="[A-Za-z0-9_][A-Za-z0-9_\-]{0,47}" placeholder="solo-1" /></label>
+          <label>How to train <select name="preset" id="newPreset"></select></label>
           <label>Algorithm
             <select name="algo"><option value="ga">Genetic algorithm</option><option value="es">Evolution strategies</option></select></label>
-          <label>Population <input name="pop" type="number" min="4" max="8192" value="128" /></label>
+          <label>Population <input name="pop" type="number" min="4" max="8192" placeholder="from the preset" /></label>
           <label>Generation 0
             <select name="init"><option value="imitation">Learned from your replays</option><option value="random">Random networks</option></select></label>
           <label>Robot <select name="profile" id="newProfile"></select></label>
@@ -223,11 +277,19 @@
       <form method="dialog" class="dlg">
         <h2 id="askTitle"></h2>
         <p id="askText"></p>
-        <label id="askTypeWrap" hidden>Type <b id="askWord"></b> to confirm <input id="askType" autocomplete="off" /></label>
+        <label id="askInputWrap" hidden><span id="askInputLabel"></span><input id="askInput" autocomplete="off" maxlength="80" /></label>
+        <label id="askTypeWrap" hidden><span>Type <b id="askWord"></b> to confirm</span><input id="askType" autocomplete="off" /></label>
         <div class="row end"><button value="no" class="quiet">Cancel</button><button value="yes" id="askYes">Confirm</button></div>
       </form>
     </dialog>
 
+    <div id="closed" class="closed" hidden>
+      <div>
+        <p class="emptyhead">Studio closed</p>
+        <p>Training, DSIM and the studio have stopped. Your runs are saved. Start again with <span class="mono">./start.sh</span>.</p>
+        <p class="sub" id="closedHint">You can close this tab.</p>
+      </div>
+    </div>
     <div id="tip" class="tip" role="tooltip" hidden></div>
     <div id="toast" class="toast" role="status" hidden></div>
     <script type="module" src="./src/main.ts"></script>

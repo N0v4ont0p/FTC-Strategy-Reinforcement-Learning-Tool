@@ -183,18 +183,37 @@ export class FieldView {
     if (this.mode === 'focus' && this.fr) this.seekFocus(this.tick);
   }
 
-  /** advance by one animation frame */
+  /** the start of the replay (the swarm starts at AUTO; exact frames at their first frame) */
+  get startTick(): number {
+    return this.mode === 'swarm' ? AUTO_START : (this.fr?.f[0]?.t ?? 0);
+  }
+
+  /** advance by one animation frame. `loop` (LIVE) wraps and calls onLoop; otherwise (a replay you
+   * analyse) it stops on the last frame and calls onEnd. Real match time: 60 ticks a second × speed. */
   step(dtMs: number): void {
     if (!this.playing) return;
-    const ticks = Math.max(1, Math.round((dtMs / 1000) * 60 * this.speed));
+    this.acc += (dtMs / 1000) * 60 * this.speed;
+    const ticks = Math.floor(this.acc);
+    if (ticks < 1) return;
+    this.acc -= ticks;
     this.tick += ticks;
     if (this.tick > this.endTick) {
-      this.tick = this.mode === 'swarm' ? AUTO_START : (this.fr?.f[0]?.t ?? 0);
-      if (this.mode === 'focus') this.resetFocus();
-      this.onLoop();
+      if (this.loop) {
+        this.tick = this.startTick;
+        if (this.mode === 'focus') this.resetFocus();
+        this.onLoop();
+      } else {
+        this.tick = this.endTick;
+        this.playing = false;
+        this.onEnd();
+      }
     }
     if (this.mode === 'focus' && this.fr) this.seekFocus(this.tick);
   }
+  private acc = 0;
+  /** LIVE loops; a replay stops at its end */
+  loop = true;
+  onEnd: () => void = () => {};
 
   // ─────────────────────────────── drawing ───────────────────────────────
   draw(): void {

@@ -13,6 +13,7 @@ import { Guards } from '../harness/guards';
 import { mulberry32, seedOf } from '../harness/rng';
 import { fromB64 } from './net';
 import { policyController, type Decision } from './policy';
+import { pack, type Packed, type Sample } from './bc';
 import { OPTION_KINDS, spawnPose } from './skills';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -43,6 +44,7 @@ export interface EpisodeArgs {
   track: boolean; // return a downsampled path + decisions for the swarm view
   frames?: boolean; // return exact frames for the focus view
   record: boolean; // return a DSIM replay (champion showcase / DSIM snippet)
+  samples?: boolean; // return every decision (observation, options, choice) — the robot's own experience
 }
 
 export interface Parts {
@@ -69,6 +71,7 @@ export interface EpisodeResult {
   frames?: Frames;
   replay?: unknown;
   replayExact?: boolean;
+  samples?: Packed;
 }
 
 /** exact frames — what DSIM's renderers need to redraw this life exactly as it was trained */
@@ -108,7 +111,8 @@ export function runEpisode(a: EpisodeArgs): EpisodeResult {
   const ev = (t: number, k: string): void => {
     if ((a.track || a.frames) && events.length < 2000) events.push([t, k]);
   };
-  const ctl = policyController(a.genome ? fromB64(a.genome) : null, prof, 0, decisions);
+  const exp: Sample[] = [];
+  const ctl = policyController(a.genome ? fromB64(a.genome) : null, prof, 0, decisions, a.samples ? exp : undefined);
   const kindIdx = (k: string | undefined): number => (k ? OPTION_KINDS.indexOf(k as (typeof OPTION_KINDS)[number]) : -1);
 
   // exact frames
@@ -245,6 +249,7 @@ export function runEpisode(a: EpisodeArgs): EpisodeResult {
     out.frames = fr;
     out.events = events;
   }
+  if (a.samples) out.samples = pack(exp);
   if (a.record && run.replay) {
     out.replay = run.replay;
     out.replayExact = run.replayExact;

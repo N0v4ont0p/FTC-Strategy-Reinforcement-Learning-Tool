@@ -272,6 +272,8 @@ export class FieldView {
       if (d[m][0] <= T) lo = m;
       else hi = m - 1;
     }
+    // a human-player press happens alongside the robot's job: show the job it is doing
+    while (lo > 0 && d[lo][1] === 4) lo--;
     const q = d[lo];
     const opt = OPTIONS[q[1]];
     if (!opt) return;

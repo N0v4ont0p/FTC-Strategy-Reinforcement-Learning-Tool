@@ -34,6 +34,8 @@ Order: **SOLO first** (baseline, then teach), then DUO, then full 4-robot matche
 | 2026-09-22 | skills v2 from the world-record replays: GROUP sweeps (commit to a cluster), cross to the other CELL the moment a tip starts, fire from wherever a shot can land |
 | 2026-09-22 | replays used during training, not only at generation 0: STUDENTS (lesson on replays + champion's decisions), share adapted by measured success (user: "a small percentage learn from that … other generations would know") |
 | 2026-09-22 | champion = best mean over fixed validation matches (not one match) |
+| 2026-09-23 | robots THINK ON THE GO (user: "deciding every time… thinking every way through"): re-score every option 4×/s with the current job flagged; switch past a stick gene; never idle (position, max 3 s); HP press alongside; no dead tick between jobs |
+| 2026-09-23 | user: "fitness is down". Found: champion by best-of-many on 8 fixed matches = winner's curse (220 validated → 192 unseen). Champion now starts as the no-learning robot (distilled) and changes only by racing on fresh paired matches (Pocock z ≥ 2.3) |
 
 Facts marked **(code)** were read from DSIM source on 2026-09-22 (zip snapshot, no git), and are
 re-verified in S0 against the pinned copy.
@@ -707,104 +709,16 @@ What changed, and why:
 
 **Caught and fixed while building it:** the frame look-ahead oscillation above; bans after a failed group; tour length bug; behaviour mutations that could not be verified (style genes now must cross a threshold, network ones strengthened up to 10 tries); the oldest run has no version field (now read as version 1); `hidden` overridden by a component's display rule (global fix).
 
-### 14.3 Is the whole pipeline planned, with room to keep improving?
+**THINKING + HONEST CHAMPION RESULT (2026-09-23): BUILT — gate 66/66.**
 
-**Planned:**
-- layers L1–L5
-- stages S-1 → S7 + S-cal, each with a gate
-- robot profiles and knob layers A/B/C
-- design envelope
-- driver model
-- rule guards and anomaly detectors
-- Pedro-native AUTO
-- outputs
+| piece | what and why |
+|---|---|
+| thinking on the go (`train/policy.ts`) | every THINK_TICKS (15) the full option list is re-scored with the current job flagged (`current` feature); switch only past the `stick` style gene; `position` option (beside a coming spill / at a scoring spot), capped at 3 s then banned 9 s; HP pressed alongside the job; the next job starts on the tick the last one ends |
+| dense demonstrations (`train/imitate.ts`) | two passes per replay; a lesson every 15 ticks labelled with the human's NEXT action. The sparse version (lessons only at job changes) taught the net to always abandon its job: 147 switches in 158 decisions, 47 points. Now 3,069 lessons, 89 % "carry on"; held-out 91.5 % (40 % at job changes, chance 21 %); fitted net 253 vs greedy 249 |
+| dense experience | the robot's own "carry on" decisions are recorded too (students learned dithering from sparse ones) |
+| greedy distillation | the greedy baseline played 24 matches → 13,895 decisions → the policy net (97.8 % same choice held-out, 193 vs 190 points). Seeds generation 0 and is the starting champion |
+| racing champion (`train/engine.ts`) | up to 3 contenders; champion + contenders play K fresh paired matches per generation; promote at z ≥ 2.3 (Pocock, ≤ 10 looks, one-sided 5 %); drop at z ≤ −1.645 after 2K or at 96 matches; champion score = running fresh-match mean. Trial: an early +17 shrank to +1 ± 12 after 48 matches — caught, not promoted |
+| behaviour mutations | a network change that moves < 10 % of probe choices after 10 tries becomes a skill-gene change: 64/64 change behaviour |
+| G409 | intake holds off 0.45 s near a just-spilled element: G409 flags 6 → 0 over 8 matches, score unchanged (213 vs 204 on 12) |
 
-**Deliberately decided by experiment at each stage start** (fixing them now would be guessing):
-- reward weights and shaping schedule
-- network sizes
-- hyperparameters
-- the exact decision rate (10–15 Hz)
-- the macro-action set
-- search budgets
-- league composition
-- refined envelope ranges
-
-**Improvement loops (they keep running while there is measurable room left):**
-1. **Expert iteration** (AlphaZero-style): search over DSIM clones improves the network; the
-   network makes search faster and deeper; repeat.
-2. **League self-play with exploiters** (duo / 4-robot). Every weakness found becomes training data.
-3. **Population-based training** for hyperparameters and reward weights.
-4. **Failure mining:** automatically find starts, seeds and profiles where the agent trails the
-   planner or the bound → add them to the curriculum.
-5. **Bound tightening:** better relaxations → smaller, truer optimality gap → shows exactly
-   where improvement is left.
-6. **Distill → verify:** VIPER trees are re-simulated in DSIM; where tree and network disagree
-   becomes new training data.
-7. **Driver loop:** scorecards expose human-tier gaps → drills + a more accurate driver model.
-8. **External triggers:** REAL-vN calibration, FIRST Team Updates, and DSIM version bumps
-   re-run the affected stages.
-
-**Honest ceilings:**
-- The game's optimum under DSIM — once the gap ≈ 0, there is nothing left to gain.
-- DSIM's fidelity.
-- Finite compute.
-- DSIM-optimal ≠ real-field-optimal until S-cal.
-- The human tier is only as accurate as the measured driver model.
-
-### 14.4 Questions to answer before S-1
-
-"Default" is what the tool does if the answer is left blank.
-
-**Goals and timing**
-
-| # | question | default | why it matters |
-|---|---|---|---|
-| 1 | Date of the first competition? | — | decides what gets built first |
-| 2 | Success metric: max points, win rate, or ranking points? RP thresholds ("all other events"): SWARM ≥ 16 LEAVE+PARK points, POLLINATOR 1 ≥ 4 TIPS, POLLINATOR 2 ≥ 7 TIPS | optimize win + RP jointly; report points too | RP can favor a different plan than max points |
-| 3 | Risk preference: best average or safest floor? | show both | changes which plan is "best" |
-| 4 | Who reads outputs (drivers / coach / build / programmers), and in what format (Word, PDF, web)? | Word doc per playbook + web pages for maps | output design |
-
-**Robot**
-
-| # | question | default | why it matters |
-|---|---|---|---|
-| 5 | Turrets on front + back cells, intake at the back, shooter's default direction = front? | yes | intake heading, shot geometry |
-| 6 | Intake as wide as the robot (DSIM sweeper), or narrower? | full width | collection routes |
-| 7 | Target frame size, or the largest legal? | largest legal, plus a smaller WHAT-IF | speed, envelope |
-| 8 | Odometry: Pinpoint / dead-wheel pods? | yes, Pinpoint | Pedro accuracy assumptions |
-| 9 | Keep Box Tube as a WHAT-IF? | yes | upgrade value |
-| 10 | Known turret limits (rotation range, cable wrap)? | 180°–unlimited range | shoot-while-collecting |
-
-**Drive team**
-
-| # | question | default | why it matters |
-|---|---|---|---|
-| 11 | One driver doing everything (like DSIM), or driver + operator on 2 gamepads (standard in FTC)? | model both; recommend | changes the whole human model |
-| 12 | How many drivers train; per-driver scorecards? | 2 drivers; per-driver scorecards | driver tracking |
-| 13 | Field-centric, robot-centric, or let the tool decide? | tool tests all three | human tier |
-| 14 | Who is the human player; will they practice with a timing card? | yes | NECTAR timing |
-| 15 | Hours per week of DSIM practice? | — | practice-plan sizing |
-
-**Strategy scope**
-
-| # | question | default | why it matters |
-|---|---|---|---|
-| 16 | Solo target: DSIM leaderboard score (includes the free-preload quirk) or real match staging? | both, labeled | habits vs record |
-| 17 | Defense later: strategic legal defense OK, or minimal? | legal defense allowed; referee-model margin | S7 scope |
-| 18 | Preferred start positions, or tool picks? | tool picks, all anchors reported | AUTO matrix |
-| 19 | Unconfirmed tip rows: DSIM values as baseline + sweeps? | yes | core strategy |
-| 20 | Rule doubts (e.g. human player during AUTO): I read the manual and choose the conservative reading? | yes, each one flagged to you | legality |
-
-**Machine and operations**
-
-| # | question | default | why it matters |
-|---|---|---|---|
-| 21 | Permission to download: DSIM npm dependencies (Electron skipped), and Python PyTorch + OR-Tools + CasADi (~1–2 GB total) | needs your explicit yes | nothing runs without it |
-| 22 | Long runs (hours/days): I give start commands for **your** terminal and read the results afterwards? | yes (matches your no-long-background-jobs preference) | training operations |
-| 23 | Build on the M5 now, move to the M6 later? | yes | timeline |
-| 24 | Our code in this folder with its own git repo (DSIM snapshot untouched)? | yes | traceability |
-| 25 | Is this zip the alpha snapshot; who brings in new DSIM versions? | stay frozen until you say | version pinning |
-| 26 | Are you on the DSIM dev team? | assume no → everything private | patch upstream, sharing |
-| 27 | Share results with alliance partners, or team only? | team only | privacy |
-| 28 | Approve each stage before the next starts? | yes | gates |
-| 29 | Run the S-1 feasibility check first (needs #21)? | yes | proves §14.1/§14.2 before building |
+**Measured:** greedy 12-match 213; thinking vs previous version 214 vs 203 on 36 paired (+11 ± 13, n.s.); 6 gens × 48: champion = baseline level (205 vs 211 on 16 unseen, tie), no contender proven. Signal: paired sd ≈ 40 points per match ⇒ ~100 paired matches to prove +10. Learning above the baseline needs long runs (Full push).

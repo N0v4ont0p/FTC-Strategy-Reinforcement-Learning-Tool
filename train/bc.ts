@@ -92,6 +92,14 @@ function checkShape(shape: NetShape): void {
   if (shape.sizes.length !== 3 || shape.sizes[2] !== 1) throw new Error('behaviour cloning supports [inputs, hidden, 1] networks'); // ponytail: one hidden layer, the policy's shape; generalize if the policy grows a layer
 }
 
+/** the network's score for every option of one decision */
+export function scoreAll(shape: NetShape, p: Float32Array, s: Sample): Float64Array {
+  checkShape(shape);
+  const z = new Float64Array(s.k);
+  forward(shape, p, s, [], z);
+  return z;
+}
+
 /** the option the network would take */
 export function choose(shape: NetShape, p: Float32Array, s: Sample): number {
   checkShape(shape);

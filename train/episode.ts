@@ -67,7 +67,7 @@ export interface EpisodeResult {
   point: Record<string, number>;
   track?: string; // base64 Float32 TRACK_FIELDS per sample, every TRACK_STRIDE ticks from tick 0
   events?: [number, string][]; // [tick, kind]
-  decisions?: [number, number, number, number, number][]; // [tick, kind index, x, y, 1 = done / 0 = failed]
+  decisions?: [number, number, number, number, number][]; // [tick, kind index, x, y, 1 = done / 0 = failed / 2 = switched to something better]
   frames?: Frames;
   replay?: unknown;
   replayExact?: boolean;
@@ -243,7 +243,7 @@ export function runEpisode(a: EpisodeArgs): EpisodeResult {
   if (a.track) {
     out.track = Buffer.from(new Float32Array(path).buffer).toString('base64');
     out.events = events;
-    out.decisions = decisions.map((d) => [d.tick, kindIdx(d.kind), Math.round(d.x), Math.round(d.y), d.outcome === 'failed' ? 0 : 1]);
+    out.decisions = decisions.map((d) => [d.tick, kindIdx(d.kind), Math.round(d.x), Math.round(d.y), d.outcome === 'failed' ? 0 : d.outcome === 'switched' ? 2 : 1]);
   }
   if (fr) {
     out.frames = fr;

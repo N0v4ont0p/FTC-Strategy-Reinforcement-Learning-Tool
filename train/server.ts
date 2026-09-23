@@ -6,8 +6,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { cpSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { createBiobuzzWorldForViewer } from './field';
-import { Engine, NAME_RE, PRESETS, RUNS, ROOT, checkRun, defaultConfig, deleteRun, listRuns, renameRun, type RunConfig } from './engine';
-import { DATA_DIR, currentKey, dataFiles, excluded, hasSet, imitationReport, setExcluded } from './imitate';
+import { Engine, NAME_RE, PRESETS, RUNS, ROOT, checkRun, confStats, defaultConfig, deleteRun, listRuns, renameRun, type Best, type RunConfig } from './engine';
+import { DATA_DIR, currentKey, dataFiles, excluded, greedyReport, hasSet, imitationReport, setExcluded } from './imitate';
 import { runPool } from '../harness/pool';
 import { validate, type AlgoName } from './algos';
 
@@ -39,6 +39,9 @@ export interface Studio {
   close: () => Promise<void>;
 }
 
+/** the champion as the studio shows it: score and 95 % interval over fresh matches when it has them */
+const champ = (b: Best) => ({ fitness: Number.isFinite(b.fitness) ? b.fitness : null, score: Number.isFinite(b.fitness) ? b.score : null, gen: b.gen, parts: b.parts, id: b.id, val: b.val, conf: b.conf?.n ? confStats(b.conf) : null, baseline: !!b.baseline });
+
 export function startServer(port: number, first?: Engine, opts: { onQuit?: () => void } = {}): Studio {
   let engine: Engine | null = first ?? null;
   let refreshing: Promise<unknown> | null = null;
@@ -55,7 +58,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       send('generation', g);
       send('runs', listRuns()); // generation, champion and size in the run list
     });
-    e.on('best', (b) => send('best', { fitness: b.fitness, score: b.score, gen: b.gen, parts: b.parts, id: b.id, val: b.val }));
+    e.on('best', (b: Best) => send('best', champ(b)));
     e.on('log', (l) => send('log', l));
     e.on('checkpoints', () => send('checkpoints', e.listCheckpoints()));
     e.on('eval', (r) => send('eval', r));
@@ -101,7 +104,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
         running: e.running,
         paused: e.paused,
         phase: e.phase,
-        bestEver: b ? { fitness: b.fitness, score: b.score, gen: b.gen, parts: b.parts, id: b.id, val: b.val } : null,
+        bestEver: b ? champ(b) : null,
         history: e.history(),
         events: e.events().slice(-200),
         checkpoints: e.listCheckpoints(),
@@ -223,7 +226,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       const err = (NAME_RE.test(cfg.name) ? null : 'run names use letters, digits, - and _ (up to 48)') ?? validate(cfg) ?? checkRun(cfg);
       if (err) throw new HttpError(400, err);
       // the replays are fitted in a worker first, so the studio stays responsive
-      if (currentKey() && (!hasSet(currentKey()) || imitationReport()?.dataKey !== currentKey())) await refresh(false);
+      if ((currentKey() && (!hasSet(currentKey()) || imitationReport()?.dataKey !== currentKey())) || !greedyReport()) await refresh(false);
       say(`creating run "${cfg.name}"…`);
       let e: Engine;
       try {

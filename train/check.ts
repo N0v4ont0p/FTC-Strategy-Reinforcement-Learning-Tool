@@ -8,15 +8,15 @@ import { BB, bb, bbEvalStart, coerce, footprintCorners, init, newMatch } from '.
 import { loadProfile, resolve } from '../harness/profiles';
 import { polysOverlap, rect } from '../harness/geom';
 import { ES, GA, MACRO_MIN_CHANGE, centeredRanks, DEFAULTS, validate, type AlgoConfig, type Teacher } from './algos';
-import { fromB64, paramCount, skipOffset } from './net';
+import { fromB64, paramCount, skipOffset, styleOffset } from './net';
 import { SHAPE, STYLE_DEFAULT_GENES, decodeStyle } from './policy';
 import { N_OBS } from './obs';
-import { N_OPT_FEATS, OPTION_KINDS, groupsOf, spawnPose, targetCell } from './skills';
+import { F_CURRENT, N_OPT_FEATS, OPTION_KINDS, groupsOf, spawnPose, targetCell } from './skills';
 import { runEpisode, type EpisodeArgs } from './episode';
-import { Engine, PRESETS, ROOT, checkRun, defaultConfig, type RunConfig } from './engine';
+import { Engine, PRESETS, ROOT, Z_PROMOTE, checkRun, defaultConfig, type RunConfig } from './engine';
 import { startServer } from './server';
-import { DATA_DIR, currentKey, demonstrations, ensureData, loadSet, setSamples } from './imitate';
-import { choose, disagreement, unpack } from './bc';
+import { DATA_DIR, currentKey, demonstrations, ensureData, ensureGreedy, loadSet, setSamples } from './imitate';
+import { disagreement, scoreAll, unpack } from './bc';
 
 let fails = 0;
 const check = (name: string, ok: boolean, detail = ''): void => {
@@ -64,6 +64,9 @@ const base = (seed: number, extra: Partial<EpisodeArgs> = {}): EpisodeArgs => ({
       groupPickups += picks.filter((t) => t >= q[0] && t < end).length;
     });
   }
+  const sw = R.reduce((a, r) => a + (r.decisions ?? []).filter((q) => q[4] === 2).length, 0) / R.length;
+  const pos = R.reduce((a, r) => a + (r.decisions ?? []).filter((q) => q[1] === 6).length, 0) / R.length;
+  check('2 thinking on the go: the robot re-thinks while it acts and switches when something is better', sw >= 5, `${sw.toFixed(1)} switches and ${pos.toFixed(1)} "get in position" per match`);
   check('2 skills: a GROUP decision sweeps several elements, not one', groupPickups / groupDecisions >= 1.5, `${(groupPickups / groupDecisions).toFixed(2)} elements per group decision`);
   // groups: single linkage
   const w = newMatch(1, [{ id: 0, alliance: 'blue', spec: prof.spec, startIndex: 0 }]);
@@ -88,7 +91,18 @@ const data = ensureData();
   const b = runEpisode(base(21, { genome: g, frames: true, samples: true }));
   check('3 episode: same network + seed → identical life (score, path, decisions, frames, samples)', a.fitness === b.fitness && a.track === b.track && JSON.stringify(a.decisions) === JSON.stringify(b.decisions) && JSON.stringify(a.frames) === JSON.stringify(b.frames) && JSON.stringify(a.samples) === JSON.stringify(b.samples));
   const S = a.samples ? unpack(a.samples, N_OBS, N_OPT_FEATS) : [];
-  check("3 experience: the robot's own decisions come back and replay its choices exactly", S.length > 10 && !!g && S.filter((s) => choose(SHAPE, fromB64(g), s) === s.y).length >= 0.98 * S.length, `${S.length} decisions`);
+  // every decision the robot made comes back — carrying on included — and matches its own rule:
+  // the best-scoring option, or its current job while nothing beats it by more than its stick gene
+  const gp = g ? fromB64(g) : null;
+  const stick = gp ? decodeStyle(gp.subarray(styleOffset(SHAPE))).stick : 0;
+  const ruleOk = (q: (typeof S)[number]): boolean => {
+    const z = scoreAll(SHAPE, gp!, q);
+    const top = Math.max(...z);
+    const isCur = q.feats[q.y * N_OPT_FEATS + F_CURRENT] === 1;
+    return z[q.y] === top || (isCur && top - z[q.y] <= stick + 1e-6);
+  };
+  const stays = S.filter((q) => q.feats[q.y * N_OPT_FEATS + F_CURRENT] === 1).length;
+  check("3 experience: the robot's own decisions come back — carrying on included — and follow its own rule", S.length > 100 && !!gp && stays > 0.5 * S.length && S.filter(ruleOk).length >= 0.98 * S.length, `${S.length} decisions, ${((100 * stays) / Math.max(1, S.length)).toFixed(0)}% carry on`);
   const f = a.frames!.f;
   const last = f[f.length - 1];
   check('3 frames: one frame every 2 ticks for the whole life, every element in every frame', f.length >= Math.floor(a.ticks / 2) && f.every((q) => q.b.length === 3 * a.frames!.meta.length));
@@ -101,8 +115,25 @@ const data = ensureData();
   check('3 episode: AUTO-only stops at the end of AUTO', auto.ticks <= 240 + 30 * 60 + 2 && auto.ticks >= 240 + 30 * 60 - 2, `${auto.ticks} ticks`);
   const wr = runEpisode(base(23, { profile: 'profiles/dream.json', sampleProfile: false }));
   check('3 skills: a front+back intake build (DREAM) plays too', wr.parts.shotsIn > 10 && wr.death !== 'crash', `${wr.score} pts`);
+  // the network fitted to the replays must play at least about as well as the greedy order and must
+  // not dither: a fit on sparse "change" moments once switched job 147 times in 158 and scored 47
+  if (g) {
+    const im = [101, 103].map((sd) => runEpisode(base(sd, { genome: g })));
+    const gr = [101, 103].map((sd) => runEpisode(base(sd)));
+    const mi = im.reduce((t, r) => t + r.score, 0) / 2;
+    const mg = gr.reduce((t, r) => t + r.score, 0) / 2;
+    const swi = im.reduce((t, r) => t + (r.decisions ?? []).filter((q) => q[4] === 2).length, 0) / 2;
+    check('3 imitation network: plays about as well as the greedy order and does not dither', mi >= 0.8 * mg && swi <= 40, `${mi.toFixed(0)} vs greedy ${mg.toFixed(0)} points, ${swi.toFixed(0)} switches per match`);
+  }
+  // the no-learning robot as a network (a generation-0 seed): same choices, same score
+  const gr = ensureGreedy();
+  const gn = [101, 103].map((sd) => runEpisode(base(sd, { genome: gr.genome })));
+  const gb = [101, 103].map((sd) => runEpisode(base(sd)));
+  const mn = gn.reduce((t, r) => t + r.score, 0) / 2;
+  const mb = gb.reduce((t, r) => t + r.score, 0) / 2;
+  check('3 greedy network: the no-learning robot distilled — same choices on unseen matches, about the same score', gr.holdout.agree >= 0.9 && mn >= 0.85 * mb, `${(100 * gr.holdout.agree).toFixed(1)}% same choices, ${mn.toFixed(0)} vs ${mb.toFixed(0)} points`);
   const st = decodeStyle(STYLE_DEFAULT_GENES);
-  check('3 style genes: the defaults decode to the measured-best skill settings', Math.abs(st.fireHold - 2) < 1e-6 && Math.abs(st.fireMinV - 15) < 1e-6 && st.tipReact === false);
+  check('3 style genes: the defaults decode to the chosen skill settings', Math.abs(st.fireHold - 2) < 1e-6 && Math.abs(st.fireMinV - 15) < 1e-6 && Math.abs(st.stick - 0.3) < 1e-6);
 }
 
 // ---- 4. learning from the team's replays ------------------------------------------------------------------
@@ -204,7 +235,7 @@ if (data) {
 }
 
 // ---- 6. the engine: checkpoints, rewind (bit-exact), fork, abort, settings, evaluation -----------------------
-const small = (name: string): RunConfig => ({ ...defaultConfig(name, 'ga'), pop: 8, elite: 2, workers: 4, seed: 3, ckEvery: 2, init: 'imitation', validateTop: 2, valEpisodes: 2, preset: '' });
+const small = (name: string): RunConfig => ({ ...defaultConfig(name, 'ga'), pop: 8, elite: 2, workers: 4, seed: 3, ckEvery: 2, init: 'imitation', validateTop: 2, valEpisodes: 2, confirmEpisodes: 3, preset: '' });
 for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(ROOT, 'runs', n), { recursive: true, force: true });
 {
   const e = Engine.create(small('_check-a'));
@@ -228,7 +259,11 @@ for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(RO
   check('6 engine: "+2 generations" runs exactly two, then pauses', e.gen === 2 && e.history().length === 2);
   const h = e.history();
   const be = e.bestEver;
-  check('6 champion: chosen by its mean over the validation matches, with a confidence interval', !!be?.val && be.val.n === 2 && h.every((g) => g.validated.length >= 1 && g.champScore === g.bestEverScore) && h[1].bestEver >= h[0].bestEver, `${be?.score.toFixed(1)} ± ${be?.val?.ci95.toFixed(1)}`);
+  const tests = h.filter((g) => g.confirm);
+  const fair = tests.every((g) => g.confirm!.promoted === (g.confirm!.se > 0 && g.confirm!.diff / g.confirm!.se >= Z_PROMOTE));
+  const gen0 = JSON.parse(readFileSync(join(e.dir, 'gens', '0.json'), 'utf8')) as { individuals: { op: string }[] };
+  check('6 champion: starts as the baseline; replaced only when a contender wins the race on fresh matches (paired, sequential); its score is its fresh-match average', !!be?.val && !!be.conf && be.conf.n >= 3 && fair && h.every((g) => g.validated.length >= 1 && g.champScore === g.bestEverScore), `${be?.score.toFixed(1)} over ${be?.conf?.n} fresh matches · ${tests.length} tests, ${tests.filter((g) => g.confirm!.promoted).length} promotions`);
+  check('6 generation 0: starts from your replays AND from the no-learning robot as a network', gen0.individuals.some((q) => q.op === 'seed') && gen0.individuals.some((q) => q.op === 'greedy'));
   check('6 generation summary: operator success rates and the students\' share are recorded', h.every((g) => typeof g.imitShare === 'number' && typeof g.opRates === 'object'));
   const ck = e.checkpoint('mark')!;
   check('6 checkpoints: an automatic one at generation 2 (every 2) plus the named one', e.listCheckpoints().some((m) => m.auto && m.gen === 2) && ck.gen === 2);

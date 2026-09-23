@@ -82,7 +82,7 @@ export const MACRO_MIN_CHANGE = 0.1;
 export interface Lineage {
   id: number;
   parents: number[];
-  op: 'init' | 'seed' | 'elite' | 'champion' | 'mutant' | 'cross' | 'macro' | 'student' | 'random' | 'es+' | 'es-';
+  op: 'init' | 'seed' | 'greedy' | 'elite' | 'champion' | 'mutant' | 'cross' | 'macro' | 'student' | 'random' | 'es+' | 'es-';
   muts: number; // genes changed
   born: number; // generation
   changed?: number; // behaviour mutation / lesson: share of probe decisions it now chooses differently
@@ -258,7 +258,8 @@ export class GA implements Algo {
     private cfg: AlgoConfig,
     private shape: NetShape,
     restore?: GAState,
-    init?: Float32Array,
+    /** generation 0 seeds: [the network fitted to the replays, the greedy order as a network] */
+    init?: Float32Array | { genome: Float32Array; op: 'seed' | 'greedy' }[],
     /** parameter indices of the per-option-kind preference genes (skip weights on k:field…k:park) */
     private prefGenes: number[] = [],
     /** what students learn from and behaviour mutations are checked on (also for generation 0) */
@@ -275,24 +276,28 @@ export class GA implements Algo {
       this.smooth = restore.smooth ?? {};
       this.rates = restore.rates ?? {};
     } else if (init) {
-      // SEEDED: individual 0 is the given network exactly; the rest are its mutants (15 % of them
-      // behaviour mutations), plus GEN0_RANDOM random networks for orders it never showed
-      this.pop = [new Float32Array(init)];
-      this.lin = [{ id: 0, parents: [], op: 'seed', muts: 0, born: 0 }];
-      const nRand = Math.round(GEN0_RANDOM * (cfg.pop - 1));
-      for (let i = 1; i < cfg.pop; i++) {
-        const s = seedOf(cfg.seed, 'ga-seed', i);
-        if (i > cfg.pop - 1 - nRand) {
-          this.pop.push(this.randomNet(s));
+      // SEEDED: the seeds exactly (each tagged with what it is), then their mutants (15 % of them
+      // behaviour mutations, spread evenly over the seeds), plus GEN0_RANDOM random networks for
+      // orders no seed shows
+      const seeds = init instanceof Float32Array ? [{ genome: init, op: 'seed' as const }] : init;
+      this.pop = seeds.map((q) => new Float32Array(q.genome));
+      this.lin = seeds.map((q, i) => ({ id: i, parents: [], op: q.op, muts: 0, born: 0 }));
+      const nRand = Math.round(GEN0_RANDOM * (cfg.pop - seeds.length));
+      for (let i = seeds.length; i < cfg.pop; i++) {
+        const s0 = seedOf(cfg.seed, 'ga-seed', i);
+        const from = i % seeds.length;
+        const parent = seeds[from].genome;
+        if (i >= cfg.pop - nRand) {
+          this.pop.push(this.randomNet(s0));
           this.lin.push({ id: i, parents: [], op: 'random', muts: paramCount(shape), born: 0 });
-        } else if (mulberry32(seedOf(s, 'macro?'))() < cfg.macroRate) {
-          const m = this.macro(init, s);
+        } else if (mulberry32(seedOf(s0, 'macro?'))() < cfg.macroRate) {
+          const m = this.macro(parent, s0);
           this.pop.push(m.child);
-          this.lin.push({ id: i, parents: [0], op: 'macro', muts: m.muts, born: 0, changed: m.changed, ...(m.style ? { style: true } : {}) });
+          this.lin.push({ id: i, parents: [from], op: 'macro', muts: m.muts, born: 0, changed: m.changed, ...(m.style ? { style: true } : {}) });
         } else {
-          const { child, muts } = this.mutate(init, s);
+          const { child, muts } = this.mutate(parent, s0);
           this.pop.push(child);
-          this.lin.push({ id: i, parents: [0], op: 'mutant', muts, born: 0 });
+          this.lin.push({ id: i, parents: [from], op: 'mutant', muts, born: 0 });
         }
       }
       this.best = this.pop[0];
@@ -379,9 +384,19 @@ export class GA implements Algo {
       changed = disagreement(this.shape, p, child, probes);
       if (changed >= MACRO_MIN_CHANGE) break;
     }
+    // a network change that still does not alter choices is not a behaviour mutation: change a skill
+    // setting instead (it crosses the middle of its range, so how the robot acts always changes)
+    let style = kind === 3;
+    if (!style && probes.length && changed < MACRO_MIN_CHANGE && nStyle) {
+      child = new Float32Array(p);
+      const i = so + Math.floor(rng() * nStyle);
+      child[i] = (p[i] > 0 ? -1 : 1) * (0.3 + 1.5 * Math.abs(g()));
+      style = true;
+      changed = 0;
+    }
     let muts = 0;
     for (let k = 0; k < p.length; k++) if (child[k] !== p[k]) muts++;
-    return { child, muts, changed, style: kind === 3 };
+    return { child, muts, changed, style };
   }
   /** STUDENT: the parent after a lesson on the replays (and the champion's own decisions) */
   private student(p: Float32Array, seed: number): { child: Float32Array; muts: number; changed: number } {
@@ -497,6 +512,7 @@ export class GA implements Algo {
   }
 }
 
-export function makeAlgo(cfg: AlgoConfig, shape: NetShape, restore?: object, init?: Float32Array, prefGenes: number[] = [], teacher: Teacher | null = null): Algo {
-  return cfg.algo === 'es' ? new ES(cfg, shape, restore as never, init) : new GA(cfg, shape, restore as GAState | undefined, init, prefGenes, teacher);
+export function makeAlgo(cfg: AlgoConfig, shape: NetShape, restore?: object, init?: Float32Array | { genome: Float32Array; op: 'seed' | 'greedy' }[], prefGenes: number[] = [], teacher: Teacher | null = null): Algo {
+  const first = init instanceof Float32Array ? init : init?.[0]?.genome;
+  return cfg.algo === 'es' ? new ES(cfg, shape, restore as never, first) : new GA(cfg, shape, restore as GAState | undefined, init, prefGenes, teacher);
 }

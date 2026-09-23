@@ -189,11 +189,14 @@ function renderRun(): void {
   const last = hist[hist.length - 1];
   $('rpm').textContent = last ? fmt(last.robotsPerMin) : '—';
   const b = run.bestEver;
-  $('champGen').textContent = b ? `born in generation ${b.gen}` : '';
-  $('champBody').innerHTML = b
-    ? `<b>${b.score.toFixed(0)}</b> DSIM points${b.val ? ` <span class="ci">± ${b.val.ci95.toFixed(0)}</span> — mean of ${b.val.n} validation matches (95% interval)` : ' — one match (validation is off)'} · fitness ${b.fitness.toFixed(1)}<br>in its showcase match: ${b.parts.tips} HIVE tips · ${b.parts.shotsIn} shots in · ${b.parts.pickups} pickups · ${b.parts.hp} human-player entries · ${b.parts.wasted} missed shots · ${b.parts.violations} rule violations`
+  $('champGen').textContent = b ? (b.baseline ? 'the starting bar' : `born in generation ${b.gen}`) : '';
+  const who = b?.baseline ? 'The no-learning robot, as a network. A robot becomes champion only by beating it on fresh matches.<br>' : '';
+  $('champBody').innerHTML = b && b.score === null
+    ? `${who}Not measured yet — press Start training.`
+    : b && b.score !== null && b.fitness !== null
+    ? `${who}<b>${b.score.toFixed(0)}</b> DSIM points${b.conf ? ` <span class="ci">± ${b.conf.ci95.toFixed(0)}</span> — average of ${b.conf.n} fresh matches it was never picked on (95% interval)` : b.val ? ` <span class="ci">± ${b.val.ci95.toFixed(0)}</span> — mean of ${b.val.n} validation matches (95% interval)` : ' — one match (validation is off)'} · fitness ${b.fitness.toFixed(1)}<br>in its showcase match: ${b.parts.tips} HIVE tips · ${b.parts.shotsIn} shots in · ${b.parts.pickups} pickups · ${b.parts.hp} human-player entries · ${b.parts.wasted} missed shots · ${b.parts.violations} rule violations`
     : 'No champion yet — press Start training.';
-  for (const id of ['watchChamp', 'copySnippet']) ($(id) as HTMLButtonElement).disabled = !b;
+  for (const id of ['watchChamp', 'copySnippet']) ($(id) as HTMLButtonElement).disabled = !b || b.score === null;
   $('dlChamp').classList.toggle('off', !b);
 }
 
@@ -300,7 +303,8 @@ const LEARN: FieldDef[] = [
 const ACC: FieldDef[] = [
   { key: 'episodes', label: 'Matches per robot', type: 'number', min: '1', max: '32', help: 'more = less luck in the ranking, slower' },
   { key: 'validateTop', label: 'Robots validated', type: 'number', min: '0', max: '32', help: 'best of each generation (0 = champion by one match)' },
-  { key: 'valEpisodes', label: 'Validation matches', type: 'number', min: '1', max: '64', help: 'fixed matches the champion is proven on' },
+  { key: 'valEpisodes', label: 'Validation matches', type: 'number', min: '1', max: '64', help: 'fixed matches the best robots are checked on' },
+  { key: 'confirmEpisodes', label: 'Champion test matches', type: 'number', min: '0', max: '64', help: 'fresh matches a new champion must win (0 = off)' },
 ];
 const FIT: FieldDef[] = [
   { key: 'shaping.pickup', label: 'Hint: per pickup', type: 'number', step: '0.05', min: '0' },
@@ -566,7 +570,7 @@ function renderViewInfo(): void {
   else if (mode === 'best') html = bestGen >= 0 ? `generation ${fmt(bestGen)} · its best robot · exactly as trained${n > bestGen ? ` · <button type="button" class="link" id="loadNewest">newest: ${fmt(n)}</button>` : ''}` : 'no generations yet';
   else {
     const b = run.bestEver;
-    html = b ? `champion · born in generation ${fmt(b.gen)}${b.val ? ` · ${b.score.toFixed(0)} ± ${b.val.ci95.toFixed(0)} over ${b.val.n} validation matches` : ''}${champGen >= 0 && champGen !== b.gen ? ` · <button type="button" class="link" id="loadChamp">a new champion (gen ${fmt(b.gen)})</button>` : ''}` : 'no champion yet';
+    html = b && b.score !== null ? `champion · ${b.baseline ? 'the no-learning robot (the starting bar)' : `born in generation ${fmt(b.gen)}`}${b.conf ? ` · ${b.score.toFixed(0)} ± ${b.conf.ci95.toFixed(0)} over ${b.conf.n} fresh matches` : b.val ? ` · ${b.score.toFixed(0)} ± ${b.val.ci95.toFixed(0)} over ${b.val.n} validation matches` : ''}${champGen >= 0 && champGen !== b.gen ? ` · <button type="button" class="link" id="loadChamp">a new champion (gen ${fmt(b.gen)})</button>` : ''}` : 'no champion yet';
   }
   $('viewInfo').innerHTML = html;
   const ln = document.getElementById('loadNewest');
@@ -856,7 +860,9 @@ function connect(): void {
     $('progFill').style.transform = `scaleX(${p.total ? p.done / p.total : 0})`;
     $('progText').textContent = p.eval
       ? `evaluating ${p.eval} · ${fmt(p.done)} of ${fmt(p.total)} matches`
-      : p.stage === 'validating'
+      : p.stage === 'confirming'
+        ? `generation ${fmt(p.gen)} · champion test on fresh matches · ${fmt(p.done)} of ${fmt(p.total)}`
+        : p.stage === 'validating'
         ? `generation ${fmt(p.gen)} · proving the best on the validation matches · ${fmt(p.done)} of ${fmt(p.total)}`
         : `generation ${fmt(p.gen)} · ${fmt(p.done)} of ${fmt(p.total)} robots have lived`;
   });
@@ -884,7 +890,8 @@ function connect(): void {
     if (run) run.bestEver = b;
     renderRun();
     renderViewInfo();
-    log(`new champion: ${b.score.toFixed(1)} DSIM points${b.val ? ` (± ${b.val.ci95.toFixed(1)} over ${b.val.n} validation matches)` : ''} in generation ${b.gen}`);
+    if (b.baseline || b.score === null) return log('champion: the no-learning robot, as a network — the bar every new champion must beat on fresh matches');
+    log(`new champion: ${b.score.toFixed(1)} DSIM points${b.conf ? ` (± ${b.conf.ci95.toFixed(1)} over ${b.conf.n} fresh matches)` : b.val ? ` (± ${b.val.ci95.toFixed(1)} over ${b.val.n} validation matches)` : ''} in generation ${b.gen}`);
   });
   es.addEventListener('log', (e) => log(JSON.parse((e as MessageEvent).data) as string));
   es.addEventListener('checkpoints', (e) => renderCheckpoints(JSON.parse((e as MessageEvent).data) as CheckpointMeta[]));

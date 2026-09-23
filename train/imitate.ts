@@ -26,15 +26,16 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { BB, bb, coerce, init, snapshot, type Replay, type World } from '../harness/dsim';
+import { BB, bb, coerce, init, type Replay } from '../harness/dsim';
 import { loadProfile, resolve, type Resolved } from '../harness/profiles';
 import { ReplayPlayer } from '../dsim-main/src/sim/replay';
 import { mulberry32, seedOf } from '../harness/rng';
 import { initParams, paramCount, styleOffset, toB64 } from './net';
 import { N_OBS, encode } from './obs';
-import { SHAPE, STYLE_DEFAULT_GENES } from './policy';
-import { N_OPT_FEATS, Pilot, SKILLS_VERSION, options } from './skills';
-import { Adam, evaluate, lossAndGrad, pack, unpack, type Packed, type Sample } from './bc';
+import { SHAPE, STYLE_DEFAULT_GENES, THINK_TICKS } from './policy';
+import { F_CURRENT, N_OPT_FEATS, Pilot, SKILLS_VERSION, options } from './skills';
+import { Adam, choose, evaluate, lossAndGrad, pack, unpack, type Packed, type Sample } from './bc';
+import { runEpisode } from './episode';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const DATA_DIR = join(ROOT, 'Training data');
@@ -43,87 +44,107 @@ const SETS = join(OUT, 'sets');
 const EXCLUDE = join(OUT, 'exclude.json');
 
 type Pick = { kind: 'ball'; id: number } | { kind: 'flower'; i: number } | { kind: 'shoot' } | { kind: 'hp' };
+type Ident = { kind: string; balls?: Set<number>; flower?: number };
+const isSame = (o: { kind: string; balls?: number[]; flower?: number }, cur: Ident | null): boolean =>
+  !!cur && (cur.balls ? !!o.balls?.some((id) => cur.balls!.has(id)) : o.kind === cur.kind && (o.kind !== 'flower' || o.flower === cur.flower));
+const matches = (o: { kind: string; balls?: number[]; flower?: number }, pick: Pick): boolean =>
+  pick.kind === 'ball' ? !!o.balls?.includes(pick.id) : pick.kind === 'flower' ? o.flower === pick.i : o.kind === pick.kind;
 
-/** replay → demonstrations */
-export function demonstrations(file: string, base: Resolved): { samples: Sample[]; score: number; events: number; unmatched: number } {
+/**
+ * A replay → demonstrations, SAMPLED THE WAY THE ROBOT THINKS: every THINK_TICKS ticks the world is
+ * put through train/skills.ts `options`, the option the human's NEXT action reveals is the label,
+ * and what they were already doing is flagged 'current'.
+ *
+ * ⚠️ Labelling only the MOMENTS THE HUMAN CHANGED (what this did first) teaches the exact opposite
+ * of what is wanted: in every such example the current job is the one being abandoned, so a network
+ * fitted to them never keeps doing anything. Measured: the seeded network switched 147 times in 158
+ * decisions and scored 47 where the greedy baseline scored 178. Dense labels contain both the
+ * "carry on" and the "change now" cases, in the proportion the human produced them.
+ *
+ * Two passes: the first collects what the human did and when (a shot counts as "went to shoot" only
+ * when no pickup follows within a second — the replays shoot while sweeping, which the robot does on
+ * its own); the second re-simulates and labels.
+ */
+export function demonstrations(file: string, base: Resolved): { samples: Sample[]; score: number; events: number; unmatched: number; stay: number } {
   const rep = JSON.parse(readFileSync(file, 'utf8')) as Replay & { setups: { spec: Parameters<typeof coerce>[0]; alliance: 'red' | 'blue'; id: number }[] };
   const setup = rep.setups[0];
   const spec = coerce(setup.spec);
   const prof: Resolved = { ...base, spec };
   const pilot = new Pilot(spec, base.limits);
   const cap = BB.bbHopperCap(spec);
-  const p = new ReplayPlayer(rep);
-  const prevKind = new Map<number, string>();
-  const prevEl = new Map<number, string>();
-  let decision: World | null = null; // world at the end of the previous human decision
-  let group = null as Set<number> | null; // the group the last pick came from (the same sweep); `as`: assigned inside label()
-  let pendingShot: { tick: number; at: World; now: World } | null = null;
-  let shooting = false;
-  const samples: Sample[] = [];
-  let events = 0;
-  let unmatched = 0;
-  const obs = new Float32Array(N_OBS);
-  const label = (d: World | null, pick: Pick): void => {
-    events++;
-    group = null;
-    if (!d) return;
-    const r = d.robots.find((q) => q.id === setup.id)!;
-    if (d.match.phase !== 'auto' && d.match.phase !== 'teleop') return;
-    const opts = options(d, r, pilot, cap, new Map());
-    const y = opts.findIndex((o) =>
-      pick.kind === 'ball' ? !!o.balls?.includes(pick.id) : pick.kind === 'flower' ? o.flower === pick.i : o.kind === pick.kind,
-    );
-    if (y >= 0 && pick.kind === 'ball') group = new Set(opts[y].balls);
-    if (y < 0 || opts.length < 2) {
-      if (y < 0) unmatched++;
-      return;
-    }
-    encode(d, r, prof, obs);
-    samples.push({ obs: new Float32Array(obs), feats: Float32Array.from(opts.flatMap((o) => o.feats)), k: opts.length, y });
-  };
-  const hpBefore = { ...bb(p.world).nectarStock };
-  while (p.stepOnce()) {
-    const w = p.world;
-    const r = w.robots.find((q) => q.id === setup.id)!;
-    if (!decision && w.match.phase === 'auto') decision = snapshot(w);
-    for (const b of w.balls) {
-      const k = b.state.kind;
-      const pk = prevKind.get(b.id);
-      if (pk !== undefined && pk !== k) {
-        if (k === 'held' && (b.state as { robot: number }).robot === r.id) {
-          shooting = false;
-          pendingShot = null; // a pickup right after a shot: that shot was part of the sweep
-          const el = prevEl.get(b.id) ?? '';
-          if (pk === 'element' && el.startsWith('flower:')) {
-            label(decision, { kind: 'flower', i: Number(el.slice(7)) });
-            decision = snapshot(w);
-          } else if (pk === 'ground') {
-            const cont = group?.has(b.id) ?? false;
-            if (!cont) label(decision, { kind: 'ball', id: b.id });
-            else events++;
-            decision = snapshot(w);
+
+  // PASS 1 — what the human did, and when
+  const evs: { tick: number; pick: Pick }[] = [];
+  {
+    const p = new ReplayPlayer(rep);
+    const prevKind = new Map<number, string>();
+    const prevEl = new Map<number, string>();
+    let shooting = false;
+    let pendingShot: number | null = null;
+    const hpBefore = { ...bb(p.world).nectarStock };
+    while (p.stepOnce()) {
+      const w = p.world;
+      const r = w.robots.find((q) => q.id === setup.id)!;
+      for (const b of w.balls) {
+        const k = b.state.kind;
+        const pk = prevKind.get(b.id);
+        if (pk !== undefined && pk !== k) {
+          if (k === 'held' && (b.state as { robot: number }).robot === r.id) {
+            shooting = false;
+            pendingShot = null; // a pickup right after a shot: that shot was part of the sweep
+            const el = prevEl.get(b.id) ?? '';
+            if (pk === 'element' && el.startsWith('flower:')) evs.push({ tick: w.tick, pick: { kind: 'flower', i: Number(el.slice(7)) } });
+            else if (pk === 'ground') evs.push({ tick: w.tick, pick: { kind: 'ball', id: b.id } });
+          } else if (k === 'flight' && pk === 'held' && !shooting) {
+            shooting = true;
+            pendingShot = w.tick;
           }
-        } else if (k === 'flight' && pk === 'held' && !shooting) {
-          shooting = true;
-          pendingShot = { tick: w.tick, at: decision ?? snapshot(w), now: snapshot(w) };
         }
+        prevKind.set(b.id, k);
+        prevEl.set(b.id, k === 'element' ? String((b.state as { el?: string }).el ?? '') : '');
       }
-      prevKind.set(b.id, k);
-      prevEl.set(b.id, k === 'element' ? String((b.state as { el?: string }).el ?? '') : '');
+      if (pendingShot !== null && w.tick - pendingShot >= 60) {
+        evs.push({ tick: pendingShot, pick: { kind: 'shoot' } });
+        pendingShot = null;
+      }
+      const stock = bb(w).nectarStock[setup.alliance];
+      if (stock < hpBefore[setup.alliance]) evs.push({ tick: w.tick, pick: { kind: 'hp' } });
+      hpBefore[setup.alliance] = stock;
     }
-    if (pendingShot && w.tick - pendingShot.tick >= 60) {
-      label(pendingShot.at, { kind: 'shoot' });
-      decision = pendingShot.now;
-      pendingShot = null;
-    }
-    const stock = bb(w).nectarStock[setup.alliance];
-    if (stock < hpBefore[setup.alliance]) {
-      label(decision, { kind: 'hp' });
-      decision = snapshot(w);
-    }
-    hpBefore[setup.alliance] = stock;
+    evs.sort((a, b) => a.tick - b.tick);
   }
-  return { samples, score: p.world.match.scores[setup.alliance].total, events, unmatched };
+
+  // PASS 2 — one demonstration every THINK_TICKS: "from here, this is what I went for next"
+  const samples: Sample[] = [];
+  let unmatched = 0;
+  let stay = 0;
+  {
+    const p = new ReplayPlayer(rep);
+    const obs = new Float32Array(N_OBS);
+    let ei = 0;
+    let cur = null as Ident | null;
+    while (p.stepOnce()) {
+      const w = p.world;
+      while (ei < evs.length && evs[ei].tick <= w.tick) ei++;
+      const ph = w.match.phase;
+      if (w.tick % THINK_TICKS !== 0 || (ph !== 'auto' && ph !== 'teleop') || ei >= evs.length) continue;
+      const r = w.robots.find((q) => q.id === setup.id)!;
+      const was = cur;
+      const opts = options(w, r, pilot, cap, new Map(), (o) => isSame(o, was));
+      const y = opts.findIndex((o) => matches(o, evs[ei].pick));
+      if (y < 0) {
+        unmatched++;
+        continue;
+      }
+      if (opts.length > 1) {
+        encode(w, r, prof, obs);
+        samples.push({ obs: new Float32Array(obs), feats: Float32Array.from(opts.flatMap((o) => o.feats)), k: opts.length, y });
+        if (opts[y].feats[F_CURRENT] === 1) stay++;
+      }
+      cur = { kind: opts[y].kind, balls: opts[y].balls ? new Set(opts[y].balls) : undefined, flower: opts[y].flower };
+    }
+    return { samples, score: p.world.match.scores[setup.alliance].total, events: evs.length, unmatched, stay };
+  }
 }
 
 // ─────────────────────────────── the data set ───────────────────────────────
@@ -137,6 +158,7 @@ export interface SetFile {
   score: number;
   events: number;
   samples: number;
+  stay: number; // demonstrations where the human carried on with what they were doing
   unmatched: number;
   error?: string;
 }
@@ -193,14 +215,14 @@ export function buildSet(log: (s: string) => void = () => {}): DemoSet | null {
   for (const f of dataFiles().filter((q) => q.included)) {
     try {
       const d = demonstrations(join(DATA_DIR, f.name), base);
-      files.push({ name: f.name, score: d.score, events: d.events, samples: d.samples.length, unmatched: d.unmatched });
+      files.push({ name: f.name, score: d.score, events: d.events, samples: d.samples.length, stay: d.stay, unmatched: d.unmatched });
       for (const s of d.samples) {
         all.push(s);
         fileOf.push(files.length - 1);
       }
-      log(`${f.name}: DSIM score ${d.score}, ${d.events} human decisions, ${d.samples.length} usable (${d.unmatched} had no matching option)`);
+      log(`${f.name}: DSIM score ${d.score}, ${d.events} actions, ${d.samples.length} demonstrations (${((100 * d.stay) / Math.max(1, d.samples.length)).toFixed(0)}% carry on, ${d.unmatched} unmatched)`);
     } catch (e) {
-      files.push({ name: f.name, score: 0, events: 0, samples: 0, unmatched: 0, error: (e as Error).message.slice(0, 200) });
+      files.push({ name: f.name, score: 0, events: 0, samples: 0, stay: 0, unmatched: 0, error: (e as Error).message.slice(0, 200) });
       log(`${f.name}: could not be re-simulated (${(e as Error).message.slice(0, 120)}) — left out`);
     }
   }
@@ -220,7 +242,7 @@ export const setSamples = (s: DemoSet): Sample[] => (s.packed.n ? unpack(s.packe
 export interface ImitationReport {
   files: SetFile[];
   train: { samples: number; loss: number; agree: number };
-  holdout: { file: string; samples: number; loss: number; agree: number; chance: number };
+  holdout: { file: string; samples: number; loss: number; agree: number; chance: number; switchAgree: number; switchN: number; stayShare: number };
   epochs: number;
   keptEpoch: number;
   params: number;
@@ -228,12 +250,9 @@ export interface ImitationReport {
   genome: string;
 }
 
-export function fit(set: DemoSet, epochs = 150, seed = 1, log: (s: string) => void = () => {}): ImitationReport {
-  const S = setSamples(set);
-  const usable = set.files.map((f, i) => ({ f, i })).filter((q) => q.f.samples > 0);
-  const hold = usable.length > 1 ? usable[usable.length - 1].i : -1; // the last replay is held out
-  const train = S.filter((_, k) => set.fileOf[k] !== hold);
-  const test = S.filter((_, k) => set.fileOf[k] === hold);
+/** listwise behaviour cloning of SHAPE's network on `train`, early-stopped on `test` (the style genes
+ * keep their defaults: they are not the network's) */
+function trainNet(train: Sample[], test: Sample[], epochs: number, seed: number, log: (s: string) => void): { p: Float32Array; bestEp: number } {
   const n = paramCount(SHAPE);
   const rng = mulberry32(seedOf(seed, 'imitate'));
   const gauss = (): number => {
@@ -258,9 +277,9 @@ export function fit(set: DemoSet, epochs = 150, seed = 1, log: (s: string) => vo
       g.fill(0);
       const idx = order.slice(b0, b0 + batch);
       for (const i of idx) lossAndGrad(SHAPE, p, train[i], g);
-      opt.step(p, g, 1 / idx.length, styleOffset(SHAPE)); // the style genes are not the network's
+      opt.step(p, g, 1 / idx.length, styleOffset(SHAPE));
     }
-    // EARLY STOPPING on the held-out replay (it overfits the others after ~50 epochs)
+    // EARLY STOPPING on the held-out part (it overfits after a few dozen epochs)
     const h = evaluate(SHAPE, p, test);
     if (test.length && h.loss < bestLoss) {
       bestLoss = h.loss;
@@ -271,19 +290,103 @@ export function fit(set: DemoSet, epochs = 150, seed = 1, log: (s: string) => vo
   }
   if (test.length) p.set(best);
   log(`kept epoch ${bestEp} (lowest held-out loss)`);
+  return { p, bestEp };
+}
+
+/** agreement at the moments the demonstrator CHANGED job (most quarter-seconds are "carry on",
+ * which is easy) — the honest number */
+function switchAgreement(p: Float32Array, test: Sample[]): { switchAgree: number; switchN: number; stayShare: number } {
+  let stayN = 0;
+  let swN = 0;
+  let swHit = 0;
+  for (const s of test) {
+    if (s.feats[s.y * N_OPT_FEATS + F_CURRENT] === 1) stayN++;
+    else {
+      swN++;
+      if (choose(SHAPE, p, s) === s.y) swHit++;
+    }
+  }
+  return { switchAgree: swN ? swHit / swN : 0, switchN: swN, stayShare: test.length ? stayN / test.length : 0 };
+}
+
+export function fit(set: DemoSet, epochs = 150, seed = 1, log: (s: string) => void = () => {}): ImitationReport {
+  const S = setSamples(set);
+  const usable = set.files.map((f, i) => ({ f, i })).filter((q) => q.f.samples > 0);
+  const hold = usable.length > 1 ? usable[usable.length - 1].i : -1; // the last replay is held out
+  const train = S.filter((_, k) => set.fileOf[k] !== hold);
+  const test = S.filter((_, k) => set.fileOf[k] === hold);
+  const { p, bestEp } = trainNet(train, test, epochs, seed, log);
   const tr = evaluate(SHAPE, p, train);
   const ho = evaluate(SHAPE, p, test);
   const chance = test.length ? test.reduce((a, s) => a + 1 / s.k, 0) / test.length : 0;
   return {
     files: set.files,
     train: { samples: train.length, ...tr },
-    holdout: { file: hold >= 0 ? set.files[hold].name : '', samples: test.length, ...ho, chance },
+    holdout: { file: hold >= 0 ? set.files[hold].name : '', samples: test.length, ...ho, chance, ...switchAgreement(p, test) },
     epochs,
     keptEpoch: bestEp,
-    params: n,
+    params: paramCount(SHAPE),
     dataKey: set.key,
     genome: toB64(p),
   };
+}
+
+// ─────────────────────────────── the greedy order, as a network ───────────────────────────────
+/**
+ * THE NO-LEARNING ROBOT, DISTILLED. The greedy baseline (train/policy.ts greedyScore) plays
+ * GREEDY_MATCHES matches recording every quarter-second decision, and the policy network is fitted
+ * to them. Generation 0 then contains a network that plays about as well as the bar evolution has
+ * to clear, so training starts AT the bar instead of below it. Cached in outputs/imitation/greedy.json
+ * by a key over everything it depends on.
+ */
+const GREEDY_FILE = join(OUT, 'greedy.json');
+const GREEDY_MATCHES = 24;
+const GREEDY_HELD = 4;
+export interface GreedyReport {
+  key: string;
+  matches: number;
+  samples: number;
+  holdout: { samples: number; agree: number; chance: number; switchAgree: number; switchN: number };
+  keptEpoch: number;
+  genome: string;
+}
+export const greedyKey = (): string => `g1:${N_OBS}:${N_OPT_FEATS}:${SKILLS_VERSION}:${THINK_TICKS}:${paramCount(SHAPE)}`;
+export function greedyReport(): GreedyReport | null {
+  try {
+    const r = JSON.parse(readFileSync(GREEDY_FILE, 'utf8')) as GreedyReport;
+    return r.key === greedyKey() ? r : null;
+  } catch {
+    return null;
+  }
+}
+/** the distilled greedy network, building it first if needed (~2 min, once) */
+export function ensureGreedy(log: (s: string) => void = () => {}): GreedyReport {
+  const r0 = greedyReport();
+  if (r0) return r0;
+  log(`distilling the no-learning robot into a network: ${GREEDY_MATCHES} matches, then a fit (once, ~2 min)…`);
+  const per: Sample[][] = [];
+  for (let k = 0; k < GREEDY_MATCHES; k++) {
+    const r = runEpisode({ genome: null, profile: 'profiles/real-v0.json', sampleProfile: true, seed: seedOf(9, 'distill', k) % 1_000_000_007, stage: 'full', shaping: 0, driver: 'oracle', track: false, record: false, samples: true });
+    per.push(r.samples ? unpack(r.samples, N_OBS, N_OPT_FEATS) : []);
+  }
+  const train = per.slice(0, GREEDY_MATCHES - GREEDY_HELD).flat();
+  const test = per.slice(GREEDY_MATCHES - GREEDY_HELD).flat();
+  const { p, bestEp } = trainNet(train, test, 60, 2, log);
+  const ho = evaluate(SHAPE, p, test);
+  const sw = switchAgreement(p, test);
+  const out: GreedyReport = {
+    key: greedyKey(),
+    matches: GREEDY_MATCHES,
+    samples: train.length + test.length,
+    holdout: { samples: test.length, agree: ho.agree, chance: test.length ? test.reduce((a, s) => a + 1 / s.k, 0) / test.length : 0, switchAgree: sw.switchAgree, switchN: sw.switchN },
+    keptEpoch: bestEp,
+    genome: toB64(p),
+  };
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(GREEDY_FILE + '.tmp', JSON.stringify(out, null, 1));
+  renameSync(GREEDY_FILE + '.tmp', GREEDY_FILE);
+  log(`greedy network: picks what the no-learning robot picks ${(100 * ho.agree).toFixed(1)}% of the time on matches it never saw (${(100 * sw.switchAgree).toFixed(0)}% of its job changes)`);
+  return out;
 }
 
 export function imitationReport(): ImitationReport | null {
@@ -315,12 +418,16 @@ export function refreshJob(a: { rebuild?: boolean } = {}): { key: string; report
   const lines: string[] = [];
   const log = (s: string): void => void lines.push(s);
   const key = currentKey();
-  if (!key) return null;
+  if (!key) {
+    ensureGreedy(log); // every new run needs it, replays or not
+    return null;
+  }
   const set = !a.rebuild && hasSet(key) ? loadSet(key) : buildSet(log);
   if (!set) return null;
   const r = fit(set, 150, 1, log);
   mkdirSync(OUT, { recursive: true });
   writeFileSync(join(OUT, 'policy.json'), JSON.stringify(r, null, 1));
+  ensureGreedy(log);
   const { genome: _g, ...report } = r;
   void _g;
   return { key, report, log: lines };
@@ -337,5 +444,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const r = fit(set, 150, 1, (s) => console.log(s));
   mkdirSync(OUT, { recursive: true });
   writeFileSync(join(OUT, 'policy.json'), JSON.stringify(r, null, 1));
-  console.log(`held-out ${r.holdout.file}: agreement ${(100 * r.holdout.agree).toFixed(1)}% (chance ${(100 * r.holdout.chance).toFixed(1)}%) · ${((performance.now() - t0) / 1000).toFixed(0)} s → outputs/imitation/policy.json`);
+  console.log(
+    `held-out ${r.holdout.file}: agreement ${(100 * r.holdout.agree).toFixed(1)}% (chance ${(100 * r.holdout.chance).toFixed(1)}%), of which the ${r.holdout.switchN} moments they CHANGED job: ${(100 * r.holdout.switchAgree).toFixed(1)}% · ${((performance.now() - t0) / 1000).toFixed(0)} s → outputs/imitation/policy.json`,
+  );
 }

@@ -30,7 +30,7 @@ import { SHAPE } from './policy';
 import { N_OBS } from './obs';
 import { N_OPT_FEATS, OPTION_KINDS } from './skills';
 import { unpack, type Packed, type Sample } from './bc';
-import { currentKey, ensureData, hasSet, loadSet, setSamples } from './imitate';
+import { currentKey, ensureData, ensureGreedy, hasSet, loadSet, setSamples } from './imitate';
 import { DEFAULT_PENALTY, DEFAULT_SHAPING, type Death, type EpisodeArgs, type EpisodeResult, type Parts, type Penalty, type Shaping, type Stage } from './episode';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,6 +52,7 @@ export interface RunConfig extends AlgoConfig {
   init: 'random' | 'imitation'; // generation 0: random networks, or mutants of the network fitted to "Training data/"
   validateTop: number; // the best this many of each generation are validated (0 = champion by one match)
   valEpisodes: number; // validation matches per candidate (fixed seeds for the whole run)
+  confirmEpisodes: number; // fresh matches a candidate must beat the champion on (paired); 0 = off
   workers: number;
   keepGens: number; // generation files kept on disk (every 100th is kept forever)
   ckEvery: number; // automatic checkpoint every N generations (0 = off)
@@ -61,7 +62,7 @@ export interface RunConfig extends AlgoConfig {
 }
 
 /** settings that can change mid-run (everything else defines the run) */
-export const LIVE_KEYS = [...TUNABLE, 'episodes', 'annealGens', 'shaping', 'penalty', 'validateTop', 'valEpisodes', 'workers', 'keepGens', 'ckEvery', 'ckKeep', 'maxGens', 'stage', 'driver', 'sampleProfile', 'preset'] as const;
+export const LIVE_KEYS = [...TUNABLE, 'episodes', 'annealGens', 'shaping', 'penalty', 'validateTop', 'valEpisodes', 'confirmEpisodes', 'workers', 'keepGens', 'ckEvery', 'ckKeep', 'maxGens', 'stage', 'driver', 'sampleProfile', 'preset'] as const;
 
 const CORES = availableParallelism();
 
@@ -86,6 +87,7 @@ const BALANCED = {
   lessonSteps: 40,
   validateTop: 3,
   valEpisodes: 8,
+  confirmEpisodes: 12,
   workers: Math.max(1, CORES - 1),
 };
 export interface Preset {
@@ -98,14 +100,14 @@ export const PRESETS: Preset[] = [
   {
     id: 'balanced',
     label: 'Balanced',
-    blurb: 'The default. 128 robots, the best 3 of every generation proven on 8 validation matches, 15% behaviour mutations, students learning from your replays (their share adapts), all cores but one.',
+    blurb: 'The default. 128 robots; the best 3 of every generation checked on 8 validation matches; a new champion must beat the old one on 12 fresh matches; 15% behaviour mutations; students learning from your replays (their share adapts); all cores but one.',
     change: { ...BALANCED },
   },
   {
     id: 'full-push',
     label: 'Full push',
-    blurb: 'Maximum results, maximum load. 256 robots on 2 matches each (half the luck in the ranking), the best 4 proven on 16 validation matches, 6 elites, every core. About 4× the time per generation.',
-    change: { ...BALANCED, pop: 256, episodes: 2, elite: 6, validateTop: 4, valEpisodes: 16, workers: CORES },
+    blurb: 'Maximum results, maximum load. 256 robots on 2 matches each (half the luck in the ranking), the best 4 checked on 16 validation matches, a new champion must win over 24 fresh matches, 6 elites, every core. About 4× the time per generation.',
+    change: { ...BALANCED, pop: 256, episodes: 2, elite: 6, validateTop: 4, valEpisodes: 16, confirmEpisodes: 24, workers: CORES },
   },
   {
     id: 'explore',
@@ -117,7 +119,7 @@ export const PRESETS: Preset[] = [
     id: 'refine',
     label: 'Refine the champion',
     blurb: 'For polishing a good strategy. Small mutations, 3 matches per robot for accurate ranking, 8 elites, the best 5 proven on 16 validation matches.',
-    change: { ...BALANCED, episodes: 3, sigma: 0.02, mutProb: 0.1, crossRate: 0.2, elite: 8, tournament: 4, truncation: 0.2, immigrants: 0, imitRate: 0.05, imitMin: 0.02, imitMax: 0.15, validateTop: 5, valEpisodes: 16 },
+    change: { ...BALANCED, episodes: 3, sigma: 0.02, mutProb: 0.1, crossRate: 0.2, elite: 8, tournament: 4, truncation: 0.2, immigrants: 0, imitRate: 0.05, imitMin: 0.02, imitMax: 0.15, validateTop: 5, valEpisodes: 16, confirmEpisodes: 24 },
   },
   {
     id: 'replays',
@@ -129,7 +131,7 @@ export const PRESETS: Preset[] = [
     id: 'quick',
     label: 'Quick look',
     blurb: '32 robots, fast generations for watching and testing settings. Noisy; not for real results.',
-    change: { ...BALANCED, pop: 32, elite: 2, validateTop: 1, valEpisodes: 4 },
+    change: { ...BALANCED, pop: 32, elite: 2, validateTop: 1, valEpisodes: 4, confirmEpisodes: 6 },
   },
   {
     id: 'background',
@@ -158,7 +160,7 @@ export function defaultConfig(name: string, algo: AlgoName = 'ga'): RunConfig {
     ckEvery: 10,
     ckKeep: 30,
     maxGens: 0,
-    ...(algo === 'ga' ? BALANCED : { pop: BALANCED.pop, episodes: 1, validateTop: 3, valEpisodes: 8, workers: BALANCED.workers }),
+    ...(algo === 'ga' ? BALANCED : { pop: BALANCED.pop, episodes: 1, validateTop: 3, valEpisodes: 8, confirmEpisodes: 12, workers: BALANCED.workers }),
     preset: '',
   };
   c.preset = presetOf(c);
@@ -195,6 +197,8 @@ export interface GenSummary {
   /** champion: validated mean score and its 95 % half-width */
   champScore: number;
   champCi: number;
+  /** champion test of this generation's candidate: paired difference on fresh matches */
+  confirm: { id: number; diff: number; se: number; n: number; promoted: boolean } | null;
   /** candidates validated this generation: id, mean score, mean fitness */
   validated: { id: number; score: number; fitness: number; ci: number }[];
   /** share of each operator's children that reached the parent set (this generation / smoothed) */
@@ -221,13 +225,78 @@ export interface Best {
   parts: Parts;
   id: number;
   val: Val | null; // null: chosen by one match (validation off)
+  conf?: Conf | null; // its results on fresh test matches (never selected on), summed
+  baseline?: boolean; // the no-learning robot as a network, the bar the run started with
+}
+/** running sums of a robot's results on fresh matches */
+export interface Conf {
+  n: number;
+  fit: number;
+  fitSq: number;
+  score: number;
+  scoreSq: number;
+}
+/** a contender racing the champion: its paired advantage (fitness − champion's, same fresh matches) */
+export interface ArenaEntry {
+  id: number;
+  genome: string;
+  lineage: Lineage;
+  val: Val | null;
+  since: number; // generation it entered
+  n: number;
+  sd: number; // Σ differences
+  sd2: number; // Σ squared differences
+  conf: Conf | null; // its own results on those matches
+}
+/** contenders raced at once */
+export const ARENA = 3;
+/** Pocock boundary (Pocock 1977), one-sided α = 0.05 over up to ~10 looks (≈ 2.23 for 8, 2.28 for 10;
+ * rounded up): looking at the accumulating evidence every generation keeps the chance of promoting a
+ * contender that is NOT better near 5 % per contender. (Three race at once, so a merely EQUAL robot
+ * can occasionally take over — harmless; a worse one practically never.) */
+export const Z_PROMOTE = 2.3;
+/** a contender this far below the champion (z) is dropped */
+export const Z_DROP = 1.645;
+/** the most fresh matches a contender gets to prove itself (8 looks at the default 12) */
+export const RACE_MAX = 96;
+function diffStats(a: ArenaEntry): { mean: number; se: number } {
+  if (a.n < 2) return { mean: a.n ? a.sd / a.n : 0, se: Infinity };
+  const mean = a.sd / a.n;
+  const v = Math.max(0, (a.sd2 - a.n * mean * mean) / (a.n - 1));
+  return { mean, se: Math.sqrt(v / a.n) };
+}
+/** the contender's paired z-score against the champion (0 without evidence) */
+export function zOf(a: ArenaEntry): number {
+  const { mean, se } = diffStats(a);
+  return se > 0 && Number.isFinite(se) ? mean / se : 0;
 }
 
-/** checkpoint format: 3 = group-intake skills + network with skip and style genes */
-export const CK_VERSION = 3;
+/** has the champion been measured yet (the starting baseline has not, before generation 0) */
+const scored = (b: Best | null): boolean => !!b && Number.isFinite(b.fitness);
+function addConf(c: Conf | null, rs: EpisodeResult[]): Conf {
+  const o = c ? { ...c } : { n: 0, fit: 0, fitSq: 0, score: 0, scoreSq: 0 };
+  for (const r of rs) {
+    o.n++;
+    o.fit += r.fitness;
+    o.fitSq += r.fitness * r.fitness;
+    o.score += r.score;
+    o.scoreSq += r.score * r.score;
+  }
+  return o;
+}
+/** mean fitness, mean score and the 95 % half-width of the score */
+export function confStats(c: Conf): { fitness: number; score: number; ci95: number; n: number } {
+  const m = c.score / c.n;
+  const v = c.n > 1 ? Math.max(0, (c.scoreSq - c.n * m * m) / (c.n - 1)) : 0;
+  return { fitness: c.fit / c.n, score: m, ci95: c.n > 1 ? (1.96 * Math.sqrt(v)) / Math.sqrt(c.n) : 0, n: c.n };
+}
+
+/** checkpoint format: 4 = thinking on the go (option 'position', 'current' feature, stick gene) */
+export const CK_VERSION = 4;
 const LEGACY: Record<number, string> = {
   1: 'made by the first training version (a raw joystick policy — the one that never learned to shoot)',
   2: 'made before the group-intake skills and the new network (its robots cannot run on them)',
+  3: 'made before the robots learned to think on the go (the network gained inputs; its robots cannot run on it)',
 };
 
 interface Checkpoint {
@@ -241,6 +310,7 @@ interface Checkpoint {
   demoKey: string; // the data set (team replays) students learn from; '' = none
   experience: Packed | null; // the champion's own decisions
   valCache: Record<string, Val>; // candidates already validated (by id), for the ones still alive
+  arena?: ArenaEntry[]; // contenders racing the champion on fresh matches
 }
 
 export interface CheckpointMeta {
@@ -332,13 +402,13 @@ export class Engine extends EventEmitter {
     const dir = join(RUNS, cfg.name);
     if (existsSync(join(dir, 'checkpoint.json'))) throw new Error(`run "${cfg.name}" already exists`);
     const data = ensureData(log);
-    let init: Float32Array | undefined;
+    // generation 0 starts AT the bar: the no-learning robot distilled into a network is always a seed,
+    // and the network fitted to your replays is the other one (when there are replays)
+    let init: { genome: Float32Array; op: 'seed' | 'greedy' }[] | undefined;
+    const greedy = ensureGreedy(log).genome;
     if (cfg.init === 'imitation') {
-      if (data) init = fromB64(data.report.genome);
-      else {
-        log('no replays in "Training data/": generation 0 is random networks');
-        cfg = { ...cfg, init: 'random' };
-      }
+      init = [...(data ? [{ genome: fromB64(data.report.genome), op: 'seed' as const }] : []), { genome: fromB64(greedy), op: 'greedy' as const }];
+      if (!data) log('no replays in "Training data/": generation 0 starts from the no-learning robot as a network');
     }
     const ck: Checkpoint = {
       version: CK_VERSION,
@@ -352,16 +422,24 @@ export class Engine extends EventEmitter {
       experience: null,
       valCache: {},
     };
+    // THE STARTING CHAMPION is the no-learning robot as a network — the bar. With the champion test
+    // on, a robot replaces it only by beating it on fresh matches, so the champion can never be
+    // worse than the baseline (the first version crowned generation 0's validated best without a
+    // test, and it lost 14 of 16 unseen matches to the baseline)
+    if (cfg.confirmEpisodes > 0) {
+      const gi = cfg.init === 'imitation' ? (data ? 1 : 0) : -1; // its id in generation 0, if it is there
+      ck.bestEver = { fitness: -Infinity, score: 0, gen: 0, genome: greedy, parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, id: gi, val: null, conf: null, baseline: true };
+    }
     mkdirSync(join(dir, 'gens'), { recursive: true });
     mkdirSync(join(dir, 'checkpoints'), { recursive: true });
     const e = new Engine(dir, ck, init);
     e.save();
-    e.event(`created: ${cfg.algo.toUpperCase()}, population ${cfg.pop}, ${cfg.init === 'imitation' ? 'generation 0 = the network fitted to your replays, its mutants and random robots' : 'random generation 0'}${data ? `; students learn from ${data.report.files.filter((f) => f.samples > 0).length} replays` : ''}`);
+    e.event(`created: ${cfg.algo.toUpperCase()}, population ${cfg.pop}, ${cfg.init === 'imitation' ? `generation 0 = ${data ? 'the network fitted to your replays, ' : ''}the no-learning robot as a network, their mutants and random robots` : 'random generation 0'}${data ? `; students learn from ${data.report.files.filter((f) => f.samples > 0).length} replays` : ''}`);
     e.saveCheckpoint('start', false, true);
     return e;
   }
 
-  private constructor(dir: string, ck: Checkpoint, init?: Float32Array) {
+  private constructor(dir: string, ck: Checkpoint, init?: { genome: Float32Array; op: 'seed' | 'greedy' }[]) {
     super();
     this.dir = dir;
     this.ck = ck;
@@ -666,11 +744,19 @@ export class Engine extends EventEmitter {
         champ.val = v;
         champ.fitness = v.fitness;
         champ.score = v.score;
+        champ.conf = null; // what it is measured on changed: its running fresh-match score starts over
+        this.ck.arena = []; // …and so does every race against it
       }
       if (q.i >= 0) validated.push({ id: q.id, score: v.score, fitness: v.fitness, ci: v.ci95 });
     });
 
-    // THE CHAMPION: the best validated mean (or, with validation off, the best single match)
+    // THE CHAMPION. The candidate is the best VALIDATED robot of this generation (or, with validation
+    // off, the best single match). Picking the best of many on the same validation matches inflates
+    // its score — the winner's curse; measured: validated 220, then 192 on unseen matches. So, with
+    // confirmEpisodes on, a candidate REPLACES the champion only when it beats it on brand-new matches
+    // (never used before, both robots on the same ones), by more than chance allows (one-sided 95 %
+    // paired test). The champion replays fresh matches every generation, so the score shown for it
+    // is a running mean over matches it was never selected on.
     let newBest = false;
     let challenger: { i: number; fitness: number; score: number; val: Val | null } | null = null;
     if (c.validateTop > 0) {
@@ -680,26 +766,81 @@ export class Engine extends EventEmitter {
       }
     } else challenger = { i: bi, fitness: bf, score: score[bi], val: null };
     const T = this.ck.totals;
-    if (challenger && (!this.ck.bestEver || challenger.fitness > this.ck.bestEver.fitness) && (!this.ck.bestEver || lin[challenger.i].id !== this.ck.bestEver.id)) {
-      newBest = true;
-      const i = challenger.i;
-      // the champion's showcase life (exact frames + DSIM replay) and its decisions (experience)
-      const seed = c.validateTop > 0 ? this.valSeed(0) : this.genSeed(gen, 0);
-      const [rec] = await pool.map<EpisodeResult>([this.job(genomes[i], seed, { frames: true, record: true, samples: true, shaping: 0 })]);
-      this.check();
-      this.ck.bestEver = { fitness: challenger.fitness, score: challenger.score, gen, genome: genomes[i], parts: rec.parts, id: lin[i].id, val: challenger.val };
-      this.ck.experience = rec.samples && rec.samples.n ? rec.samples : this.ck.experience;
-      if (rec.replay) {
-        exportReplay(join(this.dir, 'best'), rec.replay as Replay, {
-          title: `${c.name} champion (gen ${gen})`,
-          profile: `${c.profile}${c.sampleProfile ? ' (sampled robot)' : ''}, ${c.driver} driver`,
-          score: rec.score,
-          replayExact: rec.replayExact ?? false,
-        });
+    const K = c.confirmEpisodes;
+    const cur = this.ck.bestEver;
+    const isNew = !!challenger && (!cur || lin[challenger.i].id !== cur.id);
+    let confirm: GenSummary['confirm'] = null;
+    let winner: { genome: string; id: number; lineage: Lineage; val: Val | null; fitness: number; score: number; conf: Conf | null } | null = null;
+    if (K > 0 && !cur) {
+      // no champion at all (never the case for a new run, which starts with the baseline): the
+      // first validated robot takes the place
+      if (challenger) winner = { genome: genomes[challenger.i], id: lin[challenger.i].id, lineage: lin[challenger.i], val: challenger.val, fitness: challenger.fitness, score: challenger.score, conf: null };
+    } else if (K > 0 && cur) {
+      // RACING (as in irace / F-race): up to ARENA contenders stay across generations. Each generation
+      // the champion and every contender play the same K brand-new matches; each contender's paired
+      // advantage over the champion accumulates. It is promoted when that advantage crosses a
+      // group-sequential boundary (Pocock, Z_PROMOTE: safe although it is looked at every generation),
+      // dropped when it is clearly worse or has used RACE_MAX matches without proving itself.
+      const arena = (this.ck.arena ??= []);
+      if (isNew && challenger && !arena.some((a) => a.id === lin[challenger.i].id)) {
+        if (arena.length >= ARENA) arena.splice(arena.reduce((w, a, k) => (zOf(a) < zOf(arena[w]) ? k : w), 0), 1); // make room: drop the weakest
+        arena.push({ id: lin[challenger.i].id, genome: genomes[challenger.i], lineage: lin[challenger.i], val: challenger.val, since: gen, n: 0, sd: 0, sd2: 0, conf: null });
       }
-      atomicWrite(join(this.dir, 'best.frames.json.gz'), gzipSync(JSON.stringify({ gen, fitness: rec.fitness, score: rec.score, death: rec.death, parts: rec.parts, lineage: lin[i], frames: rec.frames, events: rec.events, val: challenger.val })));
-      T.matches += 1;
+      const fresh = Array.from({ length: K }, (_, k) => seedOf(c.seed, 'confirm', gen, k) % 1_000_000_007);
+      const who = [cur.genome, ...arena.map((a) => a.genome)];
+      const cres = await pool.map<EpisodeResult>(
+        who.flatMap((g) => fresh.map((sd) => this.job(g, sd, { shaping: 0 }))),
+        (done, total) => this.emit('progress', { gen, done, total, stage: 'confirming' }),
+      );
+      this.check();
+      T.matches += cres.length;
+      for (const r of cres) T.simSeconds += r.ticks / 60;
+      const champRes = cres.slice(0, K);
+      cur.conf = addConf(cur.conf ?? null, champRes);
+      arena.forEach((a, j) => {
+        const rs = cres.slice((j + 1) * K, (j + 2) * K);
+        for (let k = 0; k < K; k++) {
+          const d = rs[k].fitness - champRes[k].fitness;
+          a.n++;
+          a.sd += d;
+          a.sd2 += d * d;
+        }
+        a.conf = addConf(a.conf, rs);
+      });
+      // the strongest contender is promoted once it crosses the boundary
+      const top = arena.reduce<ArenaEntry | null>((b, a) => (!b || zOf(a) > zOf(b) ? a : b), null);
+      if (top) {
+        const { mean, se } = diffStats(top);
+        const promoted = zOf(top) >= Z_PROMOTE;
+        confirm = { id: top.id, diff: mean, se, n: top.n, promoted };
+        this.emit('log', `champion race: #${top.id} vs champion over ${top.n} fresh matches ${mean >= 0 ? '+' : ''}${mean.toFixed(1)} ± ${(1.96 * se).toFixed(1)} (z ${zOf(top).toFixed(2)}, promote at ${Z_PROMOTE})${promoted ? ' — NEW CHAMPION' : ''}`);
+        if (promoted) {
+          const q = confStats(top.conf!);
+          winner = { genome: top.genome, id: top.id, lineage: top.lineage, val: top.val, fitness: q.fitness, score: q.score, conf: top.conf };
+          arena.splice(arena.indexOf(top), 1);
+          for (const a of arena) Object.assign(a, { n: 0, sd: 0, sd2: 0 }); // their evidence was against the old champion
+        }
+      }
+      // drop the clearly worse and the ones that had their chance
+      for (let k = arena.length - 1; k >= 0; k--) if (arena[k].n >= 2 * K && (zOf(arena[k]) <= -Z_DROP || arena[k].n >= RACE_MAX)) arena.splice(k, 1);
+      if (!winner) {
+        const q = confStats(cur.conf);
+        cur.fitness = q.fitness;
+        cur.score = q.score;
+      }
+    } else if (isNew && challenger && (!cur || challenger.fitness > cur.fitness)) {
+      winner = { genome: genomes[challenger.i], id: lin[challenger.i].id, lineage: lin[challenger.i], val: challenger.val, fitness: challenger.fitness, score: challenger.score, conf: null };
+    }
+    if (winner) {
+      newBest = true;
+      const rec = await this.showcase(pool, winner.genome, winner.lineage, gen, winner.val);
+      this.ck.bestEver = { fitness: winner.fitness, score: winner.score, gen, genome: winner.genome, parts: rec.parts, id: winner.id, val: winner.val, conf: winner.conf };
       this.emit('best', this.ck.bestEver);
+    } else if (cur && !existsSync(join(this.dir, 'best.frames.json.gz'))) {
+      // a champion without a showcase yet (the starting baseline, or after a rewind to before one)
+      const rec = await this.showcase(pool, cur.genome, { id: cur.id, parents: [], op: cur.baseline ? 'greedy' : 'elite', muts: 0, born: cur.gen }, gen, cur.val);
+      cur.parts = rec.parts;
+      this.emit('best', cur);
     }
 
     const deaths: Record<Death, number> = { survived: 0, crash: 0, stall: 0 };
@@ -774,7 +915,8 @@ export class Engine extends EventEmitter {
       choices,
       meanTips: tips / res.length,
       champScore: be.score,
-      champCi: be.val?.ci95 ?? 0,
+      champCi: be.conf?.n ? confStats(be.conf).ci95 : (be.val?.ci95 ?? 0),
+      confirm,
       validated,
       opRates: st.rates,
       opSmooth: st.smooth,
@@ -796,12 +938,34 @@ export class Engine extends EventEmitter {
     for (const l of this.pendingCk.splice(0)) this.saveCheckpoint(l);
   }
 
+  /** the champion's showcase life — exact frames for the viewer, a DSIM replay and paste snippet —
+   * and its decisions, which become the experience students learn from */
+  private async showcase(pool: WorkerPool, genome: string, lineage: Lineage, gen: number, val: Val | null): Promise<EpisodeResult> {
+    const c = this.ck.config;
+    const seed = c.validateTop > 0 ? this.valSeed(0) : this.genSeed(gen, 0);
+    const [rec] = await pool.map<EpisodeResult>([this.job(genome, seed, { frames: true, record: true, samples: true, shaping: 0 })]);
+    this.check();
+    this.ck.experience = rec.samples && rec.samples.n ? rec.samples : this.ck.experience;
+    if (rec.replay) {
+      exportReplay(join(this.dir, 'best'), rec.replay as Replay, {
+        title: `${c.name} champion (gen ${gen})`,
+        profile: `${c.profile}${c.sampleProfile ? ' (sampled robot)' : ''}, ${c.driver} driver`,
+        score: rec.score,
+        replayExact: rec.replayExact ?? false,
+      });
+    }
+    atomicWrite(join(this.dir, 'best.frames.json.gz'), gzipSync(JSON.stringify({ gen, fitness: rec.fitness, score: rec.score, death: rec.death, parts: rec.parts, lineage, frames: rec.frames, events: rec.events, val })));
+    this.ck.totals.matches += 1;
+    this.ck.totals.simSeconds += rec.ticks / 60;
+    return rec;
+  }
+
   private save(): void {
     atomicWrite(join(this.dir, 'checkpoint.json'), JSON.stringify(this.ck));
     const b = this.ck.bestEver;
     atomicWrite(
       join(this.dir, 'summary.json'),
-      JSON.stringify({ name: this.name, gen: this.gen, algo: this.ck.config.algo, pop: this.ck.config.pop, bestFitness: b?.fitness ?? null, bestScore: b?.score ?? null, updated: now(), version: CK_VERSION }),
+      JSON.stringify({ name: this.name, gen: this.gen, algo: this.ck.config.algo, pop: this.ck.config.pop, bestFitness: scored(b) ? b!.fitness : null, bestScore: scored(b) ? b!.score : null, updated: now(), version: CK_VERSION }),
     );
   }
 
@@ -845,8 +1009,8 @@ export class Engine extends EventEmitter {
       auto,
       pinned,
       time: now(),
-      bestFitness: this.ck.bestEver?.fitness ?? null,
-      bestScore: this.ck.bestEver?.score ?? null,
+      bestFitness: scored(this.ck.bestEver) ? this.ck.bestEver!.fitness : null,
+      bestScore: scored(this.ck.bestEver) ? this.ck.bestEver!.score : null,
       config: { algo: c.algo, pop: c.pop, sigma: c.sigma, lr: c.lr, elite: c.elite, crossRate: c.crossRate, mutProb: c.mutProb, preset: c.preset },
     };
     const m = join(this.dir, 'metrics.jsonl');
@@ -1088,6 +1252,7 @@ export function checkRun(c: RunConfig): string | null {
   if (!Number.isInteger(c.episodes) || c.episodes < 1 || c.episodes > 32) return 'matches per robot must be 1–32';
   if (!Number.isInteger(c.validateTop) || c.validateTop < 0 || c.validateTop > Math.min(32, c.pop)) return 'robots validated per generation must be 0–32 (and at most the population)';
   if (!Number.isInteger(c.valEpisodes) || c.valEpisodes < 1 || c.valEpisodes > 64) return 'validation matches must be 1–64';
+  if (!Number.isInteger(c.confirmEpisodes) || (c.confirmEpisodes !== 0 && (c.confirmEpisodes < 2 || c.confirmEpisodes > 64))) return 'champion test matches must be 0 (off) or 2–64';
   if (!['auto', 'full', 'curriculum'].includes(c.stage)) return 'stage must be auto, full or curriculum';
   if (!['human', 'oracle'].includes(c.driver)) return 'driver must be human or oracle';
   if (!(c.annealGens >= 1)) return 'shaping fade must be ≥ 1 generation';

@@ -32,7 +32,7 @@ import type { Limits } from '../harness/profiles';
 import { effective, type Eff } from '../harness/s1/drive';
 import { planPolyline } from '../harness/s1/paths';
 import { dropZoneOccupied } from '../harness/filters';
-import { flowerFeet, placeable } from '../harness/s1/lab';
+import { flowerFeet } from '../harness/s1/lab';
 import { polysOverlap, rect } from '../harness/geom';
 import { SPOTS, inEnvelope } from './obs';
 
@@ -41,11 +41,14 @@ const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 const dist = (a: P, b: P): number => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** bump when the options or how a replay is labelled change: cached demonstrations are rebuilt */
-export const SKILLS_VERSION = 2;
-export const OPTION_KINDS = ['field', 'lz', 'flower', 'shoot', 'hp', 'park'] as const;
+export const SKILLS_VERSION = 3;
+export const OPTION_KINDS = ['field', 'lz', 'flower', 'shoot', 'hp', 'park', 'position'] as const;
 export type OptionKind = (typeof OPTION_KINDS)[number];
 /** per-option features the policy sees (plus the global observation) */
-export const OPT_FEATS = ['k:field', 'k:lz', 'k:flower', 'k:shoot', 'k:hp', 'k:park', 'estTime', 'dist', 'nectar', 'cluster', 'flowerPollen', 'toShoot', 'hopperAfter', 'onTargetSide', 'sweepTime'] as const;
+export const OPT_FEATS = ['k:field', 'k:lz', 'k:flower', 'k:shoot', 'k:hp', 'k:park', 'k:position', 'estTime', 'dist', 'nectar', 'cluster', 'flowerPollen', 'toShoot', 'hopperAfter', 'onTargetSide', 'sweepTime', 'current'] as const;
+/** index of the estimated-time feature (the greedy baseline reads it) and of the 'current' flag */
+export const F_EST = OPT_FEATS.indexOf('estTime');
+export const F_CURRENT = OPT_FEATS.indexOf('current');
 export const N_OPT_FEATS = OPT_FEATS.length;
 
 export interface Option {
@@ -62,9 +65,9 @@ export interface Option {
 export interface Style {
   fireHold: number; // while collecting, slow to firing speed once holding at least this many
   fireMinV: number; // …but only on a robot that may fire at ≥ this speed (in/s)
-  tipReact: boolean; // re-decide the moment the HIVE starts a tip
+  stick: number; // thinking on the go: switch to another option only when it scores this much more
 }
-export const DEFAULT_STYLE: Style = { fireHold: 2, fireMinV: 15, tipReact: false };
+export const DEFAULT_STYLE: Style = { fireHold: 2, fireMinV: 15, stick: 0.3 };
 
 /** the alliance's own frame → world (the field is point-symmetric; blue's frame is the world) */
 const mir = (a: Alliance, p: P): P => (a === 'blue' ? p : { x: -p.x, y: -p.y });
@@ -82,6 +85,14 @@ const BARS: P[][] = [
   [{ x: -BB.BB_FRAME_BAR_OUT, y: -BB.BB_FRAME_Y }, { x: -BB.BB_FRAME_BAR_IN, y: BB.BB_FRAME_Y }],
 ];
 const STUCK_TICKS = 60;
+/** the static solids a robot may not overlap (harness/s1/lab.ts placeable, with its solids built
+ * once: options are listed every quarter second now, and rebuilding them was most of the cost) */
+const SOLIDS: P[][] = [...BARS.map(([a, b]) => rect(a.x, a.y, b.x, b.y)), ...flowerFeet()];
+function placeable(spec: RobotSpec, p: P, heading: number, slop = 0.5): boolean {
+  const fp = footprintCorners(spec, p, heading);
+  if (fp.some((q) => Math.abs(q.x) > BB.BB_HALF_X - 0.1 || Math.abs(q.y) > BB.BB_HALF_Y - 0.1)) return false;
+  return !SOLIDS.some((b) => polysOverlap(fp, b, slop));
+}
 /** HIVE frame bars grown by 1 in (the safety margin) and their centre lines */
 const BAR_RECTS = BARS.map(([a, b]) => rect(a.x - 1, a.y - 1, b.x + 1, b.y + 1));
 const BAR_X = BARS.map(([a, b]) => (a.x + b.x) / 2);
@@ -343,7 +354,9 @@ function tourLength(from: P, pts: P[], m: number): number {
 const PARK_MARGIN_S = 1.0;
 
 // ─────────────────────────────── the options available now ───────────────────────────────
-export function options(w: World, r: RobotState, pilot: Pilot, cap: number, banned: Map<string, number>): Option[] {
+/** THINKING ON THE GO: `isCurrent` names the option the robot is already doing, so it is listed
+ * with the 'current' feature set and the policy can weigh carrying on against switching */
+export function options(w: World, r: RobotState, pilot: Pilot, cap: number, banned: Map<string, number>, isCurrent: (o: Option) => boolean = () => false): Option[] {
   const a = r.alliance;
   const B = bb(w);
   const out: Option[] = [];
@@ -368,6 +381,7 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
       // +1 when it is on the side of the cell shots should go to (shoot from there, no crossing)
       onTarget(w, a, c) ? 1 : -1,
       (x.sweep ?? 0) / 5,
+      0, // 'current', set below
     ];
   };
   if (free > 0) {
@@ -419,13 +433,37 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
     const z = BB.BB_LZ[a];
     out.push({ kind: 'hp', label: 'human player: enter a NECTAR', x: (z.x0 + z.x1) / 2, y: (z.y0 + z.y1) / 2, feats: feats('hp', r.pos, null) });
   }
+  // never idle: getting where the next thing happens is always an option (the spill of a tipping
+  // cell, or a scoring spot for the target cell)
+  if ((ph === 'auto' || ph === 'teleop') && ok('position')) {
+    const q = positionGoal(w, r, pilot);
+    out.push({ kind: 'position', label: q.label, x: q.x, y: q.y, feats: feats('position', q, q.h) });
+  }
   const g = parkGoal(a, pilot);
   // PARK counts at the instant AUTO / the match ends, so go only when it takes about that long
   const parkT = pilot.estTime(r, g, g.h) + PARK_MARGIN_S;
   if ((ph === 'auto' || ph === 'teleop') && w.match.phaseTimeLeft < parkT) {
     out.push({ kind: 'park', label: 'park in the loading zone', x: g.x, y: g.y, feats: feats('park', g, g.h) });
   }
+  for (const o of out) o.feats[F_CURRENT] = isCurrent(o) ? 1 : 0;
   return out;
+}
+
+/** where to be when there is nothing better: beside the lane a tipping cell's spill will run down
+ * (intake toward the HIVE), else the nearest scoring spot for the target cell */
+function positionGoal(w: World, r: RobotState, pilot: Pilot): P & { h: number | null; label: string } {
+  const a = r.alliance;
+  const hive = bb(w).hives[a];
+  if (hive.tipping > 0 && !hive.released && hive.contents.length) {
+    const hx = a === 'blue' ? BB.BB_HIVE_X : -BB.BB_HIVE_X;
+    const sy = hive.up === 'north' ? 1 : -1; // the up cell is the one emptying
+    const p = { x: hx, y: sy * (BB.BB_HIVE_CELL_DY + BB.BB_CELL_OPEN.d / 2 + 26) };
+    const dir = Math.atan2(sy * BB.BB_HIVE_CELL_DY - p.y, hx - p.x);
+    const h = Pilot.facing(pilot.bestEnd(r.heading, dir), dir);
+    if (placeable(pilot.spec, p, h, 0.5)) return { ...p, h, label: 'wait beside the coming spill' };
+  }
+  const s = nearestSpot(w, r, pilot);
+  return { ...s, h: null, label: `get in position for the ${targetCell(w, a)} CELL` };
 }
 
 // ─────────────────────────────── goals ───────────────────────────────
@@ -529,6 +567,14 @@ export class Executor {
     this.radius = Math.max(12, ...mem.map((b) => dist(b.pos, this.center) + 8));
   }
 
+  /** is `o` (from a fresh option list) the same thing this executor is doing */
+  holds(o: Option): boolean {
+    const g = (k: OptionKind): boolean => k === 'field' || k === 'lz';
+    if (g(this.opt.kind) && g(o.kind)) return !!o.balls?.some((id) => this.ids.has(id) || id === this.target);
+    if (o.kind !== this.opt.kind) return false;
+    return o.kind !== 'flower' || o.flower === this.opt.flower;
+  }
+
   /** has this option already collected anything */
   get gained(): boolean {
     return this.hop0 > this.hopStart;
@@ -593,6 +639,11 @@ export class Executor {
       }
       case 'hp':
         return { c: cmd({ bbNectar: true }), out: 'done' };
+      case 'position': {
+        // hold there (a new target each think): the policy leaves the moment something is better
+        const q = positionGoal(w, r, this.pilot);
+        return { c: this.pilot.drive(r, t, q, q.h), out: 'running' };
+      }
       case 'park': {
         const g = parkGoal(r.alliance, this.pilot);
         const ph = w.match.phase;

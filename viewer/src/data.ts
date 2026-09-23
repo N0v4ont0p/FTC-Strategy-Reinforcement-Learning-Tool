@@ -12,12 +12,15 @@ export interface RunData {
   experience: number;
 }
 export interface Champion {
-  fitness: number;
-  score: number;
+  fitness: number | null; // null: not measured yet (the starting baseline, before generation 0)
+  score: number | null;
   gen: number;
   parts: Parts;
   id: number;
   val: Val | null;
+  /** its results on fresh matches it was never selected on (null until it has some) */
+  conf: { fitness: number; score: number; ci95: number; n: number } | null;
+  baseline: boolean; // the no-learning robot as a network: the bar the run started with
 }
 export interface RunState {
   name: string;
@@ -127,12 +130,15 @@ export const OPTIONS = [
   { key: 'shoot', label: 'shoot', color: '#c98500' },
   { key: 'hp', label: 'human player NECTAR', color: '#d55181' },
   { key: 'park', label: 'park', color: '#9085e9' },
+  // not an action: waiting in the right place (neutral ink, not a categorical hue)
+  { key: 'position', label: 'get in position', color: '#8a8176' },
 ] as const;
 
 /** how an individual was made, in words */
 export const OP_LABEL: Record<string, string> = {
   init: 'random (generation 0)',
   seed: 'fitted to your replays',
+  greedy: 'the no-learning robot, as a network',
   elite: 'elite (kept unchanged)',
   champion: 'champion (always kept)',
   mutant: 'mutant',

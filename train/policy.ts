@@ -10,15 +10,11 @@ import type { Resolved } from '../harness/profiles';
 import { Mlp, type NetShape } from './net';
 import { N_OBS, encode } from './obs';
 import type { Sample } from './bc';
-import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, fireGate, options, type Option, type OptionKind, type Style } from './skills';
+import { share } from './fork';
+import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, type Option, type OptionKind, type Style } from './skills';
 
 export const HIDDEN = 16;
-/** STYLE genes: raw gene g → lo + (hi − lo)·sigmoid(g); `def` is the default value */
-export const STYLE = [
-  { key: 'fireHold', lo: 0, hi: 5, def: 2, label: 'slow down to fire while collecting once holding' },
-  { key: 'fireMinV', lo: 0, hi: 60, def: 15, label: '…on robots allowed to fire at this speed (in/s) or more' },
-  { key: 'stick', lo: 0, hi: 3, def: 0.3, label: 'switch to another option only when it scores this much more' },
-] as const;
+export { STYLE };
 export const STYLE_DEFAULT_GENES: number[] = STYLE.map((s) => {
   const f = (s.def - s.lo) / (s.hi - s.lo);
   return Math.log(f / (1 - f));
@@ -29,14 +25,11 @@ export const THINK_TICKS = 15;
 const SPILL_GUARD_TICKS = 27;
 /** …within this distance of the robot's centre (in): anything its intake could reach in that time */
 const SPILL_REACH = 30;
-/** the longest a robot may wait in position before it has to do something else */
-export const POSITION_MAX_TICKS = 180;
 export const SHAPE: NetShape = { sizes: [N_OBS + N_OPT_FEATS, HIDDEN, 1], skip: true, style: STYLE.length };
 export type PolicyKind = 'net' | 'greedy';
 
 export function decodeStyle(g: ArrayLike<number> | null): Style {
-  const v = STYLE.map((s, i) => (g ? s.lo + (s.hi - s.lo) / (1 + Math.exp(-g[i])) : s.def));
-  return { fireHold: v[0], fireMinV: v[1], stick: v[2] };
+  return Object.fromEntries(STYLE.map((s, i) => [s.key, g ? s.lo + (s.hi - s.lo) / (1 + Math.exp(-g[i])) : s.def])) as Style;
 }
 
 export interface Decision {
@@ -57,84 +50,142 @@ function greedyScore(o: Option, hopperFull: boolean): number {
   const est = o.feats[F_EST];
   if (o.kind === 'park') return 100;
   if (o.kind === 'hp') return 50;
-  if (o.kind === 'position') return -100;
+  if (o.kind === 'position' || o.kind === 'cycle') return -100; // (the tip cycle is for learners to discover: the bar stays as it was)
   if (o.kind === 'shoot') return hopperFull ? 10 : -est - 1;
   return -est;
 }
 
-export function policyController(
-  params: Float32Array | null,
-  prof: Resolved,
-  robotId = 0,
-  log?: Decision[],
-  samples?: Sample[],
-): Controller & { current: () => Decision | null } {
-  const net = params ? new Mlp(SHAPE, params) : null;
-  const style = decodeStyle(net ? net.style() : null);
-  const obs = new Float32Array(N_OBS);
-  const x = new Float32Array(N_OBS + N_OPT_FEATS);
-  let pilot: Pilot | null = null;
-  let cap = 4;
-  let ex: Executor | null = null;
-  let cur: Decision | null = null;
-  let phase = '';
-  let lastThink = -1e9;
-  const banned = new Map<string, number>();
+/** an option's identity within one decision: a forced choice is found again by it in a fork */
+export const optKey = (o: Option): string => `${o.kind}:${o.balls ? o.balls.join(',') : ''}:${o.flower ?? ''}`;
+
+/** a decision the brain just made with at least two options (what the what-if machinery reads) */
+export interface DecisionPoint {
+  tick: number;
+  at: 'think' | 'begin';
+  opts: Option[];
+  scores: number[];
+  chosen: number; // the option it went for (hp: pressed alongside)
+  current: number; // index of the job it was doing (think), -1 at a begin
+  obs: Float32Array | null; // the observation, when asked for (lessons, search)
+}
+
+/**
+ * THE BRAIN: the network (or the greedy order) choosing among the skills' options, re-thinking four
+ * times a second while a skill runs. A class with all its state in fields, so a running match can
+ * be forked (train/fork.ts): the what-if branches of a lesson or a search copy it mid-match.
+ * `force` makes the next decision take a given option (by optKey) instead of the best-scored one.
+ */
+export class Brain {
+  private net: Mlp | null;
+  private style: Style;
+  private obs = new Float32Array(N_OBS);
+  private x = new Float32Array(N_OBS + N_OPT_FEATS);
+  private pilot: Pilot | null = null;
+  private cap = 4;
+  private ex: Executor | null = null;
+  private cur: Decision | null = null;
+  private phase = '';
+  private lastThink = -1e9;
+  private banned = new Map<string, number>();
   // G409: an element that just left a HIVE cell is still falling in the real game — catching it in
   // the first SPILL_GUARD_TICKS is a violation (harness/guards.ts flags it at 0.4 s)
-  const prevKind = new Map<number, string>();
-  const prevEl = new Map<number, string>();
-  const spilled = new Map<number, number>(); // element id → tick it spilled
-  const score = (w: World, r: World['robots'][number], opts: Option[]): number[] => {
-    if (net || samples) encode(w, r, prof, obs);
+  private prevKind = new Map<number, string>();
+  private prevEl = new Map<number, string>();
+  private spilled = new Map<number, number>(); // element id → tick it spilled
+  private hpNow = false;
+  /** the next decision takes this option (a what-if branch); must be used on tick `tick`.
+   * `commit`: the option then runs to completion before the brain re-thinks — the options framework
+   * (Sutton, Precup & Singh 1999: Q(s, o) = do o until it ends, then play on). LESSONS commit: then
+   * "carry on with o" at a re-think is worth what "start o" is worth at a job start, so what the
+   * network learns at job starts carries over to its re-thinks (without it, a what-if of an option the
+   * brain dislikes measured "start it, drop it a quarter-second later", and the network learned to pick
+   * and keep an option it had never seen played out: −31.5 ± 16.4). THINKING AHEAD does not commit:
+   * it is a one-step deviation, and the robot re-thinks afterwards exactly as the what-if assumed
+   * (+40 ± 19; committed: +13 ± 14) */
+  force: { key: string; tick: number; commit: boolean } | null = null;
+  private committed = false;
+  /** the last decision with ≥ 2 options */
+  last: DecisionPoint | null = null;
+  /** record the observation at decisions (lessons and search need it) */
+  wantObs = false;
+
+  constructor(
+    params: Float32Array | null,
+    private prof: Resolved,
+    private robotId = 0,
+    public log?: Decision[],
+    public samples?: Sample[],
+  ) {
+    this.net = params ? new Mlp(SHAPE, share(params)) : null;
+    this.style = decodeStyle(this.net ? this.net.style() : null);
+    share(prof);
+  }
+
+  current(): Decision | null {
+    return this.cur;
+  }
+
+  private score(w: World, r: World['robots'][number], opts: Option[]): number[] {
+    if (this.net || this.samples || this.wantObs) encode(w, r, this.prof, this.obs);
     return opts.map((o) => {
-      if (!net) return greedyScore(o, r.hopper.length >= cap);
-      x.set(obs, 0);
-      x.set(o.feats, N_OBS);
-      return net.forward(x)[0];
+      if (!this.net) return greedyScore(o, r.hopper.length >= this.cap);
+      this.x.set(this.obs, 0);
+      this.x.set(o.feats, N_OBS);
+      return this.net.forward(this.x)[0];
     });
-  };
-  let hpNow = false;
+  }
   /** the human player's button needs nothing from the robot: pressing it is done ALONGSIDE the job
    * (it used to be a job of its own and cut sweeps in two) */
-  const pressHp = (w: World, o: Option, of: number): void => {
-    hpNow = true;
-    banned.set('hp', w.tick + 90); // the human player needs a moment
-    log?.push({ tick: w.tick, kind: 'hp', label: o.label, x: o.x, y: o.y, of, outcome: 'done', endTick: w.tick });
-  };
-  const begin = (w: World, r: World['robots'][number], opts: Option[], i: number, sc: number[]): void => {
-    if (samples && opts.length > 1) samples.push({ obs: new Float32Array(obs), feats: Float32Array.from(opts.flatMap((q) => q.feats)), k: opts.length, y: i });
+  private pressHp(w: World, o: Option, of: number): void {
+    this.hpNow = true;
+    this.banned.set('hp', w.tick + 90); // the human player needs a moment
+    this.log?.push({ tick: w.tick, kind: 'hp', label: o.label, x: o.x, y: o.y, of, outcome: 'done', endTick: w.tick });
+  }
+  private begin(w: World, r: World['robots'][number], opts: Option[], i: number, sc: number[]): void {
+    if (this.samples && opts.length > 1) this.samples.push({ obs: new Float32Array(this.obs), feats: Float32Array.from(opts.flatMap((q) => q.feats)), k: opts.length, y: i });
     if (opts[i].kind === 'hp') {
-      pressHp(w, opts[i], opts.length);
+      this.pressHp(w, opts[i], opts.length);
       i = argmaxWhere(sc, (k) => opts[k].kind !== 'hp');
       if (i < 0) return;
     }
     const o = opts[i];
-    ex = new Executor(o, pilot!, w, r, banned, style);
-    cur = { tick: w.tick, kind: o.kind, label: o.label, x: o.x, y: o.y, of: opts.length };
-    log?.push(cur);
-    lastThink = w.tick;
-  };
-  const argmaxWhere = (v: number[], ok: (i: number) => boolean): number => v.reduce((b, s, i) => (ok(i) && (b < 0 || s > v[b]) ? i : b), -1);
-  const argmax = (v: number[]): number => argmaxWhere(v, () => true);
-  const ctl = ((w: World) => {
-    const r = w.robots.find((q) => q.id === robotId)!;
-    if (!pilot) {
-      pilot = new Pilot(r.spec, prof.limits);
-      cap = BB.bbHopperCap(r.spec);
+    this.ex = new Executor(o, this.pilot!, w, r, this.banned);
+    this.cur = { tick: w.tick, kind: o.kind, label: o.label, x: o.x, y: o.y, of: opts.length };
+    this.log?.push(this.cur);
+    this.lastThink = w.tick;
+  }
+  /** the forced option's index in this decision's list (a fork replays the same list exactly) */
+  private forced(w: World, opts: Option[]): number {
+    const f = this.force!;
+    if (f.tick !== w.tick) throw new Error(`forced decision expected on tick ${f.tick}, reached one on ${w.tick}`);
+    this.force = null;
+    const i = opts.findIndex((o) => optKey(o) === f.key);
+    if (i < 0) throw new Error(`forced option ${f.key} is not among this decision's options`);
+    return i;
+  }
+  private note(w: World, at: 'think' | 'begin', opts: Option[], sc: number[], chosen: number, current: number): void {
+    if (opts.length > 1) this.last = { tick: w.tick, at, opts, scores: sc, chosen, current, obs: this.wantObs ? new Float32Array(this.obs) : null };
+  }
+
+  act(w: World): Map<number, RobotCommand> {
+    const r = w.robots.find((q) => q.id === this.robotId)!;
+    if (!this.pilot) {
+      this.pilot = new Pilot(r.spec, this.prof.limits, this.style);
+      this.cap = BB.bbHopperCap(r.spec);
     }
+    const style = this.style;
     const ph = w.match.phase;
-    if (ph !== phase) {
-      phase = ph;
-      if (cur && ex) finish('done', w.tick); // phase boundaries re-decide
+    if (ph !== this.phase) {
+      this.phase = ph;
+      if (this.cur && this.ex) this.finish('done', w.tick); // phase boundaries re-decide
     }
     let c: RobotCommand | null = null;
     if (ph === 'auto' || ph === 'teleop') {
-      if (ex) {
-        const s = ex.step(w, r, cap);
+      if (this.ex) {
+        const s = this.ex.step(w, r, this.cap);
         c = s.c;
         if (s.out !== 'running') {
-          finish(s.out, w.tick);
+          this.finish(s.out, w.tick);
           c = null; // this tick's command comes from the next decision: no dead tick between jobs
         }
       }
@@ -144,85 +195,120 @@ export function policyController(
       // it reacts within a quarter second instead of finishing the old plan first.
       // waiting is never a plan: after POSITION_MAX_TICKS in position, position is off the list for
       // a while, so the robot must go and do something (no evolved network can stand still forever)
-      if (ex && cur && cur.kind === 'position' && w.tick - cur.tick >= POSITION_MAX_TICKS) {
-        banned.set('position', w.tick + 3 * POSITION_MAX_TICKS);
-        finish('done', w.tick);
+      const posMax = Math.round(60 * style.positionMaxS);
+      if (this.ex && this.cur && this.cur.kind === 'position' && w.tick - this.cur.tick >= posMax) {
+        this.banned.set('position', w.tick + 3 * posMax);
+        this.finish('done', w.tick);
         c = null;
       }
-      if (ex && cur && cur.kind !== 'park' && w.tick - lastThink >= THINK_TICKS) {
-        lastThink = w.tick;
-        const held = ex;
-        const opts = options(w, r, pilot, cap, banned, (o) => held.holds(o));
+      if (this.ex && this.cur && this.cur.kind !== 'park' && !this.committed && w.tick - this.lastThink >= THINK_TICKS) {
+        this.lastThink = w.tick;
+        const held = this.ex;
+        const opts = options(w, r, this.pilot, this.cap, this.banned, (o) => held.holds(o));
         const ci = opts.findIndex((o) => o.feats[F_CURRENT] === 1);
         if (ci >= 0 && opts.length > 1) {
-          const sc = score(w, r, opts);
-          const hp = opts.findIndex((o) => o.kind === 'hp');
-          if (hp >= 0 && sc[hp] > sc[ci] + style.stick) pressHp(w, opts[hp], opts.length);
-          const best = argmaxWhere(sc, (k) => opts[k].kind !== 'hp');
-          if (best >= 0 && best !== ci && sc[best] > sc[ci] + style.stick) {
-            finish('switched', w.tick);
-            begin(w, r, opts, best, sc);
-            c = null;
-          } else if (samples) {
-            // carrying on is a decision too: recorded, so what students learn from the robot's own
-            // play has the same "carry on" / "change now" mix as the replays (sparse records taught dithering)
-            samples.push({ obs: new Float32Array(obs), feats: Float32Array.from(opts.flatMap((q) => q.feats)), k: opts.length, y: ci });
+          const sc = this.score(w, r, opts);
+          if (this.force) {
+            const commit = this.force.commit;
+            const fi = this.forced(w, opts);
+            this.note(w, 'think', opts, sc, fi, ci);
+            if (opts[fi].kind === 'hp') this.pressHp(w, opts[fi], opts.length);
+            else if (fi !== ci) {
+              this.finish('switched', w.tick);
+              this.begin(w, r, opts, fi, sc);
+              c = null;
+            }
+            this.committed = commit; // carry on / switch / press: the job now runs to its end
+          } else {
+            const hp = opts.findIndex((o) => o.kind === 'hp');
+            const pressed = hp >= 0 && sc[hp] > sc[ci] + style.stick;
+            if (pressed) this.pressHp(w, opts[hp], opts.length);
+            const best = argmaxWhere(sc, (k) => opts[k].kind !== 'hp');
+            if (best >= 0 && best !== ci && sc[best] > sc[ci] + style.stick) {
+              this.note(w, 'think', opts, sc, best, ci);
+              this.finish('switched', w.tick);
+              this.begin(w, r, opts, best, sc);
+              c = null;
+            } else {
+              this.note(w, 'think', opts, sc, pressed ? hp : ci, ci);
+              // carrying on is a decision too: recorded, so what students learn from the robot's own
+              // play has the same "carry on" / "change now" mix as the replays (sparse records taught dithering)
+              if (this.samples) this.samples.push({ obs: new Float32Array(this.obs), feats: Float32Array.from(opts.flatMap((q) => q.feats)), k: opts.length, y: ci });
+            }
           }
         }
       }
-      if (!ex) {
-        const opts = options(w, r, pilot, cap, banned);
+      if (!this.ex) {
+        const opts = options(w, r, this.pilot, this.cap, this.banned);
         if (opts.length) {
-          const sc = score(w, r, opts);
-          begin(w, r, opts, argmax(sc), sc);
+          const sc = this.score(w, r, opts);
+          const commit = !!this.force?.commit;
+          const i = this.force ? this.forced(w, opts) : argmaxWhere(sc, () => true);
+          this.note(w, 'begin', opts, sc, i, -1);
+          this.begin(w, r, opts, i, sc);
+          if (commit && this.ex) this.committed = true;
         }
       }
-      if (ex && !c) {
-        const s = ex.step(w, r, cap);
+      if (this.ex && !c) {
+        const s = this.ex.step(w, r, this.cap);
         c = s.c;
-        if (s.out !== 'running') finish(s.out, w.tick);
+        if (s.out !== 'running') this.finish(s.out, w.tick);
       }
     }
+    if (this.force && this.force.tick <= w.tick) throw new Error(`forced decision on tick ${this.force.tick} never came`);
     c ??= cmd();
     for (const b of w.balls) {
       const k = b.state.kind;
-      if (prevKind.get(b.id) === 'element' && (prevEl.get(b.id) ?? '').startsWith('hive:') && k === 'ground') spilled.set(b.id, w.tick);
-      prevKind.set(b.id, k);
-      prevEl.set(b.id, k === 'element' ? String((b.state as { el?: string }).el ?? '') : '');
+      if (this.prevKind.get(b.id) === 'element' && (this.prevEl.get(b.id) ?? '').startsWith('hive:') && k === 'ground') this.spilled.set(b.id, w.tick);
+      this.prevKind.set(b.id, k);
+      this.prevEl.set(b.id, k === 'element' ? String((b.state as { el?: string }).el ?? '') : '');
     }
     let spillNear = false;
-    for (const [id, t0] of spilled) {
+    for (const [id, t0] of this.spilled) {
       if (w.tick - t0 > SPILL_GUARD_TICKS) {
-        spilled.delete(id);
+        this.spilled.delete(id);
         continue;
       }
       const b = w.balls.find((q) => q.id === id);
       if (b && b.state.kind === 'ground' && Math.hypot(b.pos.x - r.pos.x, b.pos.y - r.pos.y) < SPILL_REACH) spillNear = true;
     }
     if (spillNear) c.intake = false;
-    if (hpNow) {
+    if (this.hpNow) {
       c.bbNectar = true;
-      hpNow = false;
+      this.hpNow = false;
     }
     // like a driver's auto-intake: the roller runs whenever there is room (sweeps up whatever it
     // passes), and fire is held whenever a shot can score
-    if ((ph === 'auto' || ph === 'teleop') && r.hopper.length < cap && !spillNear) c.intake = true;
+    if ((ph === 'auto' || ph === 'teleop') && r.hopper.length < this.cap && !spillNear) c.intake = true;
     if (fireGate(w, r)) c.fire = true;
-    return new Map([[robotId, c]]);
-  }) as Controller & { current: () => Decision | null };
-  function finish(out: 'done' | 'failed' | 'switched', t: number): void {
-    const o = ex?.opt;
-    if (o && out === 'failed' && o.flower !== undefined) banned.set(`f${o.flower}`, t + 300);
-    if (o && out === 'failed' && o.balls) for (const id of o.balls) banned.set(`b${id}`, t + 300); // a group it could not take: something else first
+    return new Map([[this.robotId, c]]);
+  }
+
+  private finish(out: 'done' | 'failed' | 'switched', t: number): void {
+    const o = this.ex?.opt;
+    const banned = this.banned;
+    const ban = Math.round(60 * this.style.failBanS);
+    if (o && out === 'failed' && o.flower !== undefined) banned.set(`f${o.flower}`, t + ban);
+    if (o && out === 'failed' && o.balls) for (const id of o.balls) banned.set(`b${id}`, t + ban); // a group it could not take: something else first
     if (o?.kind === 'hp') banned.set('hp', t + 90); // the human player needs a moment
     if (o?.kind === 'shoot' && out === 'failed') banned.set('shoot', t + 90); // blocked: do something else first
-    if (cur) {
-      cur.outcome = out;
-      cur.endTick = t;
+    if (o?.kind === 'cycle' && out === 'failed') banned.set('cycle', t + ban); // the tip cycle stopped working: something else first
+    if (this.cur) {
+      this.cur.outcome = out;
+      this.cur.endTick = t;
     }
-    ex = null;
-    cur = null;
+    this.ex = null;
+    this.cur = null;
+    this.committed = false;
   }
-  ctl.current = () => cur;
+}
+
+const argmaxWhere = (v: number[], ok: (i: number) => boolean): number => v.reduce((b, s, i) => (ok(i) && (b < 0 || s > v[b]) ? i : b), -1);
+
+/** the brain as a plain controller function (callers that never fork) */
+export function policyController(params: Float32Array | null, prof: Resolved, robotId = 0, log?: Decision[], samples?: Sample[]): Controller & { current: () => Decision | null } {
+  const b = new Brain(params, prof, robotId, log, samples);
+  const ctl = ((w: World) => b.act(w)) as Controller & { current: () => Decision | null };
+  ctl.current = () => b.current();
   return ctl;
 }

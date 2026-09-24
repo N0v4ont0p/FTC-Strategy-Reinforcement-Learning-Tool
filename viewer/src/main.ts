@@ -1,25 +1,31 @@
 import { Comb } from './comb';
-import { CHOICE_PARTS, DEATH_PARTS, LineChart, StackChart, historyTable } from './charts';
-import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type FocusFile, type GenFile, type GenSummary, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
+import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
+import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type GenFile, type GenSummary, type Inspected, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
 import type { World } from '../../dsim-main/src/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
-const pct = (v: number | undefined): string => (v === undefined ? '—' : `${(100 * v).toFixed(0)}%`);
+const pct = (v: number | undefined): string => (v === undefined || !Number.isFinite(v) ? '—' : `${(100 * v).toFixed(0)}%`);
+const sgn = (v: number, d = 1): string => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(d)}`;
+const f1 = (v: number | null | undefined, d = 1): string => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(d));
 const view = new FieldView($<HTMLCanvasElement>('field'));
-const scoreChart = new LineChart($<HTMLCanvasElement>('chartScore'), $('scoreLegend'), [
-  { key: 'bestScore', label: 'best', color: '--s-best' },
-  { key: 'meanScore', label: 'mean', color: '--s-mean' },
-  { key: 'champScore', label: 'champion', color: '--s-median' },
-], ' pts', true);
-const fitChart = new LineChart($<HTMLCanvasElement>('chartFit'), $('fitLegend'), [
-  { key: 'best', label: 'best', color: '--s-best' },
-  { key: 'mean', label: 'mean', color: '--s-mean' },
-  { key: 'median', label: 'median', color: '--s-median' },
-], '');
-const deathChart = new StackChart($<HTMLCanvasElement>('chartDeaths'), $('deathLegend'), DEATH_PARTS, (g) => `generation ${g.gen}`);
-const choiceChart = new StackChart($<HTMLCanvasElement>('chartChoice'), $('choiceLegend'), CHOICE_PARTS, (g) => `generation ${g.gen} — decisions`);
+const genTip = (g: GenSummary): string => `<b>generation ${g.gen}</b> · ${g.hours.toFixed(1)} h of training`;
+const examChart = new LineChart<ExamResult>($<HTMLCanvasElement>('chartExam'), $('examLegend'), [
+  { label: 'alone', color: '--s-best', get: (x) => x.net.mean },
+  { label: 'thinking ahead', color: '--s-median', get: (x) => x.search?.mean ?? null },
+], { unit: ' pts', zeroBase: false, xLabel: (x) => `${x.hours.toFixed(1)} h`, tip: (x) => `<b>exam after ${x.hours.toFixed(1)} h</b> (generation ${x.gen})<br>champion #${x.champ} · ${OP_LABEL[x.champOp] ?? x.champOp}<br>vs no-learning ${sgn(x.vsBase.mean)} ± ${x.vsBase.ci95.toFixed(1)}`, empty: 'the first exam appears after generation 0' });
+const regretChart = new LineChart<GenSummary>($<HTMLCanvasElement>('chartRegret'), $('regretLegend'), [{ label: 'points lost per decision', color: '--s-mean', get: (g) => (g.lessons ? g.regret : null) }], { unit: ' pts', zeroBase: true, xLabel: (g) => `gen ${g.gen}`, tip: genTip });
+const lostChart = new LineChart<GenSummary>($<HTMLCanvasElement>('chartLost'), $('lostLegend'), [
+  { label: 'idle', color: OPTIONS[0].color, get: (g) => g.mistakes.idleS },
+  { label: 'empty trips', color: OPTIONS[1].color, get: (g) => g.mistakes.emptyTripS },
+  { label: 'blocked shots', color: OPTIONS[3].color, get: (g) => g.mistakes.blockedShotS },
+], { unit: ' s', zeroBase: true, xLabel: (g) => `gen ${g.gen}`, tip: genTip });
+const scoreChart = new LineChart<GenSummary>($<HTMLCanvasElement>('chartScore'), $('scoreLegend'), [
+  { label: 'lesson matches', color: '--s-mean', get: (g) => g.meanScore },
+  { label: 'champion, fresh', color: '--s-median', get: (g) => (g.champN ? g.champScore : null) },
+], { unit: ' pts', zeroBase: true, xLabel: (g) => `gen ${g.gen}`, tip: (g) => `${genTip(g)}<br>champion #${g.champId}${g.newChamp ? ' (new)' : ''} · ${g.champN} fresh matches ± ${g.champCi.toFixed(1)}` });
+const choiceChart = new StackChart($<HTMLCanvasElement>('chartChoice'), $('choiceLegend'), CHOICE_PARTS, (g) => `generation ${g.gen} — the champion's job decisions`);
 const comb = new Comb($<HTMLCanvasElement>('comb'));
 
 let S: State | null = null;
@@ -31,7 +37,10 @@ let mode: 'live' | 'best' | 'champion' = 'live';
 let liveGen = -1;
 let pendingGen = -1;
 let bestGen = -1;
-let champGen = -1;
+let champId = -1;
+let inspect: Inspected[] = [];
+let inspSearch = false;
+let inspShown = -2;
 let speed = 1;
 let closed = false;
 try {
@@ -117,7 +126,7 @@ function renderRuns(): void {
   const sel = $<HTMLSelectElement>('runSel');
   const runs = S?.runs ?? [];
   sel.innerHTML = runs.length
-    ? runs.map((r) => `<option value="${esc(r.name)}" ${run?.name === r.name ? 'selected' : ''}>${esc(r.name)} · gen ${r.gen}${r.legacy ? ' · old version' : r.bestScore !== null ? ` · ${Math.round(r.bestScore)} pts` : ''}</option>`).join('')
+    ? runs.map((r) => `<option value="${esc(r.name)}" ${run?.name === r.name ? 'selected' : ''}>${esc(r.name)} · gen ${r.gen}${r.legacy ? ' · old version' : r.exam !== null ? ` · exam ${Math.round(r.exam)} pts` : ''}</option>`).join('')
     : '<option value="">no runs yet</option>';
   if (!run) sel.insertAdjacentHTML('afterbegin', '<option value="" selected>— choose —</option>');
   $('empty').hidden = !!run;
@@ -128,7 +137,7 @@ function renderRuns(): void {
           const acts = r.legacy
             ? `<button type="button" class="quiet danger" data-run="delete">Delete</button>`
             : `${open ? '' : '<button type="button" data-run="open">Open</button>'}<button type="button" class="quiet" data-run="rename">Rename</button><button type="button" class="quiet" data-run="duplicate">Duplicate</button><button type="button" class="quiet danger" data-run="delete">Delete</button>`;
-          const meta = r.legacy ? `old version: ${esc(r.legacy)}` : `gen ${fmt(r.gen)} · ${r.bestScore !== null ? `champion ${Math.round(r.bestScore)} pts` : 'no champion yet'} · ${r.algo.toUpperCase()} ${r.pop} robots`;
+          const meta = r.legacy ? `old version: ${esc(r.legacy)}` : `gen ${fmt(r.gen)} · ${r.exam !== null ? `champion exam ${Math.round(r.exam)} pts${r.vsBase !== null ? ` (${sgn(r.vsBase, 0)} over no-learning)` : ''}${r.search !== null ? ` · thinking ahead ${Math.round(r.search)}` : ''}` : 'no exam yet'}`;
           return `<div class="ck${open ? ' pinned' : ''}" data-name="${esc(r.name)}"><div class="ckmain"><b>${esc(r.name)}${open ? '<span class="tag">open</span>' : ''}</b><span class="sub">${meta}</span><span class="sub mono">${bytes(r.bytes)} on disk${r.updated ? ` · last trained ${new Date(r.updated).toLocaleString()}` : ''}</span></div><div class="row">${acts}</div></div>`;
         })
         .join('')
@@ -171,33 +180,43 @@ function renderStatus(): void {
   dis('btnAbort', !running || run?.phase !== 'generation');
 }
 
+const ago = (iso: string | null): string => {
+  if (!iso) return '';
+  const m = (Date.now() - new Date(iso).getTime()) / 60000;
+  return m < 1 ? 'just now' : m < 90 ? `${Math.round(m)} min ago` : `${(m / 60).toFixed(1)} h ago`;
+};
+function renderHeartbeat(): void {
+  if (!run) return;
+  const last = hist[hist.length - 1];
+  const stale = !!run.running && !run.paused && !!run.lastGenAt && !!last && Date.now() - new Date(run.lastGenAt).getTime() > Math.max(20 * 60000, 4 * last.wallS * 1000);
+  $('genWhen').textContent = run.lastGenAt ? `last finished ${ago(run.lastGenAt)}${stale ? ' — slower than usual' : ''}` : 'none finished yet';
+  $('genWhen').classList.toggle('bad', stale);
+}
 function renderRun(): void {
   renderRuns();
   renderStatus();
   if (!run) {
-    for (const id of ['spawned', 'died', 'survived', 'gen']) $(id).textContent = '0';
+    for (const id of ['gen', 'lessonsN', 'matchesN']) $(id).textContent = '0';
     $('champBody').textContent = 'No run open.';
     return;
   }
   const T = run.totals;
-  $('spawned').textContent = fmt(T.spawned);
-  $('died').textContent = fmt(T.deaths.crash + T.deaths.stall);
-  $('diedSplit').textContent = `crashed ${fmt(T.deaths.crash)} · stalled ${fmt(T.deaths.stall)}`;
-  $('survived').textContent = fmt(T.deaths.survived);
   $('gen').textContent = fmt(run.gen);
-  $('stage').textContent = run.stage === 'auto' ? 'AUTO only (30 s)' : 'full 2:30 matches';
+  $('lessonsN').textContent = fmt(T.lessons);
+  $('matchesN').textContent = fmt(T.matches);
+  $('simTime').textContent = `${(T.simSeconds / 3600).toFixed(1)} h simulated in ${(T.wallSeconds / 3600).toFixed(1)} h`;
   const last = hist[hist.length - 1];
-  $('rpm').textContent = last ? fmt(last.robotsPerMin) : '—';
-  const b = run.bestEver;
-  $('champGen').textContent = b ? (b.baseline ? 'the starting bar' : `born in generation ${b.gen}`) : '';
-  const who = b?.baseline ? 'The no-learning robot, as a network. A robot becomes champion only by beating it on fresh matches.<br>' : '';
-  $('champBody').innerHTML = b && b.score === null
-    ? `${who}Not measured yet — press Start training.`
-    : b && b.score !== null && b.fitness !== null
-    ? `${who}<b>${b.score.toFixed(0)}</b> DSIM points${b.conf ? ` <span class="ci">± ${b.conf.ci95.toFixed(0)}</span> — average of ${b.conf.n} fresh matches it was never picked on (95% interval)` : b.val ? ` <span class="ci">± ${b.val.ci95.toFixed(0)}</span> — mean of ${b.val.n} validation matches (95% interval)` : ' — one match (validation is off)'} · fitness ${b.fitness.toFixed(1)}<br>in its showcase match: ${b.parts.tips} HIVE tips · ${b.parts.shotsIn} shots in · ${b.parts.pickups} pickups · ${b.parts.hp} human-player entries · ${b.parts.wasted} missed shots · ${b.parts.violations} rule violations`
-    : 'No champion yet — press Start training.';
-  for (const id of ['watchChamp', 'copySnippet']) ($(id) as HTMLButtonElement).disabled = !b || b.score === null;
-  $('dlChamp').classList.toggle('off', !b);
+  $('rpm').textContent = last ? f1(last.matchesPerMin, 0) : '—';
+  renderHeartbeat();
+  const c = run.champion;
+  const x = c.exam;
+  $('champGen').textContent = `#${c.id} · ${OP_LABEL[c.op] ?? c.op}${c.op === 'baseline' ? '' : ` · since generation ${c.born}`}`;
+  const race = c.race ? `On fresh race matches: <b>${c.race.score.toFixed(0)}</b> ± ${c.race.ci95.toFixed(0)} over ${c.race.n}.` : '';
+  $('champBody').innerHTML = !x
+    ? `${c.op === 'baseline' ? 'The no-learning robot, as a network — the bar. ' : ''}Its exam comes with the first generation. ${race}`
+    : `<div class="hero"><span class="heronum mono">${sgn(x.vsBase.mean)}</span><span class="herounit">points per match over the no-learning robot</span><span class="ci mono">± ${x.vsBase.ci95.toFixed(1)} (95%) · ${x.vsBase.n} exam matches, same luck</span></div>
+       Exam: <b>${x.net.mean.toFixed(0)}</b> ± ${x.net.ci95.toFixed(0)} DSIM points alone, ${x.net.tips.toFixed(1)} tips${x.search ? ` · thinking ahead <b>${x.search.mean.toFixed(0)}</b> (${sgn(x.search.vsBase.mean)} ± ${x.search.vsBase.ci95.toFixed(1)} over no-learning on ${x.search.n} matches; ${sgn(x.search.vsNet.mean)} ± ${x.search.vsNet.ci95.toFixed(1)} over itself alone)` : ''}.<br>${race}${c.parts ? `<br><span class="sub">Showcase match: ${c.parts.tips} tips · ${c.parts.shotsIn} shots in · ${c.parts.pickups} pickups · ${c.parts.wasted} missed · ${c.parts.violations} rule violations</span>` : ''}`;
+  for (const id of ['watchChamp', 'copySnippet']) ($(id) as HTMLButtonElement).disabled = !c.parts;
 }
 
 function refs(): { value: number; label: string }[] {
@@ -205,20 +224,84 @@ function refs(): { value: number; label: string }[] {
   const ref = S?.reference;
   if (ref?.files.length) {
     const best = Math.max(...ref.files.map((f) => f.score));
-    out.push({ value: best, label: `your best replay ${best} (front+back intake build)` });
+    out.push({ value: best, label: `your best replay ${best} (your build)` });
   }
-  const greedy = run?.evals.filter((e) => e.target.startsWith('greedy')).pop();
-  if (greedy) out.push({ value: greedy.mean, label: `greedy baseline ${greedy.mean.toFixed(0)}` });
+  const x = run?.exams.at(-1);
+  if (x) out.push({ value: x.net.mean - x.vsBase.mean, label: `no-learning robot ${(x.net.mean - x.vsBase.mean).toFixed(0)} (exam)` });
   return out;
 }
 function renderHistory(): void {
+  const ex = run?.exams ?? [];
+  const bar = ex.at(-1);
+  examChart.set(ex, bar ? [{ value: bar.net.mean - bar.vsBase.mean, label: `no-learning robot ${(bar.net.mean - bar.vsBase.mean).toFixed(0)}` }] : []);
+  regretChart.set(hist);
+  lostChart.set(hist);
+  const last = hist.at(-1);
+  $('lostNow').textContent = last ? `Last generation, per match: ${f1(last.mistakes.missedShots)} missed shots · ${f1(last.mistakes.emptyTrips)} empty trips · ${f1(last.mistakes.blockedShots)} blocked shots · ${f1(last.mistakes.fouls, 0)} foul points.` : '';
   scoreChart.set(hist, refs());
-  fitChart.set(hist);
-  deathChart.set(hist);
   choiceChart.set(hist);
   comb.set(hist, onDisk);
   if (!$('fitTable').hidden) $('fitTable').innerHTML = historyTable(hist);
-  renderOpStats();
+  renderRace();
+  renderReport();
+}
+
+// ─────────────────────────────── race + report ───────────────────────────────
+function renderRace(): void {
+  const last = hist.at(-1);
+  const c = run?.champion;
+  $('raceNow').textContent = last?.confirm ? `last: #${last.confirm.id} ${sgn(last.confirm.diff)} ± ${(1.96 * last.confirm.se).toFixed(1)} over ${last.confirm.n}${last.confirm.promoted ? ' — promoted' : ''}` : '';
+  $('raceTable').innerHTML = last?.arena.length
+    ? `<table><thead><tr><th class="l">contender</th><th class="l">made by</th><th>matches</th><th>lead ± 95%</th><th>z</th></tr></thead><tbody>${last.arena
+        .map((a) => `<tr><td class="l">#${a.id}</td><td class="l">${OP_LABEL[a.op] ?? a.op}</td><td>${a.n}</td><td>${a.n ? `${sgn(a.diff)} ± ${Number.isFinite(a.se) ? (1.96 * a.se).toFixed(1) : '—'}` : '—'}</td><td>${a.z.toFixed(2)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : `<p class="hint">${last ? 'No contender right now: none of this generation\'s candidates beat the champion where it counts (the lessons it never saw).' : 'Contenders appear after the first generation.'}</p>`;
+  if (last) {
+    const f = last.fit;
+    const v = last.value;
+    const m = last.cma;
+    $('learnNow').innerHTML = [
+      `<b>${fmt(last.lessons)}</b> lessons from ${run?.config.collect ?? '?'} matches; the champion's choice lost <b>${last.regret.toFixed(1)}</b> points per decision against the best option.`,
+      f ? `Candidate network: trained on ${fmt(f.lessons)} lessons, judged on ${fmt(f.held)} it never saw — its picks lose ${f.regret.toFixed(2)} points per decision (the champion's: ${f.startRegret.toFixed(2)}), best option ${pct(f.hit)} of the time (champion ${pct(f.startHit)}). ${f.regret < f.startRegret ? 'It entered the race.' : 'Not better: it did not race.'}` : '',
+      v ? `Rest-of-match predictor: off by ${f1(v.rmse)} points on matches it never saw${Number.isFinite(v.startRmse ?? NaN) ? ` (before: ${f1(v.startRmse)})` : ''}, from ${fmt(v.samples)} moments.` : '',
+      m ? `Skill settings: CMA-ES generation ${m.gen}, step ${m.sigma.toFixed(3)}; the settings tried led the champion by ${sgn(m.mean)} on average (best ${sgn(m.best)}) on the same matches${m.entered ? '; their new centre entered the race' : ''}.` : 'Skill settings are not being tuned (0 tried per generation).',
+      `Phases: lessons ${(last.phases.collect / 60).toFixed(1)} min · learning ${(last.phases.learn / 60).toFixed(1)} · race ${(last.phases.race / 60).toFixed(1)} · exam ${(last.phases.exam / 60).toFixed(1)}.`,
+    ]
+      .filter(Boolean)
+      .map((t) => `<p>${t}</p>`)
+      .join('');
+  } else $('learnNow').innerHTML = '<p class="hint">Appears after the first generation.</p>';
+  $('styleTable').innerHTML = c
+    ? `<table><thead><tr><th class="l">setting</th><th>champion</th><th>start</th></tr></thead><tbody>${c.style
+        .map((q) => `<tr><td class="l">${esc(q.label)}</td><td>${q.value.toFixed(2)}</td><td>${q.def.toFixed(2)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : '';
+}
+function renderReport(): void {
+  const x = run?.exams.at(-1);
+  const first = run?.exams[0];
+  $('gapWhen').textContent = x ? `exam of champion #${x.champ}, generation ${x.gen}` : '';
+  if (!x) {
+    $('gapTable').innerHTML = '<p class="hint">Appears with the first exam.</p>';
+    $('checks').textContent = '';
+    $('examMistakes').innerHTML = '';
+    return;
+  }
+  const share = (q: { collect: number; shoot: number; drive: number; idle: number }): string =>
+    `<span class="share" title="collect ${pct(q.collect)} · shoot ${pct(q.shoot)} · drive ${pct(q.drive)} · idle ${pct(q.idle)}">${(['collect', 'shoot', 'drive', 'idle'] as const).map((k, i) => `<i style="width:${(100 * q[k]).toFixed(1)}%;background:${[OPTIONS[0].color, OPTIONS[3].color, OPTIONS[6].color, '#3a322a'][i]}"></i>`).join('')}</span>`;
+  $('gapTable').innerHTML = `<table><thead><tr><th class="l">who · robot · matches</th><th>points</th><th>tips</th><th>s / tip</th><th>pickups / min</th><th>shots / min</th><th>hit</th><th>shots / load</th></tr></thead><tbody>${x.gap
+    .map((r) => `<tr><td class="l"><b>${esc(r.who)}</b><br><span class="sub">${esc(r.build)} · ${r.n}</span></td><td>${r.points.toFixed(0)}</td><td>${r.tips.toFixed(1)}</td><td>${f1(r.secPerTip)}</td><td>${r.pickupsPerMin.toFixed(0)}</td><td>${r.shotsPerMin.toFixed(0)}</td><td>${pct(r.accuracy)}</td><td>${r.loadSize.toFixed(1)}</td></tr><tr><td class="l" colspan="8">${share(r.share)} <span class="sub">collect ${pct(r.share.collect)} · shoot ${pct(r.share.shoot)} · drive ${pct(r.share.drive)} · idle ${pct(r.share.idle)}</span></td></tr>`)
+    .join('')}</tbody></table>`;
+  const d = x.checks.dsim;
+  $('checks').innerHTML = `<p>${x.checks.deterministic ? '✓' : '⚠'} <b>Deterministic</b>: exam match 1 played again gave ${x.checks.deterministic ? 'exactly the same result' : 'a DIFFERENT result — report this'}.</p><p>${d ? (d.ok ? '✓' : '⚠') : '–'} <b>DSIM verified</b>: ${d ? `${d.ok ? 'DSIM re-simulated the champion\'s replay on your build and landed on the identical world' : d.exact ? 'DSIM\'s re-simulation DIFFERS — report this' : d.detail}. <span class="mono">${esc(d.detail)}</span>` : 'no replay to verify (no replays in Training data).'} (On REAL-v0, simulated misses change the world after DSIM steps, so only the build check can be re-simulated exactly.)</p>`;
+  const rows: [string, (m: ExamResult['mistakes']) => string][] = [
+    ['missed shots', (m) => f1(m.missedShots)],
+    ['empty trips (s)', (m) => `${f1(m.emptyTrips)} (${f1(m.emptyTripS, 0)} s)`],
+    ['blocked shots (s)', (m) => `${f1(m.blockedShots)} (${f1(m.blockedShotS, 0)} s)`],
+    ['idle seconds', (m) => f1(m.idleS, 0)],
+    ['foul points', (m) => f1(m.fouls, 0)],
+  ];
+  $('examMistakes').innerHTML = `<table><thead><tr><th class="l">per match</th>${first && first !== x ? `<th>first exam (#${first.champ})</th>` : ''}<th>now (#${x.champ})</th></tr></thead><tbody>${rows.map(([k, g]) => `<tr><td class="l">${k}</td>${first && first !== x ? `<td>${g(first.mistakes)}</td>` : ''}<td>${g(x.mistakes)}</td></tr>`).join('')}</tbody></table>`;
 }
 
 // ─────────────────────────────── checkpoints ───────────────────────────────
@@ -229,8 +312,8 @@ function renderCheckpoints(list: CheckpointMeta[]): void {
     ? list
         .map(
           (m) => `<div class="ck${m.pinned ? ' pinned' : ''}" data-id="${m.id}">
-      <div class="ckmain"><b>${esc(m.label)}</b><span class="sub">gen ${m.gen} · ${m.bestScore !== null ? `champion ${Math.round(m.bestScore)} pts` : 'no champion yet'} · ${new Date(m.time).toLocaleString()}${m.auto ? ' · automatic' : ''}${m.pinned ? ' · pinned' : ''}</span>
-      <span class="sub mono">${m.config.algo.toUpperCase()} pop ${m.config.pop} · σ ${m.config.sigma}${m.config.preset ? ` · ${esc(S?.presets.find((p) => p.id === m.config.preset)?.label ?? m.config.preset)}` : ''}</span></div>
+      <div class="ckmain"><b>${esc(m.label)}</b><span class="sub">gen ${m.gen} · ${m.exam !== null ? `champion exam ${Math.round(m.exam)} pts` : 'no exam yet'} · ${new Date(m.time).toLocaleString()}${m.auto ? ' · automatic' : ''}${m.pinned ? ' · pinned' : ''}</span>
+      <span class="sub mono">${m.config.collect} lesson matches / gen · ${m.config.horizon} s play-outs${m.config.preset ? ` · ${esc(S?.presets.find((p) => p.id === m.config.preset)?.label ?? m.config.preset)}` : ''}</span></div>
       <div class="row"><button type="button" data-do="rewind">Rewind here</button><button type="button" class="quiet" data-do="fork">Fork</button><button type="button" class="quiet" data-do="rename">Rename</button><button type="button" class="quiet" data-do="pin">${m.pinned ? 'Unpin' : 'Pin'}</button><button type="button" class="quiet danger" data-do="delete">Delete</button></div>
     </div>`,
         )
@@ -279,48 +362,33 @@ $('ckForm').onsubmit = async (e) => {
 };
 
 // ─────────────────────────────── settings: presets + every setting ───────────────────────────────
-type FieldDef = { key: string; label: string; type: 'number' | 'select' | 'check'; step?: string; min?: string; max?: string; opts?: [string, string][]; only?: 'ga' | 'es'; help?: string };
-const EVO: FieldDef[] = [
-  { key: 'pop', label: 'Robots per generation', type: 'number', min: '4', max: '8192' },
-  { key: 'elite', label: 'Elites', type: 'number', min: '0', only: 'ga', help: 'best robots kept unchanged' },
-  { key: 'truncation', label: 'Parent fraction', type: 'number', step: '0.01', min: '0.01', max: '1', only: 'ga', help: 'top share allowed to breed' },
-  { key: 'tournament', label: 'Tournament size', type: 'number', min: '1', only: 'ga', help: 'selection pressure' },
-  { key: 'crossRate', label: 'Crossover rate', type: 'number', step: '0.01', min: '0', max: '1', only: 'ga', help: 'of ordinary children' },
-  { key: 'sigma', label: 'Mutation size σ', type: 'number', step: '0.001', min: '0.001', max: '2', help: 'how far a nudged gene moves' },
-  { key: 'mutProb', label: 'Genes nudged', type: 'number', step: '0.01', min: '0.01', max: '1', only: 'ga', help: 'probability per gene' },
-  { key: 'lr', label: 'Learning rate', type: 'number', step: '0.001', min: '0.0001', max: '1', only: 'es' },
-  { key: 'weightDecay', label: 'Weight decay', type: 'number', step: '0.0001', min: '0', max: '0.99', only: 'es' },
+type FieldDef = { key: string; label: string; type: 'number' | 'select' | 'check'; step?: string; min?: string; max?: string; opts?: [string, string][]; help?: string };
+const COLLECT: FieldDef[] = [
+  { key: 'collect', label: 'Lesson matches per generation', type: 'number', min: '1', max: '512', help: 'the champion plays these; its decisions become lessons' },
+  { key: 'thinkRate', label: 'Re-thinks that are lessons', type: 'number', step: '0.01', min: '0', max: '1', help: 'share of the quarter-second re-thinks (every job start is a lesson)' },
+  { key: 'horizon', label: 'Play-out length', type: 'number', step: '1', min: '1', max: '60', help: 'seconds each option is played out, then the predictor counts the rest' },
+  { key: 'rounds', label: 'Luck draws', type: 'number', min: '1', max: '8', help: 'per lesson; each keeps the better half of the options' },
 ];
 const LEARN: FieldDef[] = [
-  { key: 'macroRate', label: 'Behaviour mutations', type: 'number', step: '0.01', min: '0', max: '0.9', only: 'ga', help: 'share of children; each changes what it chooses' },
-  { key: 'immigrants', label: 'Random newcomers', type: 'number', step: '0.01', min: '0', max: '0.5', only: 'ga', help: 'share of brand-new robots' },
-  { key: 'imitRate', label: 'Students', type: 'number', step: '0.01', min: '0', max: '0.9', only: 'ga', help: 'share taking a lesson from your replays (start)' },
-  { key: 'imitMin', label: 'Students at least', type: 'number', step: '0.01', min: '0', max: '0.9', only: 'ga' },
-  { key: 'imitMax', label: 'Students at most', type: 'number', step: '0.01', min: '0', max: '0.9', only: 'ga' },
-  { key: 'lessonSteps', label: 'Lesson length', type: 'number', min: '1', max: '1000', only: 'ga', help: 'learning steps per student' },
-  { key: 'imitAdapt', label: 'The students\' share follows how well they do', type: 'check', only: 'ga' },
+  { key: 'window', label: 'Generations of lessons remembered', type: 'number', min: '1', max: '50' },
+  { key: 'epochs', label: 'Epochs (at most)', type: 'number', min: '1', max: '1000', help: 'stops early when it stops improving on lessons it never saw' },
+  { key: 'lr', label: 'Learning rate', type: 'number', step: '0.0001', min: '0.00001', max: '0.1' },
+  { key: 'anchor', label: 'Pull toward the champion', type: 'number', step: '0.0001', min: '0', max: '10', help: 'keeps each step small and safe' },
+  { key: 'demoWeight', label: 'Your replays\' weight', type: 'number', step: '0.05', min: '0', max: '10', help: 'at generation 0, relative to a lesson' },
+  { key: 'demoFade', label: '…fading out over', type: 'number', min: '0', help: 'generations (0 = not used)' },
 ];
-const ACC: FieldDef[] = [
-  { key: 'episodes', label: 'Matches per robot', type: 'number', min: '1', max: '32', help: 'more = less luck in the ranking, slower' },
-  { key: 'validateTop', label: 'Robots validated', type: 'number', min: '0', max: '32', help: 'best of each generation (0 = champion by one match)' },
-  { key: 'valEpisodes', label: 'Validation matches', type: 'number', min: '1', max: '64', help: 'fixed matches the best robots are checked on' },
-  { key: 'confirmEpisodes', label: 'Champion test matches', type: 'number', min: '0', max: '64', help: 'fresh matches a new champion must win (0 = off)' },
+const SKILLS: FieldDef[] = [
+  { key: 'cmaPop', label: 'Skill settings tried', type: 'number', min: '0', max: '64', help: 'per generation (0 = off, else 4 or more)' },
+  { key: 'cmaMatches', label: 'Matches each', type: 'number', min: '1', max: '64', help: 'against the champion, same luck' },
+  { key: 'cmaSigma', label: 'First step size', type: 'number', step: '0.05', min: '0.01', max: '5' },
 ];
-const FIT: FieldDef[] = [
-  { key: 'shaping.pickup', label: 'Hint: per pickup', type: 'number', step: '0.05', min: '0' },
-  { key: 'shaping.shotIn', label: 'Hint: per shot in', type: 'number', step: '0.05', min: '0' },
-  { key: 'shaping.hpEntry', label: 'Hint: per human-player entry', type: 'number', step: '0.05', min: '0' },
-  { key: 'annealGens', label: 'Hints fade out over', type: 'number', min: '1', help: 'generations' },
-  { key: 'penalty.violation', label: 'Penalty: rule violation', type: 'number', step: '0.5', min: '0' },
-  { key: 'penalty.wastedShot', label: 'Penalty: missed shot', type: 'number', step: '0.1', min: '0' },
-  { key: 'penalty.strike', label: 'Penalty: physics exploit', type: 'number', step: '0.5', min: '0' },
-  { key: 'penalty.crash', label: 'Penalty: HIVE-frame crash', type: 'number', step: '0.5', min: '0' },
+const RACE: FieldDef[] = [
+  { key: 'raceMatches', label: 'Race matches', type: 'number', min: '2', max: '64', help: 'fresh matches per contender per generation' },
+  { key: 'examMatches', label: 'Exam matches', type: 'number', min: '4', max: '512', help: 'the same matches for every run (changing it re-measures the bar)' },
+  { key: 'examEvery', label: 'Exam at least every', type: 'number', min: '0', help: 'generations (0 = only for a new champion)' },
+  { key: 'searchExam', label: 'Also exam the champion thinking ahead during the match', type: 'check' },
 ];
-const WORLD: FieldDef[] = [
-  { key: 'stage', label: 'Episodes', type: 'select', opts: [['full', 'full 2:30 matches'], ['auto', 'AUTO only'], ['curriculum', 'AUTO first, then full']] },
-  { key: 'driver', label: 'Driver', type: 'select', opts: [['oracle', 'exact'], ['human', 'human reaction time']] },
-  { key: 'sampleProfile', label: 'New robot from the range every life', type: 'check' },
-];
+const WORLD: FieldDef[] = [{ key: 'driver', label: 'Driver', type: 'select', opts: [['oracle', 'exact'], ['human', 'human reaction time']] }];
 const HOUSE: FieldDef[] = [
   { key: 'workers', label: 'CPU workers', type: 'number', min: '1', max: '64', help: 'cores used' },
   { key: 'ckEvery', label: 'Auto checkpoint every', type: 'number', min: '0', help: 'generations (0 = off)' },
@@ -330,7 +398,6 @@ const HOUSE: FieldDef[] = [
 ];
 const getPath = (o: unknown, k: string): unknown => k.split('.').reduce<unknown>((a, p) => (a as Record<string, unknown>)?.[p], o);
 function fieldHtml(d: FieldDef, cfg: RunConfig): string {
-  if (d.only && d.only !== cfg.algo) return '';
   const v = getPath(cfg, d.key);
   const help = d.help ? `<span class="sub">${d.help}</span>` : '';
   if (d.type === 'check') return `<label class="check"><input type="checkbox" data-key="${d.key}" ${v ? 'checked' : ''}/> ${d.label}</label>`;
@@ -339,24 +406,19 @@ function fieldHtml(d: FieldDef, cfg: RunConfig): string {
 }
 let presetPick = '';
 const KEY_LABEL: Record<string, string> = {
-  pop: 'robots',
-  episodes: 'matches per robot',
-  sigma: 'σ',
-  mutProb: 'genes nudged',
-  crossRate: 'crossover',
-  elite: 'elites',
-  truncation: 'parent fraction',
-  tournament: 'tournament',
-  macroRate: 'behaviour mutations',
-  immigrants: 'newcomers',
-  imitRate: 'students',
-  imitAdapt: 'adaptive students',
-  imitMin: 'students min',
-  imitMax: 'students max',
-  lessonSteps: 'lesson',
-  validateTop: 'validated',
-  valEpisodes: 'validation matches',
   workers: 'workers',
+  collect: 'lesson matches',
+  rounds: 'luck draws',
+  window: 'generations remembered',
+  demoWeight: 'replay weight',
+  demoFade: 'replay fade',
+  cmaPop: 'skill settings tried',
+  cmaMatches: 'matches each',
+  raceMatches: 'race matches',
+  examMatches: 'exam matches',
+  examEvery: 'exam every',
+  searchExam: 'thinking-ahead exam',
+  horizon: 'play-out s',
 };
 function renderPresets(): void {
   const list = S?.presets ?? [];
@@ -370,7 +432,7 @@ function renderPresets(): void {
     )
     .join('');
   const p = list.find((q) => q.id === presetPick);
-  const diff = p && c ? Object.entries(p.change).filter(([k, v]) => !(c.algo === 'es' && !['pop', 'episodes', 'validateTop', 'valEpisodes', 'workers', 'sigma'].includes(k)) && JSON.stringify((c as unknown as Record<string, unknown>)[k]) !== JSON.stringify(v)) : [];
+  const diff = p && c ? Object.entries(p.change).filter(([k, v]) => JSON.stringify((c as unknown as Record<string, unknown>)[k]) !== JSON.stringify(v)) : [];
   $('presetDiff').textContent = !run ? 'Open a run to apply a preset (new runs choose one when created).' : !diff.length ? (p?.id === cur ? 'This preset is in use.' : 'Same values as now.') : `Changes: ${diff.map(([k, v]) => `${KEY_LABEL[k] ?? k} ${String((c as unknown as Record<string, unknown>)[k])} → ${String(v)}`).join(' · ')}`;
   ($('presetApply') as HTMLButtonElement).disabled = !run || !p || (!diff.length && p.id === cur);
 }
@@ -392,14 +454,14 @@ function renderSettings(): void {
   renderPresets();
   if (!run) return;
   const c = run.config;
-  $('cfgAlgo').textContent = c.algo === 'ga' ? 'genetic algorithm' : 'evolution strategies';
-  $('cfgEvo').innerHTML = EVO.map((d) => fieldHtml(d, c)).join('');
-  $('cfgLearn').innerHTML = LEARN.map((d) => fieldHtml(d, c)).join('') || '<p class="hint">Evolution-strategies runs have no students or behaviour mutations.</p>';
-  $('cfgAcc').innerHTML = ACC.map((d) => fieldHtml(d, c)).join('');
-  $('cfgFit').innerHTML = FIT.map((d) => fieldHtml(d, c)).join('');
-  $('cfgWorld').innerHTML = WORLD.map((d) => fieldHtml(d, c)).join('');
-  $('cfgHouse').innerHTML = HOUSE.map((d) => fieldHtml(d, c)).join('');
-  $('cfgFixed').textContent = `Fixed for this run (fork or start a new run to change): algorithm ${c.algo.toUpperCase()}, seed ${c.seed}, robot ${c.profile}, generation 0 from ${c.init === 'imitation' ? 'your replays' : 'random networks'}.`;
+  const put = (id: string, defs: FieldDef[]): void => void ($(id).innerHTML = defs.map((d) => fieldHtml(d, c)).join(''));
+  put('cfgCollect', COLLECT);
+  put('cfgLearn', LEARN);
+  put('cfgSkills', SKILLS);
+  put('cfgRace', RACE);
+  put('cfgWorld', WORLD);
+  put('cfgHouse', HOUSE);
+  $('cfgFixed').textContent = `Fixed for this run (fork or start a new run to change): seed ${c.seed}, robot ${c.profile}${c.sampleProfile ? ' (a new one from its range every match)' : ''}.`;
 }
 $('cfgReset').onclick = renderSettings;
 $('cfgForm').onsubmit = async (e) => {
@@ -445,10 +507,10 @@ function renderData(): void {
     : !rd?.key
       ? 'The open run learns from no replays.'
       : rd.key === D.latest
-        ? `The open run learns from this data${rd.experience ? ` and from its champion's own ${rd.experience} decisions` : ''}. ${D.fitted ? `The fitted network picks the same next option as you ${pct(D.fitted.agree)} of the time on a replay it never saw (chance ${pct(D.fitted.chance)}).` : ''}`
-        : `The open run learns from an older set of replays. ${D.built && D.fitted ? '<button type="button" class="link" id="dataUse">Use the current set</button>' : 'Refresh to build the current set.'}`;
+        ? `The open run uses these replays. ${D.fitted ? `The fitted network picks the same next option as you ${pct(D.fitted.agree)} of the time on a replay it never saw (chance ${pct(D.fitted.chance)}).` : ''}`
+        : `The open run uses an older set of replays. ${D.built && D.fitted ? '<button type="button" class="link" id="dataUse">Use the current set</button>' : 'Refresh to build the current set.'}`;
   const use = document.getElementById('dataUse');
-  if (use) use.onclick = () => void act(post('/api/data/use'), 'the run learns from the current set from its next generation');
+  if (use) use.onclick = () => void act(post('/api/data/use'), 'the run uses the current set from its next generation');
 }
 $('dataList').onchange = (e) => {
   const cb = e.target as HTMLInputElement;
@@ -469,37 +531,18 @@ $<HTMLInputElement>('dataUpload').onchange = async (e) => {
   (e.target as HTMLInputElement).value = '';
 };
 
-// ─────────────────────────────── what works: operators ───────────────────────────────
-function renderOpStats(): void {
-  const last = hist[hist.length - 1];
-  const ops = ['mutant', 'cross', 'macro', 'student', 'random'] as const;
-  if (!last || !last.opSmooth) {
-    $('opStats').innerHTML = '<p class="hint">Appears after the first generations.</p>';
-    $('studentStats').innerHTML = '<p class="hint">Appears after the first generations.</p>';
-    return;
-  }
-  $('opStats').innerHTML = `<table><thead><tr><th class="l">made by</th><th>last generation</th><th>smoothed</th><th>in this generation</th></tr></thead><tbody>${ops
-    .map((o) => `<tr><td class="l">${OP_LABEL[o]}</td><td>${pct(last.opRates?.[o])}</td><td>${pct(last.opSmooth?.[o])}</td><td>${last.ops?.[o] ?? 0}</td></tr>`)
-    .join('')}</tbody></table><p class="hint">A child "makes it" when it ranks in the top quarter of its generation (the parents of the next). Students' share of the next generation: <b>${pct(last.imitShare)}</b>${run?.config.imitAdapt ? ' — it grows while students beat plain mutants and shrinks while they do not' : ' (fixed)'}.</p>`;
-  const s = last.opSmooth.student;
-  const m = last.opSmooth.mutant;
-  $('studentStats').innerHTML =
-    s === undefined
-      ? `Students' share: ${pct(last.imitShare)}. ${run?.data.key ? 'No students have been scored yet.' : 'No replays to learn from.'}`
-      : `Students make the top quarter <b>${pct(s)}</b> of the time, plain mutants <b>${pct(m)}</b>. So learning from your replays is ${s > (m ?? 0) ? '<b>helping</b>: the next generations use more of it' : '<b>not helping right now</b>: the next generations use less of it'} — students are ${pct(last.imitShare)} of the next generation.`;
-}
-
 // ─────────────────────────────── evaluation ───────────────────────────────
 function renderEvalTargets(): void {
   const sel = $<HTMLSelectElement>('evalTarget');
   const keep = sel.value;
   const cks = run?.checkpoints ?? [];
   sel.innerHTML = [
-    ['champion', 'Champion'],
-    ['current', 'Current policy (best of the last generation)'],
+    ['champion', 'Champion (its network alone)'],
+    ['player', 'Champion thinking ahead during the match'],
     ['greedy', 'Greedy baseline (no learning)'],
-    ['imitation', 'Imitation of your replays (no evolution)'],
-    ...cks.filter((m) => m.bestScore !== null).map((m) => [m.id, `Checkpoint: ${m.label} (gen ${m.gen})`]),
+    ['baseline', 'The no-learning robot as a network (the starting champion)'],
+    ['imitation', 'Imitation of your replays'],
+    ...cks.map((m) => [m.id, `Checkpoint: ${m.label} (gen ${m.gen})`]),
   ]
     .map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`)
     .join('');
@@ -511,39 +554,12 @@ function renderEvals(list: EvalResult[]): void {
         .reverse()
         .map((e) => `<tr><td class="l">${esc(e.target)}</td><td>${e.gen}</td><td>${e.n}</td><td>${e.mean.toFixed(1)} ± ${e.ci95.toFixed(1)}</td><td>${e.min}–${e.max}</td><td>${e.tips.toFixed(1)}</td><td>${e.deaths.survived}/${e.n}</td></tr>`)
         .join('')}</tbody></table>`
-    : '<p class="hint">No evaluations yet. Start with the greedy baseline: it is the bar evolution has to clear.</p>';
+    : '<p class="hint">No evaluations yet. The exam already compares every champion with the no-learning robot; use this for more matches or other policies.</p>';
 }
 $('evalForm').onsubmit = async (e) => {
   e.preventDefault();
   await act(post('/api/eval', { target: $<HTMLSelectElement>('evalTarget').value, n: Number($<HTMLInputElement>('evalN').value) }), 'evaluation queued — results appear here');
 };
-
-// ─────────────────────────────── lineage ───────────────────────────────
-let prevRank = new Map<number, number>();
-async function renderLineage(g: GenFile): Promise<void> {
-  $('linGen').textContent = String(g.gen);
-  const ops: Record<string, number> = {};
-  for (const i of g.individuals) ops[i.op] = (ops[i.op] ?? 0) + 1;
-  $('linOps').innerHTML = Object.entries(ops)
-    .map(([k, v]) => `<span><b>${v}</b> ${OP_LABEL[k] ?? k}</span>`)
-    .join('');
-  prevRank = new Map();
-  if (g.gen > 0 && onDisk.includes(g.gen - 1)) {
-    try {
-      const p = await getJSON<GenFile>(`/api/gen/${g.gen - 1}`);
-      p.individuals.forEach((q, k) => prevRank.set(q.id, k + 1));
-    } catch {
-      /* not on disk */
-    }
-  }
-  $('linTable').innerHTML = `<table><thead><tr><th>rank</th><th>robot</th><th class="l">made by</th><th class="l">parents (rank)</th><th>genes</th><th>behaviour</th><th>score</th><th>validated</th><th>ended</th></tr></thead><tbody>${g.individuals
-    .slice(0, 40)
-    .map(
-      (q, k) =>
-        `<tr><td>${k + 1}</td><td>#${q.id}</td><td class="l">${OP_LABEL[q.op] ?? q.op}${q.style ? ' (skill)' : ''}</td><td class="l">${q.parents.map((p) => `#${p}${prevRank.has(p) ? ` (${prevRank.get(p)})` : ''}`).join(' × ') || '—'}</td><td>${q.muts}</td><td>${q.style ? 'skill' : q.changed !== undefined ? pct(q.changed) : '—'}</td><td>${Math.round(q.score)}</td><td>${q.val ? `${q.val.score.toFixed(0)} ± ${q.val.ci95.toFixed(0)}` : '—'}</td><td>${q.death}</td></tr>`,
-    )
-    .join('')}</tbody></table>`;
-}
 
 // ─────────────────────────────── the field: LIVE or a replay ───────────────────────────────
 function setMode(m: typeof mode): void {
@@ -553,6 +569,7 @@ function setMode(m: typeof mode): void {
   $('modeChamp').setAttribute('aria-selected', String(m === 'champion'));
   $('transportLive').hidden = m !== 'live';
   $('transportReplay').hidden = m === 'live';
+  $('inspector').hidden = m !== 'champion';
   view.loop = m === 'live';
   if (m !== 'live') view.speed = speed;
   renderViewInfo();
@@ -566,11 +583,11 @@ function renderViewInfo(): void {
   const n = newest();
   let html = '';
   if (!run) html = '';
-  else if (mode === 'live') html = liveGen >= 0 ? `generation ${fmt(liveGen)} · every robot · follows training` : 'no generations yet — press Start training';
-  else if (mode === 'best') html = bestGen >= 0 ? `generation ${fmt(bestGen)} · its best robot · exactly as trained${n > bestGen ? ` · <button type="button" class="link" id="loadNewest">newest: ${fmt(n)}</button>` : ''}` : 'no generations yet';
+  else if (mode === 'live') html = liveGen >= 0 ? `generation ${fmt(liveGen)} · the champion's lesson matches · follows training` : 'no generations yet — press Start training';
+  else if (mode === 'best') html = bestGen >= 0 ? `generation ${fmt(bestGen)} · its best lesson match · exactly as played${n > bestGen ? ` · <button type="button" class="link" id="loadNewest">newest: ${fmt(n)}</button>` : ''}` : 'no generations yet';
   else {
-    const b = run.bestEver;
-    html = b && b.score !== null ? `champion · ${b.baseline ? 'the no-learning robot (the starting bar)' : `born in generation ${fmt(b.gen)}`}${b.conf ? ` · ${b.score.toFixed(0)} ± ${b.conf.ci95.toFixed(0)} over ${b.conf.n} fresh matches` : b.val ? ` · ${b.score.toFixed(0)} ± ${b.val.ci95.toFixed(0)} over ${b.val.n} validation matches` : ''}${champGen >= 0 && champGen !== b.gen ? ` · <button type="button" class="link" id="loadChamp">a new champion (gen ${fmt(b.gen)})</button>` : ''}` : 'no champion yet';
+    const c = run.champion;
+    html = c.parts ? `champion #${c.id} · ${OP_LABEL[c.op] ?? c.op} · exam match 1${champId >= 0 && champId !== c.id ? ` · <button type="button" class="link" id="loadChamp">a new champion (#${c.id})</button>` : ''}` : 'no champion showcase yet';
   }
   $('viewInfo').innerHTML = html;
   const ln = document.getElementById('loadNewest');
@@ -593,7 +610,6 @@ async function showLive(g: number): Promise<void> {
     liveGen = g;
     comb.selected = g;
     comb.draw();
-    void renderLineage(gf);
     setMode('live');
   } catch (e) {
     log(`generation ${g}: ${(e as Error).message}`);
@@ -609,7 +625,6 @@ async function showBest(g: number): Promise<void> {
     comb.selected = g;
     comb.draw();
     setMode('best');
-    void getJSON<GenFile>(`/api/gen/${g}`).then(renderLineage).catch(() => {});
   } catch (e) {
     toast((e as Error).message, true);
   }
@@ -618,7 +633,10 @@ async function watchChampion(): Promise<void> {
   try {
     const f = await getJSON<FocusFile>('/api/best/frames');
     view.loadFocus(f);
-    champGen = f.gen;
+    champId = f.lineage.id;
+    inspect = f.inspect ?? [];
+    inspSearch = !!f.search;
+    inspShown = -2;
     view.playing = true;
     $('play').textContent = 'Pause';
     setMode('champion');
@@ -705,14 +723,52 @@ view.onFrame = (f: FrameInfo) => {
     $('clock').textContent = clock(f.tick);
   }
   if (f.mode === 'swarm') {
-    $('overlay').innerHTML = `<span class="alive">${f.alive}</span>alive of ${f.total} · generation ${fmt(liveGen)}`;
+    $('overlay').innerHTML = `<span class="alive">${f.alive}</span>of ${f.total} lesson matches still playing · generation ${fmt(liveGen)}`;
   } else {
     const opt = f.optionKind !== undefined ? OPTIONS[f.optionKind] : undefined;
     const hop = [...(f.hopper ?? '')].map((c) => `<i class="dot ${c}"></i>`).join('') || '<span class="sub">empty</span>';
     const ph = f.phase === 'teleop' ? 'TELEOP' : f.phase === 'auto' ? 'AUTO' : (f.phase ?? '').toUpperCase();
-    $('overlay').innerHTML = `<span class="alive">${f.score ?? 0}</span>DSIM points · ${f.tips ?? 0} tips · ${ph} ${Math.max(0, f.phaseLeft ?? 0).toFixed(0)} s<br>hopper ${hop}<br>${opt ? `<i class="optsw" style="background:${opt.color}"></i>${esc(f.option ?? '')}` : '<span class="sub">deciding…</span>'}<br><span class="sub">${mode === 'champion' ? 'champion' : `best of generation ${fmt(bestGen)}`} · exactly as trained · ${speed}×</span>`;
+    if (mode === 'champion') renderInspector(f.tick);
+    $('overlay').innerHTML = `<span class="alive">${f.score ?? 0}</span>DSIM points · ${f.tips ?? 0} tips · ${ph} ${Math.max(0, f.phaseLeft ?? 0).toFixed(0)} s<br>hopper ${hop}<br>${opt ? `<i class="optsw" style="background:${opt.color}"></i>${esc(f.option ?? '')}` : '<span class="sub">deciding…</span>'}<br><span class="sub">${mode === 'champion' ? `champion #${champId}` : `best lesson match of generation ${fmt(bestGen)}`} · exactly as played · ${speed}×</span>`;
   }
 };
+/** the decision the champion was at on this tick: every option it had, what the network scored,
+ * and what each made when played out (what-if) — and which one it took */
+function renderInspector(tick: number): void {
+  let lo = 0;
+  let hi = inspect.length - 1;
+  let at = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (inspect[mid].t <= tick) {
+      at = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  if (at === inspShown) return;
+  inspShown = at;
+  $('inspHint').textContent = inspSearch
+    ? 'Thinking ahead: at each job start the network\'s best 3 options were played 10 s ahead on copies of the match (2 luck draws each, never the real future), then the predictor valued the rest; it took the best one unless that led by less than 3 points.'
+    : 'What-if: at each job start every option was played out on copies of the match; the robot itself followed its network.';
+  if (at < 0) {
+    $('inspWhen').textContent = '';
+    $('inspBody').innerHTML = `<p class="hint">${inspect.length ? 'Its first decision comes when AUTO starts.' : 'This showcase has no decisions recorded.'}</p>`;
+    return;
+  }
+  const d = inspect[at];
+  const sec = Math.max(0, (d.t - AUTO_START) / 60);
+  $('inspWhen').textContent = `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')} · ${d.at === 'begin' ? 'a job ended: choose the next' : 're-think while working'} · decision ${at + 1} of ${inspect.length}`;
+  const netBest = d.net;
+  const order = d.opts.map((o, i) => ({ o, i })).sort((a, b) => (b.o.q ?? -Infinity) - (a.o.q ?? -Infinity) || b.o.s - a.o.s);
+  const bestQ = Math.max(...d.opts.map((o) => o.q ?? -Infinity));
+  $('inspBody').innerHTML = `<table><thead><tr><th class="l">option</th><th>network</th><th>what-if points</th><th class="l"></th></tr></thead><tbody>${order
+    .map(({ o, i }) => {
+      const k = OPTIONS[o.kind];
+      const tag = [i === d.chosen ? '<b>✓ chosen</b>' : '', i === d.current ? 'doing' : '', i === netBest && netBest !== d.chosen ? 'network\'s pick' : '', o.q !== null && o.q === bestQ && Number.isFinite(bestQ) ? 'best what-if' : ''].filter(Boolean).join(' · ');
+      return `<tr${i === d.chosen ? ' class="sel"' : ''}><td class="l"><i class="optsw" style="background:${k?.color ?? '#888'}"></i>${esc(o.label)}</td><td>${o.s.toFixed(2)}</td><td>${o.q === null ? '—' : o.q.toFixed(1)}</td><td class="l sub">${tag}</td></tr>`;
+    })
+    .join('')}</tbody></table>`;
+}
 view.onLoop = () => {
   if (mode === 'live' && pendingGen >= 0) {
     const g = pendingGen;
@@ -750,7 +806,7 @@ function showClosed(): void {
   setTimeout(() => ($('closedHint').textContent = 'You can close this tab.'), 300);
 }
 $('btnQuit').onclick = async () => {
-  if (!(await ask('Quit the studio?', `Everything stops: ${run?.running ? 'training (the generation in progress is discarded; the run keeps its last saved generation), ' : ''}DSIM, and the studio itself. This tab closes. Start again with ./start.sh.`, 'Quit studio'))) return;
+  if (!(await ask('Quit the studio?', `Everything stops: ${run?.running ? 'training (the generation in progress is discarded; the run keeps its last finished generation, and training carries on by itself the next time you start the studio — press Stop first if you do not want that), ' : ''}DSIM, and the studio itself. This tab closes. Start again with ./start.sh.`, 'Quit studio'))) return;
   try {
     await post('/api/quit');
     showClosed();
@@ -772,9 +828,8 @@ $('btnNew3').onclick = () => void openNew();
 $('newForm').onsubmit = async (e) => {
   e.preventDefault();
   const f = new FormData($<HTMLFormElement>('newForm'));
-  const pop = String(f.get('pop') ?? '').trim();
-  const body = { name: f.get('name'), preset: f.get('preset'), algo: f.get('algo'), ...(pop ? { pop: Number(pop) } : {}), init: f.get('init'), profile: f.get('profile'), sampleProfile: f.get('sampleProfile') === 'on', driver: f.get('driver'), stage: f.get('stage'), seed: Number(f.get('seed')) };
-  $('newErr').textContent = body.init === 'imitation' ? 'Creating… (if your replays changed, they are re-simulated first: a few seconds each)' : 'Creating…';
+  const body = { name: f.get('name'), preset: f.get('preset'), profile: f.get('profile'), sampleProfile: f.get('sampleProfile') === 'on', driver: f.get('driver'), seed: Number(f.get('seed')) };
+  $('newErr').textContent = 'Creating… (the first run after an update also builds the starting networks: a few minutes)';
   try {
     await post('/api/runs', body);
     $<HTMLDialogElement>('newDlg').close();
@@ -790,8 +845,7 @@ function openFork(id: string, from: string): void {
   $('forkFrom').textContent = `A new run ${from}. This run is not changed.`;
   const f = $<HTMLFormElement>('forkForm');
   (f.elements.namedItem('name') as HTMLInputElement).value = `${run?.name ?? 'run'}-fork`;
-  (f.elements.namedItem('pop') as HTMLInputElement).value = String(run?.config.pop ?? '');
-  (f.elements.namedItem('sigma') as HTMLInputElement).value = String(run?.config.sigma ?? '');
+  (f.elements.namedItem('collect') as HTMLInputElement).value = String(run?.config.collect ?? '');
   $('forkErr').textContent = '';
   $<HTMLDialogElement>('forkDlg').showModal();
 }
@@ -799,8 +853,7 @@ $('forkForm').onsubmit = async (e) => {
   e.preventDefault();
   const f = new FormData($<HTMLFormElement>('forkForm'));
   const overrides: Record<string, number> = {};
-  if (f.get('pop')) overrides.pop = Number(f.get('pop'));
-  if (f.get('sigma')) overrides.sigma = Number(f.get('sigma'));
+  if (f.get('collect')) overrides.collect = Number(f.get('collect'));
   try {
     const r = await post<{ name: string }>(`/api/checkpoints/${forkId}/fork`, { name: f.get('name'), overrides, open: f.get('open') === 'on' });
     $<HTMLDialogElement>('forkDlg').close();
@@ -821,7 +874,7 @@ async function reset(state: State): Promise<void> {
     for (const e of run?.events ?? []) log(e.text, new Date(e.time));
     liveGen = -1;
     bestGen = -1;
-    champGen = -1;
+    champId = -1;
     pendingGen = -1;
     presetPick = '';
   }
@@ -849,7 +902,8 @@ function connect(): void {
     if (!run || !s) return;
     const cfgChanged = JSON.stringify(run.config) !== JSON.stringify(s.config);
     const dataChanged = JSON.stringify(run.data) !== JSON.stringify(s.data);
-    Object.assign(run, { running: s.running, paused: s.paused, phase: s.phase, gen: s.gen, stage: s.stage, config: s.config, data: s.data });
+    Object.assign(run, { running: s.running, paused: s.paused, phase: s.phase, gen: s.gen, config: s.config, data: s.data, lastGenAt: s.lastGenAt });
+    renderHeartbeat();
     renderStatus();
     if (cfgChanged) renderSettings();
     if (dataChanged) renderData();
@@ -858,23 +912,27 @@ function connect(): void {
   es.addEventListener('progress', (e) => {
     const p = JSON.parse((e as MessageEvent).data) as { gen: number; done: number; total: number; eval?: string; stage?: string };
     $('progFill').style.transform = `scaleX(${p.total ? p.done / p.total : 0})`;
-    $('progText').textContent = p.eval
-      ? `evaluating ${p.eval} · ${fmt(p.done)} of ${fmt(p.total)} matches`
-      : p.stage === 'confirming'
-        ? `generation ${fmt(p.gen)} · champion test on fresh matches · ${fmt(p.done)} of ${fmt(p.total)}`
-        : p.stage === 'validating'
-        ? `generation ${fmt(p.gen)} · proving the best on the validation matches · ${fmt(p.done)} of ${fmt(p.total)}`
-        : `generation ${fmt(p.gen)} · ${fmt(p.done)} of ${fmt(p.total)} robots have lived`;
+    const what: Record<string, string> = {
+      'collecting lessons': 'the champion plays; every option at its decisions is played out',
+      learning: 'training a candidate on the lessons · measuring skill settings',
+      racing: 'the race: contenders and champion on the same fresh matches',
+      exam: 'the exam',
+      showcase: "the new champion's showcase match",
+    };
+    $('progText').textContent = p.eval ? `evaluating ${p.eval} · ${fmt(p.done)} of ${fmt(p.total)} matches` : `generation ${fmt(p.gen)} · ${what[p.stage ?? ''] ?? p.stage ?? ''} · ${fmt(p.done)} of ${fmt(p.total)}`;
   });
   es.addEventListener('generation', async (e) => {
     const g = JSON.parse((e as MessageEvent).data) as GenSummary;
     if (!run) return;
     hist.push(g);
     run.gen = g.gen + 1;
-    run.totals.spawned = g.spawnedTotal;
-    run.totals.deaths.crash += g.deaths.crash;
-    run.totals.deaths.stall += g.deaths.stall;
-    run.totals.deaths.survived += g.deaths.survived;
+    run.lastGenAt = g.time;
+    run.totals.matches = g.matchesTotal;
+    run.totals.lessons = g.lessonsTotal;
+    run.totals.simSeconds = g.simHoursTotal * 3600;
+    run.totals.wallSeconds = g.hours * 3600;
+    if (g.exam && !run.exams.some((x) => x.gen === g.exam!.gen && x.champ === g.exam!.champ)) run.exams.push(g.exam);
+    if (g.exam) run.champion.exam = g.exam;
     await refreshDisk();
     renderRun();
     renderHistory();
@@ -886,12 +944,11 @@ function connect(): void {
     pace();
   });
   es.addEventListener('best', (e) => {
-    const b = JSON.parse((e as MessageEvent).data) as NonNullable<RunState['bestEver']>;
-    if (run) run.bestEver = b;
+    const b = JSON.parse((e as MessageEvent).data) as RunState['champion'];
+    if (run) run.champion = b;
     renderRun();
     renderViewInfo();
-    if (b.baseline || b.score === null) return log('champion: the no-learning robot, as a network — the bar every new champion must beat on fresh matches');
-    log(`new champion: ${b.score.toFixed(1)} DSIM points${b.conf ? ` (± ${b.conf.ci95.toFixed(1)} over ${b.conf.n} fresh matches)` : b.val ? ` (± ${b.val.ci95.toFixed(1)} over ${b.val.n} validation matches)` : ''} in generation ${b.gen}`);
+    renderRace();
   });
   es.addEventListener('log', (e) => log(JSON.parse((e as MessageEvent).data) as string));
   es.addEventListener('checkpoints', (e) => renderCheckpoints(JSON.parse((e as MessageEvent).data) as CheckpointMeta[]));

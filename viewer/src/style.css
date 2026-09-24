@@ -222,3 +222,22 @@ label.upload:focus-within { outline: 2px solid var(--honey-hi); outline-offset: 
 
 .ck .tag { font: 600 10px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--honey-hi); margin-left: 8px; }
 #runsList { display: flex; flex-direction: column; gap: 8px; max-height: 64vh; overflow: auto; }
+
+/* the reward: points per match over the no-learning robot, on the fixed exam */
+.hero { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 2px 0 8px; }
+.hero .heronum { font: 700 44px/1 var(--f-display); color: var(--honey); letter-spacing: -0.01em; }
+.hero .herounit { font: 600 14px var(--f-text); color: var(--wax); }
+.hero .ci { flex-basis: 100%; font: 12px var(--f-mono); color: var(--smoke); }
+.champbody .hero + * { margin-top: 0; }
+.champbody b { font-size: 18px; }
+/* decision inspector (champion replay) */
+.inspector { border-top: 1px solid #2c241c; padding-top: 8px; }
+.inspector .table { max-height: 220px; }
+.inspector .optsw, .table .optsw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.table tr.sel td { color: var(--wax); background: #2a2118; }
+/* where the time went: one bar per row, collect · shoot · drive · idle */
+.share { display: inline-flex; width: 140px; height: 10px; border-radius: 3px; overflow: hidden; gap: 2px; vertical-align: middle; }
+.share i { display: block; height: 100%; min-width: 0; }
+#genWhen.bad { color: #f08a8a; }
+#gapTable { max-height: none; }
+#gapTable td b { font-weight: 600; color: var(--wax); }

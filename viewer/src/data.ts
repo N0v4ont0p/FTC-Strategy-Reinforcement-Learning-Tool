@@ -1,42 +1,42 @@
 // Shapes the server sends, and small helpers. Types come from the engine itself (type-only import).
-import type { CheckpointMeta, EvalResult, GenSummary, Preset, RunConfig, RunInfo, Val } from '../../train/engine';
-import type { Death, Frames, Parts } from '../../train/episode';
-import type { Lineage } from '../../train/algos';
-export type { CheckpointMeta, EvalResult, GenSummary, Preset, RunConfig, RunInfo, Val, Death, Frames, Parts, Lineage };
+import type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo } from '../../train/engine';
+import type { Death, Frames, Inspected, Mistakes, Parts } from '../../train/episode';
+import type { GapRow } from '../../train/gap';
+export type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo, Death, Frames, Inspected, Mistakes, Parts, GapRow };
 
 export type RunSummary = RunInfo;
 export interface RunData {
   key: string;
   onDisk: boolean;
   latest: string;
-  experience: number;
 }
 export interface Champion {
-  fitness: number | null; // null: not measured yet (the starting baseline, before generation 0)
-  score: number | null;
-  gen: number;
-  parts: Parts;
   id: number;
-  val: Val | null;
-  /** its results on fresh matches it was never selected on (null until it has some) */
-  conf: { fitness: number; score: number; ci95: number; n: number } | null;
-  baseline: boolean; // the no-learning robot as a network: the bar the run started with
+  op: Lineage['op'];
+  born: number;
+  race: { score: number; ci95: number; n: number } | null; // its rewards on fresh race matches
+  exam: ExamResult | null;
+  parts: Parts | null;
+  style: { key: string; label: string; value: number; def: number }[];
 }
 export interface RunState {
   name: string;
   config: RunConfig;
   gen: number;
-  stage: 'auto' | 'full';
-  totals: { spawned: number; matches: number; simSeconds: number; wallSeconds: number; deaths: Record<Death, number> };
+  totals: { matches: number; simSeconds: number; wallSeconds: number; lessons: number; deaths: Record<Death, number> };
   running: boolean;
   paused: boolean;
   phase: 'idle' | 'generation' | 'evaluating' | 'paused';
-  bestEver: Champion | null;
+  lastGenAt: string | null;
+  champion: Champion;
+  arena: { id: number; op: string; since: number; n: number }[];
   history: GenSummary[];
+  exams: ExamResult[];
   events: { time: string; gen: number; text: string }[];
   checkpoints: CheckpointMeta[];
   evals: EvalResult[];
   data: RunData;
+  search: { k: number; horizon: number; rounds: number; margin: number };
 }
 export interface DataInfo {
   dir: string;
@@ -59,14 +59,14 @@ export interface Status {
   paused: boolean;
   phase: RunState['phase'];
   gen: number;
-  stage: 'auto' | 'full';
   config: RunConfig;
   data: RunData;
+  lastGenAt: string | null;
 }
 
 export interface Individual extends Lineage {
   i: number;
-  fitness: number;
+  fitness: number; // the reward
   score: number;
   death: Death;
   deathTick: number;
@@ -75,7 +75,6 @@ export interface Individual extends Lineage {
   decisions: [number, number, number, number, number][];
   point: Record<string, number>;
   parts: Parts;
-  val?: Val;
 }
 export interface GenFile {
   gen: number;
@@ -91,7 +90,8 @@ export interface FocusFile {
   lineage: Lineage;
   frames: Frames;
   events: [number, string][];
-  val?: Val | null;
+  inspect?: Inspected[]; // the champion's showcase: its what-if values at each decision
+  search?: boolean; // it was thinking ahead (the what-if values chose)
 }
 
 /** base64 Float32 → numbers */
@@ -132,20 +132,15 @@ export const OPTIONS = [
   { key: 'park', label: 'park', color: '#9085e9' },
   // not an action: waiting in the right place (neutral ink, not a categorical hue)
   { key: 'position', label: 'get in position', color: '#8a8176' },
+  // the tip cycle (your replays' loop): ≥ 15 OKLab ΔE from every hue above, normal and all three CVD simulations
+  { key: 'cycle', label: 'the tip cycle by the HIVE', color: '#4fcdce' },
 ] as const;
 
-/** how an individual was made, in words */
+/** where a robot came from, in words */
 export const OP_LABEL: Record<string, string> = {
-  init: 'random (generation 0)',
-  seed: 'fitted to your replays',
-  greedy: 'the no-learning robot, as a network',
-  elite: 'elite (kept unchanged)',
-  champion: 'champion (always kept)',
-  mutant: 'mutant',
-  cross: 'crossover',
-  macro: 'behaviour mutation',
-  student: 'student (lesson from replays)',
-  random: 'random newcomer',
-  'es+': 'ES sample',
-  'es-': 'ES sample',
+  baseline: 'the no-learning robot (a network)',
+  replays: 'fitted to your replays',
+  lessons: 'learned from what-if lessons',
+  skills: 'tuned skill settings (CMA-ES)',
+  champion: 'the champion',
 };

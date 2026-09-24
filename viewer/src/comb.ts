@@ -63,7 +63,7 @@ export class Comb {
     for (let c = 0; c < nCells; c++) {
       const slice = this.hist.slice(c * per, (c + 1) * per);
       const score = Math.max(...slice.map((q) => q.bestScore));
-      const best = Math.max(...slice.map((q) => q.best));
+      const best = slice.reduce((a, q) => a + q.meanScore, 0) / slice.length;
       const row = Math.floor(c / cols);
       const col = c % cols;
       const x = dx / 2 + col * dx + (row % 2 ? dx / 2 : 0);
@@ -111,7 +111,7 @@ export class Comb {
     if (!c) return hideTip();
     const range = c.g0 === c.g1 ? `generation ${c.g0}` : `generations ${c.g0}–${c.g1} (best of the group)`;
     const disk = [...this.onDisk].some((q) => q >= c.g0 && q <= c.g1);
-    showTip(e.clientX, e.clientY, `<b>${range}</b><br>best DSIM score ${c.score} · best fitness ${c.best.toFixed(1)}<br><span class="t">${disk ? 'click to replay this swarm' : 'paths pruned from disk (the last 300 and every 100th are kept)'}</span>`);
+    showTip(e.clientX, e.clientY, `<b>${range}</b><br>the champion's lesson matches: best ${c.score} · mean ${c.best.toFixed(1)} DSIM points<br><span class="t">${disk ? 'click to replay this swarm' : 'paths pruned from disk (the last 300 and every 100th are kept)'}</span>`);
   }
 }
 

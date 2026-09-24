@@ -70,7 +70,7 @@ if (!flag('no-open')) spawn('open', [studio.url], { stdio: 'ignore', detached: t
 let last = '';
 const timer = setInterval(() => {
   const e = studio.engine();
-  const s = e ? `${e.name} · gen ${e.gen} · ${e.running ? (e.paused ? 'paused' : e.phase) : 'idle'}${e.bestEver ? ` · champion ${e.bestEver.score} pts` : ''}` : 'no run open';
+  const s = e ? `${e.name} · gen ${e.gen} · ${e.running ? (e.paused ? 'paused' : e.phase) : 'idle'}${e.champion.exam ? ` · champion exam ${e.champion.exam.net.mean.toFixed(0)} pts` : ''}` : 'no run open';
   if (s !== last && process.stdout.isTTY) process.stdout.write(`\r\x1b[2K  ${D}${s}${R}`);
   last = s;
 }, 500);

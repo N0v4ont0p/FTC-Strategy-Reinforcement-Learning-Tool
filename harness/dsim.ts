@@ -102,6 +102,61 @@ export interface MatchRun {
   stopped: boolean; // ended by hooks.stop
 }
 
+/** One match, a tick at a time: exactly runMatch's loop, with its state (world, replay recorder,
+ * settle clock) held as plain data so a running match can be forked (train/fork.ts). The
+ * controller and hooks are passed to every step, never stored. */
+export class Match {
+  readonly w: World;
+  rec: ReplayRecorder | null;
+  private clock = newSettleClock();
+  exact = true;
+  settled = false;
+  stopped = false;
+  private n = 0;
+  constructor(
+    seed: number,
+    private seats: Seat[],
+    opts: { record?: boolean; from?: World; maxTicks?: number } = {},
+    private cap = opts.maxTicks ?? 20000,
+  ) {
+    this.w = opts.from ?? newMatch(seed, seats);
+    this.rec = opts.record === false ? null : new ReplayRecorder(seed, setupsOf(seats), 'match', 'biobuzz');
+  }
+  get done(): boolean {
+    return this.settled || this.stopped || this.n >= this.cap;
+  }
+  /** one tick; returns false once the match is over (settled, stopped or at the cap) */
+  step(controller: Controller, hooks: Hooks = {}): boolean {
+    if (this.done) return false;
+    this.n++;
+    const w = this.w;
+    const tick = w.tick + 1;
+    const intents = controller(w);
+    const chosen = hooks.filter ? hooks.filter(w, intents) : intents;
+    const applied = new Map<number, RobotCommand>();
+    for (const s of this.seats) {
+      const c = chosen.get(s.id);
+      applied.set(s.id, c ? localizeCommand(c) : { ...ZERO_CMD });
+    }
+    biobuzzStep(w, DT, applied);
+    this.rec?.record(tick, applied);
+    if (hooks.perturb?.(w)) this.exact = false;
+    hooks.after?.(w, applied);
+    if (hooks.stop?.(w)) {
+      this.stopped = true;
+      return false;
+    }
+    if (settleStep(this.clock, w, bbSettled)) {
+      this.settled = true;
+      return false;
+    }
+    return !this.done;
+  }
+  result(): MatchRun {
+    return { world: this.w, replay: this.rec ? this.rec.finish() : null, replayExact: this.exact, settled: this.settled, stopped: this.stopped };
+  }
+}
+
 /** Step one match to DSIM's own "final" moment: through `post` until the settle clock decides,
  * exactly as solo practice finalizes (game.ts frameLogic → harvestPracticeRun). */
 export function runMatch(
@@ -111,36 +166,9 @@ export function runMatch(
   hooks: Hooks = {},
   opts: { record?: boolean; from?: World; maxTicks?: number } = {},
 ): MatchRun {
-  const w = opts.from ?? newMatch(seed, seats);
-  const rec = opts.record === false ? null : new ReplayRecorder(seed, setupsOf(seats), 'match', 'biobuzz');
-  const clock = newSettleClock();
-  const cap = opts.maxTicks ?? 20000;
-  let exact = true;
-  let settled = false;
-  let stopped = false;
-  for (let n = 0; n < cap; n++) {
-    const tick = w.tick + 1;
-    const intents = controller(w);
-    const chosen = hooks.filter ? hooks.filter(w, intents) : intents;
-    const applied = new Map<number, RobotCommand>();
-    for (const s of seats) {
-      const c = chosen.get(s.id);
-      applied.set(s.id, c ? localizeCommand(c) : { ...ZERO_CMD });
-    }
-    biobuzzStep(w, DT, applied);
-    rec?.record(tick, applied);
-    if (hooks.perturb?.(w)) exact = false;
-    hooks.after?.(w, applied);
-    if (hooks.stop?.(w)) {
-      stopped = true;
-      break;
-    }
-    if (settleStep(clock, w, bbSettled)) {
-      settled = true;
-      break;
-    }
-  }
-  return { world: w, replay: rec ? rec.finish() : null, replayExact: exact, settled, stopped };
+  const m = new Match(seed, seats, opts);
+  while (m.step(controller, hooks));
+  return m.result();
 }
 
 /** The solo record score DSIM shows: own total minus the fouls the OTHER alliance earned off us. */

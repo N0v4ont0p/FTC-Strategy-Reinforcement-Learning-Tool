@@ -30,7 +30,8 @@ import { BB, bb, coerce, init, type Replay } from '../harness/dsim';
 import { loadProfile, resolve, type Resolved } from '../harness/profiles';
 import { ReplayPlayer } from '../dsim-main/src/sim/replay';
 import { mulberry32, seedOf } from '../harness/rng';
-import { initParams, paramCount, styleOffset, toB64 } from './net';
+import { fromB64, initParams, paramCount, styleOffset, toB64 } from './net';
+import { VALUE_SHAPE, fitValue, type ValueSet } from './value';
 import { N_OBS, encode } from './obs';
 import { SHAPE, STYLE_DEFAULT_GENES, THINK_TICKS } from './policy';
 import { F_CURRENT, N_OPT_FEATS, Pilot, SKILLS_VERSION, options } from './skills';
@@ -366,7 +367,7 @@ export function ensureGreedy(log: (s: string) => void = () => {}): GreedyReport 
   log(`distilling the no-learning robot into a network: ${GREEDY_MATCHES} matches, then a fit (once, ~2 min)…`);
   const per: Sample[][] = [];
   for (let k = 0; k < GREEDY_MATCHES; k++) {
-    const r = runEpisode({ genome: null, profile: 'profiles/real-v0.json', sampleProfile: true, seed: seedOf(9, 'distill', k) % 1_000_000_007, stage: 'full', shaping: 0, driver: 'oracle', track: false, record: false, samples: true });
+    const r = runEpisode({ genome: null, profile: 'profiles/real-v0.json', sampleProfile: true, seed: seedOf(9, 'distill', k) % 1_000_000_007, stage: 'full', driver: 'oracle', track: false, record: false, samples: true });
     per.push(r.samples ? unpack(r.samples, N_OBS, N_OPT_FEATS) : []);
   }
   const train = per.slice(0, GREEDY_MATCHES - GREEDY_HELD).flat();
@@ -386,6 +387,58 @@ export function ensureGreedy(log: (s: string) => void = () => {}): GreedyReport 
   writeFileSync(GREEDY_FILE + '.tmp', JSON.stringify(out, null, 1));
   renameSync(GREEDY_FILE + '.tmp', GREEDY_FILE);
   log(`greedy network: picks what the no-learning robot picks ${(100 * ho.agree).toFixed(1)}% of the time on matches it never saw (${(100 * sw.switchAgree).toFixed(0)}% of its job changes)`);
+  return out;
+}
+
+/**
+ * THE STARTING REST-OF-MATCH PREDICTOR (train/value.ts): the distilled no-learning network plays
+ * VALUE_MATCHES matches recording (observation, points still to come) twice a second; the
+ * predictor is fitted to them (the last few matches held out). Every run starts with it; each
+ * generation refits it on the champion's own matches. Cached in outputs/imitation/value.json.
+ */
+const VALUE_FILE = join(OUT, 'value.json');
+const VALUE_MATCHES = 48;
+export interface ValueReport {
+  key: string;
+  matches: number;
+  samples: number;
+  rmse: number; // points, on held-out matches
+  spread: number; // rmse of always predicting the mean (what the predictor beats)
+  genome: string;
+}
+export const valueKey = (): string => `v2:${greedyKey()}:${paramCount(VALUE_SHAPE)}`;
+export function valueReport(): ValueReport | null {
+  try {
+    const r = JSON.parse(readFileSync(VALUE_FILE, 'utf8')) as ValueReport;
+    return r.key === valueKey() ? r : null;
+  } catch {
+    return null;
+  }
+}
+export function ensureValue(log: (s: string) => void = () => {}): ValueReport {
+  const r0 = valueReport();
+  if (r0) return r0;
+  const g = ensureGreedy(log).genome;
+  log(`fitting the rest-of-match predictor: ${VALUE_MATCHES} matches of the no-learning network (once, ~2 min)…`);
+  const obs: number[][] = [];
+  const ys: number[][] = [];
+  for (let k = 0; k < VALUE_MATCHES; k++) {
+    const r = runEpisode({ genome: g, profile: 'profiles/real-v0.json', sampleProfile: true, seed: seedOf(9, 'value', k) % 1_000_000_007, stage: 'full', driver: 'oracle', track: false, record: false, returns: 30 });
+    obs.push(Array.from(fromB64(r.values!.obs)));
+    ys.push(r.values!.y);
+  }
+  const hold = 8;
+  const set = (a: number, b: number): ValueSet => ({ obs: new Float32Array(obs.slice(a, b).flat()), y: new Float32Array(ys.slice(a, b).flat()) });
+  const train = set(0, VALUE_MATCHES - hold);
+  const test = set(VALUE_MATCHES - hold, VALUE_MATCHES);
+  const f = fitValue(train, test, { epochs: 60, seed: 3 });
+  const mean = train.y.reduce((a, b) => a + b, 0) / train.y.length;
+  const spread = Math.sqrt(test.y.reduce((a, b) => a + (b - mean) ** 2, 0) / test.y.length);
+  const out: ValueReport = { key: valueKey(), matches: VALUE_MATCHES, samples: train.y.length + test.y.length, rmse: f.rmse, spread, genome: toB64(f.p) };
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(VALUE_FILE + '.tmp', JSON.stringify(out, null, 1));
+  renameSync(VALUE_FILE + '.tmp', VALUE_FILE);
+  log(`rest-of-match predictor: off by ${f.rmse.toFixed(1)} points on matches it never saw (guessing the average: ${spread.toFixed(1)})`);
   return out;
 }
 
@@ -419,7 +472,8 @@ export function refreshJob(a: { rebuild?: boolean } = {}): { key: string; report
   const log = (s: string): void => void lines.push(s);
   const key = currentKey();
   if (!key) {
-    ensureGreedy(log); // every new run needs it, replays or not
+    ensureGreedy(log); // every new run needs these, replays or not
+    ensureValue(log);
     return null;
   }
   const set = !a.rebuild && hasSet(key) ? loadSet(key) : buildSet(log);
@@ -428,6 +482,7 @@ export function refreshJob(a: { rebuild?: boolean } = {}): { key: string; report
   mkdirSync(OUT, { recursive: true });
   writeFileSync(join(OUT, 'policy.json'), JSON.stringify(r, null, 1));
   ensureGreedy(log);
+  ensureValue(log);
   const { genome: _g, ...report } = r;
   void _g;
   return { key, report, log: lines };

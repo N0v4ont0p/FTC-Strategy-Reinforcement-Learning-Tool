@@ -11,7 +11,7 @@
 // rim; add a rim-bounce distribution if S5's sensitivity shows landing spot matters.
 import { BB, C, type Alliance, type World } from './dsim';
 import type { Perturb } from './profiles';
-import { mulberry32, seedOf } from './rng';
+import { mulberry32, seedOf, type Stream } from './rng';
 
 export interface ShotLog {
   launched: number;
@@ -20,30 +20,47 @@ export interface ShotLog {
 
 const APEX_CAP_Z = BB.BB_HIVE_OPEN_Z[0] - 2 - 1;
 
-/** `perAlliance` accuracy; an alliance absent or at 1.0 is untouched. */
-export function makePerturb(seed: number, perAlliance: Partial<Record<Alliance, Perturb>>, log?: ShotLog) {
-  const rng = mulberry32(seedOf(seed, 'perturb'));
-  const seen = new Set<number>(); // ball ids currently in a flight already judged
-  return (w: World): boolean => {
+/** `perAlliance` accuracy; an alliance absent or at 1.0 is untouched. A class, so a running match
+ * can be forked (train/fork.ts). */
+export class Perturber {
+  private rng: Stream;
+  private seen = new Set<number>(); // ball ids currently in a flight already judged
+  constructor(
+    seed: number,
+    private perAlliance: Partial<Record<Alliance, Perturb>>,
+    private log?: ShotLog,
+  ) {
+    this.rng = mulberry32(seedOf(seed, 'perturb'));
+  }
+  /** new luck from here on (what-if branches) */
+  reseed(seed: number): void {
+    this.rng.reseed(seedOf(seed, 'perturb'));
+  }
+  apply(w: World): boolean {
     let changed = false;
     for (const b of w.balls) {
       const s = b.state;
       if (s.kind !== 'flight') {
-        seen.delete(b.id);
+        this.seen.delete(b.id);
         continue;
       }
-      if (seen.has(b.id)) continue;
-      seen.add(b.id);
+      if (this.seen.has(b.id)) continue;
+      this.seen.add(b.id);
       const by = (s as { by?: Alliance }).by;
-      const p = by ? perAlliance[by] : undefined;
+      const p = by ? this.perAlliance[by] : undefined;
       if (!p) continue;
-      if (log) log.launched++;
-      if (p.shotAccuracy >= 1 || rng() < p.shotAccuracy) continue;
+      if (this.log) this.log.launched++;
+      if (p.shotAccuracy >= 1 || this.rng() < p.shotAccuracy) continue;
       const vzCap = Math.sqrt(2 * C.GRAVITY * Math.max(0, APEX_CAP_Z - b.z));
-      b.vz = Math.min(b.vz, vzCap) * (0.8 + 0.15 * rng());
-      if (log) log.forcedMiss++;
+      b.vz = Math.min(b.vz, vzCap) * (0.8 + 0.15 * this.rng());
+      if (this.log) this.log.forcedMiss++;
       changed = true;
     }
     return changed;
-  };
+  }
+}
+
+export function makePerturb(seed: number, perAlliance: Partial<Record<Alliance, Perturb>>, log?: ShotLog) {
+  const p = new Perturber(seed, perAlliance, log);
+  return (w: World): boolean => p.apply(w);
 }

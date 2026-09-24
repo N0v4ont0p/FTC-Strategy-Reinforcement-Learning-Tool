@@ -6,10 +6,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { cpSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { createBiobuzzWorldForViewer } from './field';
-import { Engine, NAME_RE, PRESETS, RUNS, ROOT, checkRun, confStats, defaultConfig, deleteRun, listRuns, renameRun, type Best, type RunConfig } from './engine';
-import { DATA_DIR, currentKey, dataFiles, excluded, greedyReport, hasSet, imitationReport, setExcluded } from './imitate';
+import { Engine, NAME_RE, PRESETS, RUNS, ROOT, SEARCH, checkRun, confStats, defaultConfig, deleteRun, listRuns, renameRun, type Champ, type RunConfig } from './engine';
+import { DATA_DIR, currentKey, dataFiles, excluded, greedyReport, hasSet, imitationReport, setExcluded, valueReport } from './imitate';
 import { runPool } from '../harness/pool';
-import { validate, type AlgoName } from './algos';
+import { STYLE, decodeStyle } from './policy';
+import { fromB64, styleOffset } from './net';
+import { SHAPE } from './policy';
 
 const PUBLIC = join(ROOT, 'train', 'public');
 const LAST = join(RUNS, '.last');
@@ -39,8 +41,12 @@ export interface Studio {
   close: () => Promise<void>;
 }
 
-/** the champion as the studio shows it: score and 95 % interval over fresh matches when it has them */
-const champ = (b: Best) => ({ fitness: Number.isFinite(b.fitness) ? b.fitness : null, score: Number.isFinite(b.fitness) ? b.score : null, gen: b.gen, parts: b.parts, id: b.id, val: b.val, conf: b.conf?.n ? confStats(b.conf) : null, baseline: !!b.baseline });
+/** the champion as the studio shows it: its race record on fresh matches, its exam, its skill settings */
+const champ = (c: Champ) => {
+  const o = styleOffset(SHAPE);
+  const st = decodeStyle(fromB64(c.genome).subarray(o, o + STYLE.length));
+  return { id: c.id, op: c.lineage.op, born: c.born, race: c.conf?.n ? confStats(c.conf) : null, exam: c.exam, parts: c.parts, style: STYLE.map((d) => ({ key: d.key, label: d.label, value: st[d.key], def: d.def })) };
+};
 
 export function startServer(port: number, first?: Engine, opts: { onQuit?: () => void } = {}): Studio {
   let engine: Engine | null = first ?? null;
@@ -58,7 +64,8 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       send('generation', g);
       send('runs', listRuns()); // generation, champion and size in the run list
     });
-    e.on('best', (b: Best) => send('best', champ(b)));
+    e.on('best', (b: Champ) => send('best', champ(b)));
+    e.on('exam', (x) => send('exam', x));
     e.on('log', (l) => send('log', l));
     e.on('checkpoints', () => send('checkpoints', e.listCheckpoints()));
     e.on('eval', (r) => send('eval', r));
@@ -70,7 +77,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
 
   function status() {
     const e = engine;
-    return e ? { running: e.running, paused: e.paused, phase: e.phase, gen: e.gen, stage: e.stage, config: e.config, data: e.data } : null;
+    return e ? { running: e.running, paused: e.paused, phase: e.phase, gen: e.gen, config: e.config, data: e.data, lastGenAt: e.lastGenAt } : null;
   }
   /** the training data: every replay, what the current data set made of it, and the fit */
   function data() {
@@ -93,23 +100,25 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     const reference = imit ? { files: imit.files.map((f) => ({ name: f.name, score: f.score })), holdoutAgree: imit.holdout.agree, chance: imit.holdout.chance } : null;
     const common = { runs: listRuns(), reference, defaults: defaultConfig('new-run'), presets: PRESETS, data: data() };
     if (!e) return { run: null, ...common };
-    const b = e.bestEver;
     return {
       run: {
         name: e.name,
         config: e.config,
         gen: e.gen,
-        stage: e.stage,
         totals: e.totals,
         running: e.running,
         paused: e.paused,
         phase: e.phase,
-        bestEver: b ? champ(b) : null,
+        lastGenAt: e.lastGenAt,
+        champion: champ(e.champion),
+        arena: e.arena.map((a) => ({ id: a.id, op: a.lineage.op, since: a.since, n: a.pairs.length })),
         history: e.history(),
+        exams: e.exams(),
         events: e.events().slice(-200),
         checkpoints: e.listCheckpoints(),
         evals: e.evals().slice(-50),
         data: e.data,
+        search: SEARCH,
       },
       ...common,
     };
@@ -206,27 +215,23 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     if (p === '/api/runs' && post) {
       const b = await body(req);
       if (engine?.running) throw new HttpError(409, `"${engine.name}" is training — stop it before creating another run`);
-      const algo = (b.algo === 'es' ? 'es' : 'ga') as AlgoName;
-      let cfg: RunConfig = { ...defaultConfig(String(b.name ?? ''), algo) };
+      let cfg: RunConfig = { ...defaultConfig(String(b.name ?? '')) };
       if (typeof b.preset === 'string' && b.preset) {
         const pr = PRESETS.find((q) => q.id === b.preset);
         if (!pr) throw new HttpError(400, 'unknown preset');
         cfg = { ...cfg, ...pr.change, preset: pr.id };
       }
-      for (const k of ['pop', 'seed', 'workers', 'episodes'] as const) if (b[k] !== undefined && b[k] !== '' && b[k] !== null) cfg[k] = Number(b[k]);
-      if (b.pop !== undefined && cfg.algo === 'ga') cfg.elite = Math.min(cfg.elite, Math.max(0, cfg.pop - 2));
-      if (b.init === 'random' || b.init === 'imitation') cfg.init = b.init;
+      for (const k of ['seed', 'workers', 'collect'] as const) if (b[k] !== undefined && b[k] !== '' && b[k] !== null) cfg[k] = Number(b[k]);
       if (b.driver === 'human' || b.driver === 'oracle') cfg.driver = b.driver;
-      if (b.stage === 'auto' || b.stage === 'full' || b.stage === 'curriculum') cfg.stage = b.stage;
       if (typeof b.profile === 'string') {
         if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(b.profile) || !existsSync(join(ROOT, b.profile))) throw new HttpError(400, 'unknown profile');
         cfg.profile = b.profile;
       }
       if (typeof b.sampleProfile === 'boolean') cfg.sampleProfile = b.sampleProfile;
-      const err = (NAME_RE.test(cfg.name) ? null : 'run names use letters, digits, - and _ (up to 48)') ?? validate(cfg) ?? checkRun(cfg);
+      const err = (NAME_RE.test(cfg.name) ? null : 'run names use letters, digits, - and _ (up to 48)') ?? checkRun(cfg);
       if (err) throw new HttpError(400, err);
       // the replays are fitted in a worker first, so the studio stays responsive
-      if ((currentKey() && (!hasSet(currentKey()) || imitationReport()?.dataKey !== currentKey())) || !greedyReport()) await refresh(false);
+      if ((currentKey() && (!hasSet(currentKey()) || imitationReport()?.dataKey !== currentKey())) || !greedyReport() || !valueReport()) await refresh(false);
       say(`creating run "${cfg.name}"…`);
       let e: Engine;
       try {
@@ -464,18 +469,19 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     }
 
     // exports
+    if (p === '/api/exams') return json(res, 200, need().exams());
     if (p === '/api/export/metrics.csv') {
       const h = need().history();
-      const cols = ['gen', 'stage', 'best', 'mean', 'median', 'p90', 'bestScore', 'meanScore', 'champScore', 'champCi', 'meanTips', 'meanLifeS', 'wallS', 'robotsPerMin', 'bestEver', 'bestEverScore', 'imitShare', 'meanMuts', 'bestOp'] as const;
-      const rows = h.map((q) => cols.map((c) => String((q as unknown as Record<string, unknown>)[c] ?? '')).join(','));
+      const rows: (string | number)[][] = [['gen', 'hours', 'meanScore', 'meanReward', 'meanTips', 'lessons', 'regret', 'fitRegret', 'fitStartRegret', 'valueRmse', 'champId', 'champOp', 'champScore', 'champCi', 'newChamp', 'exam', 'examVsBase', 'examSearch', 'wallS', 'matchesPerMin']];
+      for (const q of h) rows.push([q.gen, q.hours.toFixed(3), q.meanScore.toFixed(1), q.meanReward.toFixed(1), q.meanTips.toFixed(2), q.lessons, q.regret.toFixed(2), q.fit?.regret.toFixed(2) ?? '', q.fit?.startRegret.toFixed(2) ?? '', q.value?.rmse.toFixed(1) ?? '', q.champId, q.champOp, q.champScore.toFixed(1), q.champCi.toFixed(1), q.newChamp ? 1 : 0, q.exam?.net.mean.toFixed(1) ?? '', q.exam?.vsBase.mean.toFixed(1) ?? '', q.exam?.search?.mean.toFixed(1) ?? '', q.wallS.toFixed(0), q.matchesPerMin.toFixed(1)]);
       res.writeHead(200, { 'content-type': 'text/csv', 'content-disposition': `attachment; filename="${need().name}-metrics.csv"` });
-      return void res.end([cols.join(','), ...rows].join('\n'));
+      return void res.end(rows.map((r) => r.join(',')).join('\n'));
     }
     if (p === '/api/export/champion.json') {
       const e = need();
-      if (!e.bestEver) throw new HttpError(404, 'no champion yet');
+      const c = e.champion;
       res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${e.name}-champion.json"` });
-      return void res.end(JSON.stringify({ run: e.name, gen: e.bestEver.gen, fitness: e.bestEver.fitness, score: e.bestEver.score, validation: e.bestEver.val, net: 'train/policy.ts SHAPE', genome: e.bestEver.genome, config: e.config }, null, 1));
+      return void res.end(JSON.stringify({ run: e.name, champion: c.id, made: c.lineage.op, born: c.born, exam: c.exam, net: 'train/policy.ts SHAPE (+ STYLE skill genes)', genome: c.genome, config: e.config }, null, 1));
     }
 
     // static viewer (path traversal refused)
@@ -495,7 +501,12 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
   // the last run you had open comes back
   if (!engine && existsSync(LAST)) {
     try {
-      open(readFileSync(LAST, 'utf8').trim());
+      const e = open(readFileSync(LAST, 'utf8').trim());
+      // it was training when the studio closed (quit, crash, the Mac restarting): carry on
+      if (e.wasTraining) {
+        e.start();
+        e.event('training resumed by itself — it was running when the studio closed');
+      }
     } catch {
       /* it was deleted or is an old version: start with none open */
     }
@@ -505,7 +516,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     engine: () => engine,
     open,
     close: async () => {
-      await engine?.halt(true);
+      await engine?.halt(true, true); // closing the studio is not stopping training: it resumes next start
       await refreshing;
       for (const s of streams) s.end();
       server.close();

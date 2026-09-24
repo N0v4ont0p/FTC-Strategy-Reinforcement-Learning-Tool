@@ -3,7 +3,7 @@
 // exactly in unmodified DSIM. Reads world state; never writes it.
 import { BB, DT, footprintCorners, footprintExtents, type Alliance, type RobotCommand, type RobotState, type Vec2, type World } from './dsim';
 import type { Limits } from './profiles';
-import { mulberry32, seedOf } from './rng';
+import { mulberry32, seedOf, type Stream } from './rng';
 import { polysOverlap } from './geom';
 
 /** Driver limits. ORACLE = none. HUMAN = the S0 default human tier (PLAN.md §3). */
@@ -66,7 +66,7 @@ class RobotFilter {
   private hpPrevIntent = false;
   private hpPrevOut = false;
   private hpDue: number[] = [];
-  private rng: () => number;
+  private rng: Stream;
 
   constructor(
     private L: Limits,
@@ -78,6 +78,10 @@ class RobotFilter {
     const home = (L.turretHome * Math.PI) / 180;
     this.turret = [home, home];
     this.rng = mulberry32(seedOf(seed, id, 'filter'));
+  }
+  /** new luck from here on (what-if branches; train/fork.ts) */
+  reseed(seed: number, id: number): void {
+    this.rng.reseed(seedOf(seed, id, 'filter'));
   }
 
   apply(w: World, r: RobotState, intent: RobotCommand): RobotCommand {
@@ -172,28 +176,44 @@ const ZERO_INTENT: Partial<RobotCommand> = {
 };
 
 /** One filter for a match. `limits` per robot id; robots without limits pass through (the
- * driver model still applies to them). */
+ * driver model still applies to them). A class, so a running match can be forked (train/fork.ts). */
+export class MatchFilter {
+  private per = new Map<number, RobotFilter>();
+  constructor(
+    private seed: number,
+    private limits: Map<number, Limits>,
+    private driver: DriverModel = ORACLE,
+    private rules: RuleOpts = RULES_CONSERVATIVE,
+  ) {}
+  apply(w: World, intents: Map<number, RobotCommand>): Map<number, RobotCommand> {
+    const out = new Map<number, RobotCommand>();
+    for (const r of w.robots) {
+      const c = intents.get(r.id);
+      if (!c) continue;
+      const L = this.limits.get(r.id);
+      if (!L) {
+        out.set(r.id, c);
+        continue;
+      }
+      let f = this.per.get(r.id);
+      if (!f) this.per.set(r.id, (f = new RobotFilter(L, this.driver, this.rules, this.seed, r.id)));
+      out.set(r.id, f.apply(w, r, c));
+    }
+    return out;
+  }
+  /** every robot's intake-failure luck restarts from `seed` (a filter not created yet starts from it too) */
+  reseed(seed: number): void {
+    this.seed = seed;
+    for (const [id, f] of this.per) f.reseed(seed, id);
+  }
+}
+
 export function makeFilter(
   seed: number,
   limits: Map<number, Limits>,
   driver: DriverModel = ORACLE,
   rules: RuleOpts = RULES_CONSERVATIVE,
 ): (w: World, intents: Map<number, RobotCommand>) => Map<number, RobotCommand> {
-  const per = new Map<number, RobotFilter>();
-  return (w, intents) => {
-    const out = new Map<number, RobotCommand>();
-    for (const r of w.robots) {
-      const c = intents.get(r.id);
-      if (!c) continue;
-      const L = limits.get(r.id);
-      if (!L) {
-        out.set(r.id, c);
-        continue;
-      }
-      let f = per.get(r.id);
-      if (!f) per.set(r.id, (f = new RobotFilter(L, driver, rules, seed, r.id)));
-      out.set(r.id, f.apply(w, r, c));
-    }
-    return out;
-  };
+  const f = new MatchFilter(seed, limits, driver, rules);
+  return (w, intents) => f.apply(w, intents);
 }

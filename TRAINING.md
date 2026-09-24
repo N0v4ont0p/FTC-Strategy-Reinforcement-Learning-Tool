@@ -1,10 +1,23 @@
-# BIOBUZZ Evolution Studio — how to train
+# BIOBUZZ Learning Studio — how to train
 
 Robots learn BIOBUZZ inside the real, unmodified DSIM simulator. Each robot already knows HOW to play:
-drive a planned path, sweep up a whole group of elements with its intake, pull POLLEN from a FLOWER,
-shoot, press the human-player button, park. What evolution learns is **WHAT TO DO NEXT**: which group,
-FLOWER or loading zone, shoot now or collect more, when to use the human player, when to park. That
-order is the strategy. The genome also carries three skill settings (see *Skills*).
+drive a planned path, sweep up a group of elements, pull POLLEN from a FLOWER, shoot, press the
+human-player button, park, and run the **tip cycle** by the HIVE (your replays' loop). What it
+learns is **what to do next**, and **how** its skills are tuned. It learns from every decision it
+makes, with one clear reward.
+
+## The reward
+
+**One number, the same everywhere: DSIM's score for the match, minus the foul points of the rules DSIM
+does not enforce.** Those rules are checked by our guards and counted as if deliberate:
+- G417 (HIVE frame), G407 (controlling 5+ elements), G409 (catching a spill), G426 (human player in
+  AUTO): 15 points each (a MAJOR FOUL);
+- G427 C (human player while the drop area is covered): 5 (a MINOR FOUL);
+- striking an element faster than any robot moves (a physics oddity): 5.
+
+There are no hints and no shaping. The headline number in the studio is the champion's **points per
+match over the no-learning robot on the same exam matches** (± its 95 % range). 0 means as good as the
+no-learning robot; +30 means 30 points a match better.
 
 ## Start and stop everything
 
@@ -12,206 +25,183 @@ order is the strategy. The genome also carries three skill settings (see *Skills
 ./start.sh
 ```
 
-(or `npm start`). This starts, and keeps running until you quit:
+(or `npm start`). This starts the studio at http://localhost:4747 and DSIM at http://localhost:5173.
+**Nothing trains until you press Start training.**
 
-- **The studio** at http://localhost:4747 (opens in your browser): runs, training, checkpoints,
-  settings, training data, evaluation and the live field.
-- **DSIM itself** at http://localhost:5173 (alpha channel, local), for watching a champion in the real app.
+- **Quit studio** (top right) stops training (the generation in progress is discarded), DSIM and the
+  studio, and closes their tabs. **A run that was training carries on by itself the next time you
+  start the studio.** Press **Stop** first if you do not want that.
+- While training, the Mac is kept from sleeping (`caffeinate`); it may sleep again once training stops.
+- The Overview shows when the last generation finished. It turns red when that is much longer ago than
+  usual, so a stopped run is obvious.
 
-**Nothing trains until you press Start training.** To stop everything, press **Quit studio** (top
-right): training stops (a generation in progress is discarded; the run keeps its last saved
-generation), DSIM and the studio shut down, and the studio's and DSIM's browser tabs close. The first
-time, macOS asks whether the terminal may control Safari or Chrome; if you decline, the page says
-"Studio closed" and you close the tab yourself. Closing the terminal or Ctrl-C also stops everything.
+Options: `./start.sh --no-dsim` · `--port 4747` · `--dsim-port 5173` · `--no-open`.
 
-Options: `./start.sh --no-dsim` (studio only) · `--port 4747` · `--dsim-port 5173` · `--no-open`.
+## How the robot learns — every generation
+
+1. **Lessons.** The champion plays 20 matches (Balanced). At every job start, and at a share of its
+   quarter-second re-thinks, the match is **copied** (every piece of state, bit-exact) and **every
+   option is played out on the copies**. On each copy the forced option runs **to completion** (then
+   the champion plays on), so an option is measured as it would really be done. Round 1 plays them
+   all 15 s ahead under one fresh luck draw (the same draw for every option, never the real match's
+   future). Round 2 plays the better half again under a second draw. Then the rest-of-match
+   predictor values what is left. The points each option made are the lesson. The real match is
+   never touched: it goes on as the champion plays it.
+2. **Learning.** A candidate network is trained, starting from the champion's weights, to prefer
+   options by those points. It uses the last 4 generations' lessons (your replays' decisions only with
+   the "Lean on my replays" preset). It enters the race only if, on lessons from matches it never trained on, its
+   picks lose fewer points than the champion's. The rest-of-match predictor is refitted on the
+   champion's own matches.
+3. **Skill settings (CMA-ES).** 12 variations of the champion's 18 skill settings each play 6 matches
+   against the champion with identical luck. CMA-ES (Hansen's evolution strategy, the standard for
+   tuning a few dozen numbers from noisy comparisons) moves toward what wins. Its new centre enters
+   the race.
+4. **The race.** The champion and up to 3 contenders play the same brand-new matches (12 per
+   generation) with the same luck. A contender's lead adds up across generations. It becomes champion
+   only when both hold:
+   - its lead passes z ≥ 2.3 (a Pocock group-sequential boundary: safe although it is checked every
+     generation);
+   - it is not worse in its bad matches (its worst fifth).
+
+   Clearly worse contenders, and ones that could not prove themselves in 96 matches, are dropped.
+5. **The exam.** Every new champion (and at least every 10 generations) plays the same 64 matches.
+   They are the same for every run, so runs are comparable. It plays alone, and thinking ahead on half
+   of them, next to the no-learning robot on the same matches. That is the **learning curve**. The
+   exam also:
+   - plays match 1 again: the result must be identical;
+   - plays the champion on your replays' own robot and on each replay's own match seed, and has DSIM
+     itself re-simulate that replay: same score, same world hash, same tick count;
+   - builds the **gap report**.
+
+Why this is sound:
+- **Rollout / policy improvement.** Acting on the champion's own exact what-if values is never worse
+  than the champion. The network only approximates that, which is why every candidate must also win
+  the race.
+- **Common random numbers.** Options, candidates and exams share luck, so the comparison measures the
+  robot, not the dice.
+- **Sequential testing.** The race is built to be checked every generation without crowning luck.
+
+### What was measured while building it
+- **Copying a match is exact.** A copy played on finishes bit-identical; a copy played differently
+  leaves the real match untouched; taking lessons never changes the real match. A copy costs 0.08 ms.
+- **Thinking ahead at job starts** made the no-learning robot better: +40 ± 19 points over 18 paired
+  matches (best 3 options, 10 s ahead). Doing it at every quarter-second re-think made it worse
+  (−26): noisy estimates flipped jobs back and forth. So it only thinks ahead when a job starts.
+- **One generation of lessons** (40 matches) produced a network that beat the no-learning network by
+  **+20.3 ± 12.9** points over 40 fresh paired matches (won 26). A first attempt, which learned only
+  which option was best, gained nothing (−3 ± 15). Learning each option's points fixed that.
+- **In lessons, options are played out to completion.** In the first Full push trial the candidate
+  raced at −31.5 ± 16.4. A what-if of an option the champion dislikes (the new tip cycle) had
+  measured "start it, drop it at the next re-think", so the network learned to pick and keep an
+  option it had never seen played out. Now, in a lesson, a forced option runs to its end (the options
+  framework). Then "carry on with a job" means the same at a re-think as "start it" at a job start.
+  Re-measured with the tip cycle on the list: one generation of lessons (40 matches, 3,209 lessons)
+  → held-out points lost per decision 9.15 → 7.41 → the candidate beat its starting network by
+  **+19.4 ± 14.3** over 40 fresh paired matches (won 29), with slightly fewer fouls.
+- **Thinking ahead is a one-step deviation.** It does not commit: the robot keeps re-thinking
+  afterwards, as the what-if assumed. Committing measured only +12.7 ± 14.0; the one-step form
+  +39.7 ± 19.4, and **+35.0 ± 12.3** on the exam of the first Full push trial.
+- At a decision, the no-learning robot's choice loses about **6.8 points** to the best what-if
+  option. The "points lost to choices" chart tracks that number for the champion. Picking the best
+  of noisy play-outs overstates it a little, so watch the trend.
+
+## The tip cycle (from your replays)
+
+Measured on your 7 replays: a tip every 4.3 s, about 9 shots per tip, the robot about 44 in from its
+HIVE the whole time. The tipped cell's spill lands beside the HIVE; you sweep it up there and shoot it
+into the other cell, which tips and spills in turn. The **tip cycle** job does that loop:
+- it takes the nearest element in the 54 in zone around its own HIVE and fires whenever a shot can
+  score;
+- when full, it shoots from the zone;
+- it waits beside a coming spill;
+- it leaves when the zone runs dry, or when nothing has been taken or shot for a while (then it is
+  left alone for a few seconds).
+
+The no-learning robot never picks it (so the bar stays the same). In what-if play at its decisions,
+the tip cycle was the best option 30 % of the time it was available; chance would be about 11 %. The
+network learns when.
 
 ## The field: Live or a replay
 
-- **Live** follows training. It shows every robot of the newest generation, replayed as fast as
-  training runs (the speed is shown, e.g. "10× · keeping pace with training"), and moves to the next
-  generation when the replay ends. There is nothing to set. When nothing is training it plays at 1×.
-- **Generation best** replays one robot **exactly as it was trained** (frames recorded inside the
-  training match): every element, both HIVEs, FLOWER stacks, score, tips, hopper and its current
-  decision. Normal speed **1×** or **2×**, pause, restart and a time slider. It stays on that
-  generation while training goes on; "newest" in the header loads the latest. Click a honeycomb cell
-  to replay that generation's best.
-- **Champion** replays the champion the same way.
+- **Live** follows training: the champion's lesson matches of the newest generation, replayed as fast
+  as training runs.
+- **Generation best** replays that generation's best lesson match, exactly as played. It plays at 1×
+  or 2×, with pause, restart and a slider.
+- **Champion** replays the champion's showcase (exam match 1, thinking ahead). Under it, the
+  **decision inspector** shows, at every moment:
+  - every option it had;
+  - what its network scored;
+  - what each option made when played out (what-if points);
+  - which one it took, and whether thinking ahead overruled the network.
 
 ## The side panel
 
 | tab | what you can do |
 |---|---|
-| Overview | counters, the champion (score ± 95 % interval over fresh matches it was never picked on; watch it, copy its DSIM snippet, download its network, export metrics), DSIM score by generation (best, mean, champion; your best replay and the greedy baseline as reference lines), fitness, how robots ended |
-| Runs | every run on this Mac with generation, champion, size and last training time: **Open, Rename, Duplicate, Delete** (type the name to confirm). Old-version runs can only be deleted |
-| Checkpoints | save a named checkpoint; **Rewind here, Fork, Rename, Pin, Delete**; delete all automatic (or all unpinned) at once |
-| Settings | **How to train**: pick a preset and apply it (the changes are listed first). **Every setting**: all of them by hand |
-| Training data | your replays, which are included, their score and lessons; **Refresh**, **Add replays…**; what the students achieve |
-| Evaluate | score any policy on held-out matches with a 95 % interval: champion, current, greedy baseline, imitation of your replays, any checkpoint |
-| Lineage | **What works**: how often each kind of child reaches the top quarter; how a generation was made, robot by robot |
+| Overview | the champion's points over the no-learning robot (exam), exam alone / thinking ahead, its race record, watch / DSIM snippet / download; **learning curve** (exam by hours); **points lost to choices**; **seconds lost per match** (idle, empty trips, blocked shots); score by generation |
+| Race | the contenders (matches, lead ± 95 %, z), what was learned this generation (lessons, held-out regret before → after, predictor error, CMA-ES), the champion's skill settings |
+| Report | the **gap report** (you · the champion on your build and matches · the champion on REAL-v0: points, tips, s/tip, pickups/min, shots/min, accuracy, shots per load, where the time went), the checks (deterministic, DSIM-verified), mistakes on the exam |
+| Runs | open, rename, duplicate, delete (type the name to confirm) |
+| Checkpoints | save; rewind (exact), fork, rename, pin, delete; delete all automatic / all unpinned |
+| Settings | presets, every setting |
+| Training data | your replays: include/exclude, refresh, add |
+| Evaluate | any policy on held-out matches: champion alone or thinking ahead, greedy, the no-learning network, imitation of your replays, any checkpoint |
 | Log | every event |
 
-## Presets (Settings → How to train)
+## Presets
 
 | preset | for |
 |---|---|
-| Balanced (default) | 128 robots, best 3 validated on 8 matches, champion race on 12 fresh matches per generation, 15 % behaviour mutations, adaptive students, all cores but one |
-| Full push | maximum results and load: 256 robots × 2 matches, best 4 validated on 16 matches, champion race on 24 fresh matches, every core (~4× slower per generation) |
-| Explore new strategies | when progress stalls: bigger mutations, 30 % behaviour mutations, 10 % random newcomers |
-| Refine the champion | small mutations, 3 matches per robot, best 5 proven on 16 matches |
-| Learn from my replays | a third of each generation are students (up to half), longer lessons |
-| Quick look | 32 robots, fast and noisy, for watching and testing |
-| Background | half the cores, 64 robots |
+| Balanced (default) | 20 lesson matches per generation, 12 skill settings tried, 12 race matches, all cores but one |
+| Full push | 40 lesson matches, 6 generations of lessons remembered, 16 skill settings × 8 matches, 24 race matches, every core |
+| Lean on my replays | your replays weigh as much as a lesson at first, fading over 30 generations |
+| Quick look | 6 lesson matches, 8 s play-outs, 16-match exam without thinking ahead: for watching, not results |
+| Background | half the cores, 10 lesson matches |
 
-A preset only sets how hard and how the run trains. What the robots play (episode type, driver, robot,
-hints, penalties) is never touched. A hand edit afterwards shows the settings as "custom".
+## Honest limits
 
-## How a robot thinks
-
-- **Four times a second, while it acts,** the robot lists everything it could do right now, with the
-  job it is already doing flagged as *current*, and scores them all. It switches when something else
-  scores clearly higher (by more than its *stick* gene, so it doesn't flip-flop). A spill landing, a
-  tip starting, a closer group: it reacts within a quarter second instead of finishing the old plan.
-- **The human-player button is pressed alongside** the current job, not as a job of its own.
-- **Never idle:** when nothing else is worth doing it gets in position (beside a coming spill, or at a
-  scoring spot for the cell that will take shots next). It may wait there at most 3 s, then position
-  is off the list for a while and it must go and do something.
-- **No wasted tick between jobs:** when a job ends, the next one starts on the same tick.
-- **Rules:** the intake holds off for 0.45 s near an element that just spilled from a HIVE (G409:
-  in the real game it is still falling).
-
-Measured on 36 identical matches (no learning, greedy order), against the previous version, which
-decided once per job and finished it: 214 vs 203 — better in 20, worse in 16, a small gain inside the
-noise (± 13). The bigger point is that it never gets stuck on a stale plan.
-
-## How the training works
-
-Every generation (genetic algorithm):
-
-1. **Every robot plays** its matches on the generation's common seeds: the same field and the same
-   robot draw for everybody, so differences are the policy's, not luck's.
-2. **The best few are validated** on the run's fixed validation matches (never used for training).
-3. **The champion race.** Picking the best of many robots on the same matches inflates its score (the
-   winner's curse: one early champion looked like 220 and scored 192 on unseen matches). So:
-   - the run **starts with the no-learning robot, as a network, as its champion** — the bar;
-   - the best validated robot enters an **arena** of up to 3 contenders. Every generation the
-     champion and every contender play the same **brand-new matches** (12 by default);
-   - each contender's advantage over the champion **adds up across generations**. It becomes champion
-     only when that advantage crosses a group-sequential boundary (z ≥ 2.3, Pocock), which stays
-     honest although it is checked every generation. It is dropped when it is clearly worse or has
-     used 96 matches without proving itself;
-   - the champion's shown score is its **average over fresh matches it was never picked on**, so it
-     gets more exact the longer it holds.
-   The champion can therefore never be worse than the no-learning robot (up to that 5 % test risk).
-4. **The champion's own decisions** — carrying on included — are kept as *experience*.
-5. **The next generation is bred** from the top quarter:
-   - **elites** kept unchanged, and the champion always kept;
-   - **mutants** (small nudges) and **crossovers** (genes mixed from two parents);
-   - **behaviour mutations: 15 %** of every generation. A large change to one part of the network (a
-     hidden unit, one option's preference, a burst of big nudges), repeated until it provably changes
-     what the robot chooses on at least 10 % of test decisions; if it still does not, a skill setting
-     is changed instead. Every behaviour mutation changes behaviour (checked: 64 of 64);
-   - **students**: a parent that takes a short lesson (behaviour cloning) on your replays and on the
-     champion's own decisions;
-   - **random newcomers** (3 %).
-6. **What works is measured**: for each kind of child, how often it reaches the top quarter. The
-   students' share follows it: it grows while students beat plain mutants and shrinks while they do
-   not (adaptive pursuit). Later generations "know" whether learning from the replays pays off.
-
-**Generation 0** is the network fitted to your replays, **the no-learning robot as a network**
-(distilled from 24 of its matches; same choice 97.8 % of the time on matches it never saw), their
-mutants and behaviour mutations, and 25 % random robots, so the AUTO order is not fixed to what the
-replays did (e.g. FLOWERs first).
-
-Techniques used (all standard, with references in the code): deep neuroevolution GA with elitism and
-tournament selection; common random numbers; validation; racing with a group-sequential test
-(irace / F-race, Pocock); hall of fame; policy distillation; imitation as a genetic operator; self-
-imitation; behaviour-changing mutations checked on probe decisions; adaptive operator selection.
-
-**Honest note on learning.** Match-to-match luck is large: two robots on the same match differ by
-about ±40 points just from how elements scatter. To prove a 5 % (10-point) improvement takes around
-100 paired matches. So progress is slow per generation, and the champion line will often stay flat
-for a while — that is the test refusing to be fooled, not the training failing. In a 6-generation,
-48-robot test run, no contender proved better than the baseline yet (the best one's early +17 shrank
-to +1 ± 12 after 48 matches), and the champion held the baseline's level (205 vs 211 on 16 unseen
-matches, a tie). Real gains need long runs: use **Full push** and leave it running.
-
-## Training data (your replays)
-
-- Put DSIM replays (Records → the run → ↓ Data) in `Training data/`, or use **Add replays…**.
-- Each replay is re-simulated in DSIM **twice**: first to find what you did and when, then to take a
-  lesson **every quarter-second — the same moments the robot thinks**: "from here, this is what I
-  went for next", with what you were already doing flagged as current. A shot counts as "went to
-  shoot" only when no pickup follows within a second (your runs shoot while sweeping, which the robot
-  does on its own).
-- Why every quarter-second: the first version only took a lesson at the moments you *changed* job,
-  so the current job was always the one being abandoned. A network fitted to that never kept doing
-  anything: it switched 147 times in 158 decisions and scored 47. Now 89 % of lessons are "carry on",
-  as in your play, and the fitted network plays like the no-learning robot or better (253 vs 249).
-- Today: 7 replays → 3,069 lessons. On a replay it never saw, the fitted network picks what you did
-  92 % of the time overall, and 40 % of the time at the moments you changed job (chance: 21 %).
-- **Refresh** re-simulates the ticked replays and refits. The open run switches to the new set from
-  its next generation. A run records which data set it learns from, so rewinding re-learns exactly.
-- Your runs used a front+back intake build, so the order of choices transfers, not the numbers.
-  Fitness is always our own robot's DSIM score.
-
-## Skills
-
-- **Group sweep**: elements closer than 16 in (chained) are one group; the robot commits to the group
-  and takes them nearest-next with the intake leading, slowing to its capture speed, until the hopper
-  is full or the group is gone. A slow element is skipped, not the whole group.
-- **Crossing at a tip**: the moment a CELL starts to tip, shots go to the other CELL (it takes them
-  from the release, 2 s into the swing), so the robot crosses immediately instead of waiting.
-- **Shooting from where it stands** when that is a measured scoring position, otherwise from the
-  nearest turn-safe spot. Fire is held whenever a shot can land, including while collecting.
-- **Paths** avoid the HIVE frame and FLOWER feet; a look-ahead stops frame crashes.
-- **Skill genes** evolve with the network: slow down to fire while collecting once holding N
-  elements; only on robots allowed to fire at ≥ V in/s; how much better another option must score
-  before it switches (stick).
-- **Start pose**: back against the blue wall just right of FLOWER F3, facing the field.
-
-Measured on 12 identical matches with the sampled real robot (no learning, greedy order): 213 points
-on average vs 152 for the first skills version, 9.8 vs 7.0 tips per match, 0 crashes, 0 stalls.
+- **Luck is large:** two robots on the same match differ by about ±40 points. The race needs many
+  matches to prove a small gain, so the champion changes only now and then. A flat champion line
+  means nothing has been proven better yet, not that nothing was learned.
+- **The build.** On your replays' own robot (front+back intake, ideal limits), the champion (the
+  no-learning network at the start) scores about 400–470 on your own matches, against your 801. On
+  REAL-v0 it scores about 205. The gap report splits this: roughly 250 points are the robot build,
+  roughly 350 are brain and skills. That second part is what training works on.
+- **Cost, measured:** a lesson match costs about 8 CPU-minutes (every option played out at every
+  decision). A Full push generation on this Mac took 36.5 min: lessons 25.2, learning 1.2, race 0.8,
+  exam 9.3 (the exam runs only for a new champion, and at least every 10 generations). Balanced
+  (20 lesson matches) is about half that. Expect 2–3 generations an hour with Full push.
+- **The DSIM snippet** replays the champion's commands. On REAL-v0, simulated misses change the world
+  after DSIM steps, so only runs without misses (the build check) re-simulate exactly. The studio's
+  Champion view is always the exact match.
+- Runs from earlier versions cannot continue; their files are untouched until you delete them.
 
 ## Terminal-only training
 
 ```bash
-npm run train -- --name solo --pop 128          # create or resume a run and train now, with a live dashboard
+npm run train -- --name solo --preset full-push     # create or resume a run and train now
 ```
 
-The same engine. Keys: `p` pause, `o` open the studio, `q` stop.
+Keys: `p` pause, `o` open the studio, `q` stop.
 
 ## Where things are
 
 | path | what |
 |---|---|
 | `runs/<name>/checkpoint.json` | the run now (saved atomically every generation) |
-| `runs/<name>/checkpoints/` | named, automatic and pinned checkpoints (state + history) |
-| `runs/<name>/metrics.jsonl` · `events.jsonl` · `evals.jsonl` | per-generation statistics, the log, evaluations |
-| `runs/<name>/gens/<n>.json` · `<n>.frames.json.gz` | every robot's path and choices; the best robot's exact frames |
-| `runs/<name>/best.*` | the champion: exact frames, DSIM replay, DSIM paste snippet |
+| `runs/<name>/lessons/<n>.json.gz` | generation n's lessons and predictor data (~70 KB per lesson match; the last 20 generations are kept, so a rewind is exact within them) |
+| `runs/<name>/metrics.jsonl` · `exams.jsonl` · `events.jsonl` · `evals.jsonl` | per generation, every exam, the log, evaluations |
+| `runs/<name>/gens/<n>.json` · `<n>.frames.json.gz` | the lesson matches' paths; the best one's exact frames (~2.4 MB a generation; the last 60 and every 100th are kept) |
+| `runs/<name>/best.*` | the champion's showcase: exact frames with its what-if values, DSIM replay, paste snippet |
 | `Training data/` | your DSIM replays |
-| `outputs/imitation/` | the data sets (`sets/`, never deleted), the fitted network, excluded replays |
-| `profiles/real-v0.json` | the team robot's ranges: edit when the robot changes, then start a new run |
-
-## Honest limits
-
-- **Speed**: a full match costs ~1.6 s of CPU, almost all DSIM's own physics. Validation adds about
-  20 % per generation.
-- **The robot is not your replay build.** REAL-v0 fires at 2–13 shots/s with up to 1 s of aim settle,
-  must slow down to capture and to fire, and holds 4. Your runs (730–825) used a faster two-intake
-  build. The skills set the ceiling; evolution finds the best order within it.
-- **The DSIM snippet** replays the champion's commands. Forced misses can land differently in DSIM.
-  The studio's Champion view is the exact life.
-- **Old runs** from earlier versions are listed as old versions and cannot continue; their files are
-  untouched until you delete them.
+| `outputs/imitation/` | replay data sets, the fitted network, the distilled no-learning network, the starting predictor |
+| `profiles/real-v0.json` | the team robot's ranges |
 
 ## Checks
 
 ```bash
-npm run check:train     # the studio + trainer gate (~4 min)
+npm run check:train     # the gate (~20 min): copies, lessons, search, tip cycle, CMA-ES, learning, predictor, engine, exact rewind, server
 npm run check:s0        # the DSIM harness
 npm run check:s1        # the motion lab
-npm run imitate         # rebuild the data set from Training data/ and refit
 npm run typecheck
 ```

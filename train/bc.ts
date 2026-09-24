@@ -12,6 +12,7 @@ export interface Sample {
   feats: Float32Array; // k × N_OPT_FEATS, option by option
   k: number;
   y: number; // index of the chosen option
+  q?: Float32Array; // a lesson: every option's what-if value in points (NaN = not played out)
 }
 
 /** many samples as three flat arrays — how they are cached, checkpointed and passed to workers */
@@ -21,6 +22,7 @@ export interface Packed {
   feats: string; // base64 Float32, Σk × nFeat
   ks: number[];
   ys: number[];
+  qs?: string; // base64 Float32, Σk (lessons only)
 }
 
 const b64 = (a: Float32Array): string => Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
@@ -39,17 +41,32 @@ export function pack(S: Sample[]): Packed {
     feats.set(s.feats, o);
     o += s.feats.length;
   });
-  return { n: S.length, obs: b64(obs), feats: b64(feats), ks: S.map((s) => s.k), ys: S.map((s) => s.y) };
+  const out: Packed = { n: S.length, obs: b64(obs), feats: b64(feats), ks: S.map((s) => s.k), ys: S.map((s) => s.y) };
+  if (S.length && S.every((s) => s.q)) {
+    const q = new Float32Array(S.reduce((a, s) => a + s.k, 0));
+    let k = 0;
+    for (const s of S) {
+      q.set(s.q!, k);
+      k += s.k;
+    }
+    out.qs = b64(q);
+  }
+  return out;
 }
 export function unpack(P: Packed, nObs: number, nFeat: number): Sample[] {
   const obs = f32(P.obs);
   const feats = f32(P.feats);
+  const q = P.qs ? f32(P.qs) : null;
   const out: Sample[] = [];
   let o = 0;
+  let oq = 0;
   for (let i = 0; i < P.n; i++) {
     const k = P.ks[i];
-    out.push({ obs: obs.subarray(i * nObs, (i + 1) * nObs), feats: feats.subarray(o, o + k * nFeat), k, y: P.ys[i] });
+    const s: Sample = { obs: obs.subarray(i * nObs, (i + 1) * nObs), feats: feats.subarray(o, o + k * nFeat), k, y: P.ys[i] };
+    if (q) s.q = q.subarray(oq, oq + k);
+    out.push(s);
     o += k * nFeat;
+    oq += k;
   }
   if (obs.length !== P.n * nObs || o !== feats.length) throw new Error('decision samples do not match the network (they were made for another version)');
   return out;
@@ -118,8 +135,32 @@ export function disagreement(shape: NetShape, a: Float32Array, b: Float32Array, 
   return d / S.length;
 }
 
-/** loss of one decision; adds d loss / d params into `g` when given */
-export function lossAndGrad(shape: NetShape, p: Float32Array, s: Sample, g: Float32Array | null): { loss: number; hit: boolean } {
+/** the target a decision teaches: the chosen option (a demonstration), or — a lesson — a soft
+ * preference over the options by their what-if points, softmax(q / tau), options never played out
+ * left out */
+export function targetOf(s: Sample, tau: number): Float64Array {
+  const t = new Float64Array(s.k);
+  if (!s.q) {
+    t[s.y] = 1;
+    return t;
+  }
+  let m = -Infinity;
+  for (let r = 0; r < s.k; r++) if (!Number.isNaN(s.q[r])) m = Math.max(m, s.q[r]);
+  let Z = 0;
+  for (let r = 0; r < s.k; r++) Z += t[r] = Number.isNaN(s.q[r]) ? 0 : Math.exp((s.q[r] - m) / tau);
+  for (let r = 0; r < s.k; r++) t[r] /= Z;
+  return t;
+}
+const bestOf = (s: Sample): number => {
+  if (!s.q) return s.y;
+  let b = -1;
+  for (let r = 0; r < s.k; r++) if (!Number.isNaN(s.q[r]) && (b < 0 || s.q[r] > s.q[b])) b = r;
+  return b;
+};
+
+/** loss of one decision (cross-entropy against targetOf); adds d loss / d params into `g` when
+ * given. `hit`: the network's top option is the best one. */
+export function lossAndGrad(shape: NetShape, p: Float32Array, s: Sample, g: Float32Array | null, tau = 3): { loss: number; hit: boolean } {
   checkShape(shape);
   const [nin, nh] = shape.sizes;
   const nObs = s.obs.length;
@@ -140,12 +181,14 @@ export function lossAndGrad(shape: NetShape, p: Float32Array, s: Sample, g: Floa
   let Z = 0;
   const e = new Float64Array(s.k);
   for (let r = 0; r < s.k; r++) Z += e[r] = Math.exp(z[r] - m);
-  const loss = -(z[s.y] - m - Math.log(Z));
+  const t = targetOf(s, tau);
+  let loss = 0;
+  for (let r = 0; r < s.k; r++) if (t[r] > 0) loss -= t[r] * (z[r] - m - Math.log(Z));
   if (g) {
     const sk = shape.skip ? skipOffset(shape) + nObs : -1;
     const dObs = new Float64Array(nh); // d loss / d hidden pre-activation, summed: the obs part is shared
     for (let r = 0; r < s.k; r++) {
-      const dz = e[r] / Z - (r === s.y ? 1 : 0);
+      const dz = e[r] / Z - t[r];
       if (dz === 0) continue;
       g[b2] += dz;
       const f = r * nF;
@@ -165,7 +208,76 @@ export function lossAndGrad(shape: NetShape, p: Float32Array, s: Sample, g: Floa
       for (let i = 0; i < nObs; i++) g[row + i] += dObs[j] * s.obs[i];
     }
   }
-  return { loss, hit: arg === s.y };
+  return { loss, hit: arg === bestOf(s) };
+}
+
+/** what-if points per unit of network score (a lesson's values are regressed in these units) */
+export const Q_UNIT = 10;
+
+/** a lesson learned as POINTS: the network's scores, centred over the options that were played out,
+ * regress the options' centred what-if points (in Q_UNIT). Every option's measurement is used, not
+ * just which one won — the noise of single play-outs averages out instead of flipping the label.
+ * Demonstrations (no q) fall back to the cross-entropy of lossAndGrad. */
+export function pointsLossAndGrad(shape: NetShape, p: Float32Array, s: Sample, g: Float32Array | null): { loss: number; hit: boolean } {
+  if (!s.q) return lossAndGrad(shape, p, s, g);
+  checkShape(shape);
+  const [nin, nh] = shape.sizes;
+  const nObs = s.obs.length;
+  const nF = nin - nObs;
+  const b1 = nin * nh;
+  const w2 = b1 + nh;
+  const b2 = w2 + nh;
+  const H: Float32Array[] = [];
+  const z = new Float64Array(s.k);
+  forward(shape, p, s, H, z);
+  let n = 0;
+  let zm = 0;
+  let qm = 0;
+  for (let r = 0; r < s.k; r++)
+    if (!Number.isNaN(s.q[r])) {
+      n++;
+      zm += z[r];
+      qm += s.q[r];
+    }
+  if (n < 2) return { loss: 0, hit: true };
+  zm /= n;
+  qm /= n;
+  let loss = 0;
+  let bz = -1;
+  let bq = -1;
+  const d = new Float64Array(s.k);
+  for (let r = 0; r < s.k; r++) {
+    if (Number.isNaN(s.q[r])) continue;
+    d[r] = z[r] - zm - (s.q[r] - qm) / Q_UNIT;
+    loss += 0.5 * d[r] * d[r];
+    if (bz < 0 || z[r] > z[bz]) bz = r;
+    if (bq < 0 || s.q[r] > s.q[bq]) bq = r;
+  }
+  if (g) {
+    const sk = shape.skip ? skipOffset(shape) + nObs : -1;
+    const dObs = new Float64Array(nh);
+    for (let r = 0; r < s.k; r++) {
+      const dz = d[r]; // Σ d = 0, so the centring passes no gradient of its own
+      if (dz === 0) continue;
+      g[b2] += dz;
+      const f = r * nF;
+      if (sk >= 0) for (let i = 0; i < nF; i++) g[sk + i] += dz * s.feats[f + i];
+      const h = H[r];
+      for (let j = 0; j < nh; j++) {
+        g[w2 + j] += dz * h[j];
+        const dh = dz * p[w2 + j] * (1 - h[j] * h[j]);
+        g[b1 + j] += dh;
+        dObs[j] += dh;
+        const row = j * nin + nObs;
+        for (let i = 0; i < nF; i++) g[row + i] += dh * s.feats[f + i];
+      }
+    }
+    for (let j = 0; j < nh; j++) {
+      const row = j * nin;
+      for (let i = 0; i < nObs; i++) g[row + i] += dObs[j] * s.obs[i];
+    }
+  }
+  return { loss, hit: bz === bq };
 }
 
 export function evaluate(shape: NetShape, p: Float32Array, S: Sample[]): { loss: number; agree: number } {

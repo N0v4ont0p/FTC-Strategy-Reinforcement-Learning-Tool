@@ -222,7 +222,7 @@ export class FieldView {
     ctx.fillStyle = '#0e0b08';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     if (this.mode === 'focus') return this.drawFocus();
-    ctx.drawImage(this.fieldLayer, 0, 0);
+    if (this.fieldLayer.width && this.fieldLayer.height) ctx.drawImage(this.fieldLayer, 0, 0); // not before the first resize
     if (!this.gen || !this.template) return;
     this.apply(ctx);
     const T = this.tick;

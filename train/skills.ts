@@ -35,17 +35,18 @@ import { dropZoneOccupied } from '../harness/filters';
 import { flowerFeet } from '../harness/s1/lab';
 import { polysOverlap, rect } from '../harness/geom';
 import { SPOTS, inEnvelope } from './obs';
+import { share } from './fork';
 
 type P = { x: number; y: number };
 const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 const dist = (a: P, b: P): number => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** bump when the options or how a replay is labelled change: cached demonstrations are rebuilt */
-export const SKILLS_VERSION = 3;
-export const OPTION_KINDS = ['field', 'lz', 'flower', 'shoot', 'hp', 'park', 'position'] as const;
+export const SKILLS_VERSION = 4;
+export const OPTION_KINDS = ['field', 'lz', 'flower', 'shoot', 'hp', 'park', 'position', 'cycle'] as const;
 export type OptionKind = (typeof OPTION_KINDS)[number];
 /** per-option features the policy sees (plus the global observation) */
-export const OPT_FEATS = ['k:field', 'k:lz', 'k:flower', 'k:shoot', 'k:hp', 'k:park', 'k:position', 'estTime', 'dist', 'nectar', 'cluster', 'flowerPollen', 'toShoot', 'hopperAfter', 'onTargetSide', 'sweepTime', 'current'] as const;
+export const OPT_FEATS = ['k:field', 'k:lz', 'k:flower', 'k:shoot', 'k:hp', 'k:park', 'k:position', 'k:cycle', 'estTime', 'dist', 'nectar', 'cluster', 'flowerPollen', 'toShoot', 'hopperAfter', 'onTargetSide', 'sweepTime', 'current'] as const;
 /** index of the estimated-time feature (the greedy baseline reads it) and of the 'current' flag */
 export const F_EST = OPT_FEATS.indexOf('estTime');
 export const F_CURRENT = OPT_FEATS.indexOf('current');
@@ -61,13 +62,31 @@ export interface Option {
   feats: number[];
 }
 
-/** skill parameters the genome carries (decoded by train/policy.ts) */
-export interface Style {
-  fireHold: number; // while collecting, slow to firing speed once holding at least this many
-  fireMinV: number; // …but only on a robot that may fire at ≥ this speed (in/s)
-  stick: number; // thinking on the go: switch to another option only when it scores this much more
-}
-export const DEFAULT_STYLE: Style = { fireHold: 2, fireMinV: 15, stick: 0.3 };
+/** SKILL SETTINGS the genome carries (tuned by CMA-ES, train/cma.ts). Gene g → lo + (hi − lo)·sigmoid(g);
+ * `def` is what the skills used before they were tunable, so the default robot is unchanged. */
+export const STYLE = [
+  { key: 'fireHold', lo: 0, hi: 5, def: 2, label: 'fire while collecting once holding this many' },
+  { key: 'fireMinV', lo: 0, hi: 60, def: 15, label: '…on robots allowed to fire at this speed (in/s) or more' },
+  { key: 'stick', lo: 0, hi: 10, def: 0.3, label: 'switch job only when another scores this much more' },
+  { key: 'sweepIdleS', lo: 1, hi: 12, def: 6, label: 'a sweep ends after this long without a new element (s)' },
+  { key: 'budgetMul', lo: 1, hi: 4, def: 1.8, label: 'time allowed for a job: × the estimated travel time' },
+  { key: 'budgetAddS', lo: 0.5, hi: 8, def: 2.5, label: '…plus this many seconds' },
+  { key: 'vIntakeMargin', lo: 0.5, hi: 1, def: 0.85, label: 'intake approach speed, share of the robot\'s capture limit' },
+  { key: 'vFireMargin', lo: 0.5, hi: 1, def: 0.85, label: 'speed while firing, share of the robot\'s firing limit' },
+  { key: 'preDist', lo: 4, hi: 24, def: 12, label: 'line up this far from an element before driving in (in)' },
+  { key: 'seatV', lo: 6, hi: 19.5, def: 14, label: 'speed into a FLOWER (in/s, under the 20 in/s impact limit)' },
+  { key: 'shootTurnS', lo: 0.1, hi: 3, def: 40 / 60, label: 'at a scoring spot, turn to find the cell after (s)' },
+  { key: 'shootGiveUpS', lo: 1, hi: 8, def: 2.5, label: '…and give the spot up after (s)' },
+  { key: 'parkMarginS', lo: 0.2, hi: 5, def: 1, label: 'leave to park this long before it counts (s)' },
+  { key: 'positionMaxS', lo: 0.5, hi: 10, def: 3, label: 'wait in position at most (s)' },
+  { key: 'spillWait', lo: 10, hi: 45, def: 26, label: 'wait this far out from a tipping cell for its spill (in)' },
+  { key: 'brake', lo: 0.5, hi: 1, def: 0.9, label: 'braking: share of the measured deceleration used' },
+  { key: 'arriveGain', lo: 2, hi: 15, def: 6, label: 'final approach speed per inch left (1/s)' },
+  { key: 'failBanS', lo: 1, hi: 15, def: 5, label: 'after a failed job, leave its target alone for (s)' },
+] as const;
+export type StyleKey = (typeof STYLE)[number]['key'];
+export type Style = Record<StyleKey, number>;
+export const DEFAULT_STYLE: Style = Object.fromEntries(STYLE.map((d) => [d.key, d.def])) as Style;
 
 /** the alliance's own frame → world (the field is point-symmetric; blue's frame is the world) */
 const mir = (a: Alliance, p: P): P => (a === 'blue' ? p : { x: -p.x, y: -p.y });
@@ -129,6 +148,7 @@ export class Pilot {
   constructor(
     readonly spec: RobotSpec,
     limits?: Pick<Limits, 'vIntake' | 'vFire'>,
+    readonly style: Style = DEFAULT_STYLE,
   ) {
     this.E = effective(spec, true, 0); // intake running: the slower, safe budget
     this.ext = footprintExtents(spec);
@@ -144,8 +164,9 @@ export class Pilot {
     const clear = (p: P): boolean =>
       BB.BB_HALF_X - Math.abs(p.x) >= turn && BB.BB_HALF_Y - Math.abs(p.y) >= turn && solids.every((poly) => rectDist(p, poly) >= turn);
     this.spots = { north: SPOTS.north.filter(clear), south: SPOTS.south.filter(clear) };
-    this.vIntake = limits && limits.vIntake < 100 ? Math.max(4, 0.85 * limits.vIntake) : Infinity;
-    this.vFire = limits && limits.vFire < 100 ? Math.max(0.5, 0.85 * limits.vFire) : Infinity;
+    this.vIntake = limits && limits.vIntake < 100 ? Math.max(4, style.vIntakeMargin * limits.vIntake) : Infinity;
+    this.vFire = limits && limits.vFire < 100 ? Math.max(0.5, style.vFireMargin * limits.vFire) : Infinity;
+    for (const o of [this.E, this.ext, this.ends, this.spots, this.style]) share(o); // fixed for the match: forks reference them
   }
 
   /** reach from the centre to the roller of an end */
@@ -201,8 +222,8 @@ export class Pilot {
     this.stuck = tick - this.prog.at > STUCK_TICKS;
     const E = this.E;
     const aB = 1.4 * E.accel;
-    let vDes = Math.min(E.vmax, Math.sqrt(2 * 0.9 * aB * Math.max(0, remaining - 0.3)));
-    if (pl.leg === pl.pts.length - 1) vDes = Math.min(vDes, 6 * d);
+    let vDes = Math.min(E.vmax, Math.sqrt(2 * this.style.brake * aB * Math.max(0, remaining - 0.3)));
+    if (pl.leg === pl.pts.length - 1) vDes = Math.min(vDes, this.style.arriveGain * d);
     if (o.vCap !== undefined && remaining < 30) vDes = Math.min(vDes, o.vCap);
     if (o.vMax !== undefined) vDes = Math.min(vDes, o.vMax);
     const dirH = Math.atan2(ey, ex);
@@ -351,7 +372,20 @@ function tourLength(from: P, pts: P[], m: number): number {
   return L;
 }
 
-const PARK_MARGIN_S = 1.0;
+// ─────────────────────────────── the tip cycle ───────────────────────────────
+/** THE TIP CYCLE — the loop of the team's world-record replays, measured (train/gap.ts): a tip every
+ * 4.3 s, ~9 shots per tip, the robot ~44 in from its HIVE the whole time. The tipped cell's spill
+ * lands beside the HIVE; it is swept up there and shot straight into the other cell, which tips
+ * and spills in turn. As ONE job the robot stays in that zone: it takes the nearest element in
+ * it, fires whenever a shot can score, shoots from the zone when full, waits by a coming spill —
+ * and only leaves when the zone has run dry. */
+export const CYCLE_R = 54; // in, from the own HIVE's centre
+const hiveCentre = (a: Alliance): P => ({ x: a === 'blue' ? BB.BB_HIVE_X : -BB.BB_HIVE_X, y: 0 });
+/** collectable loose elements in the cycle zone */
+function cycleLoose(w: World, a: Alliance, skip?: Set<number>): Ball[] {
+  const c = hiveCentre(a);
+  return w.balls.filter((b) => b.state.kind === 'ground' && collectable(a, b.color) && !skip?.has(b.id) && dist(b.pos, c) <= CYCLE_R);
+}
 
 // ─────────────────────────────── the options available now ───────────────────────────────
 /** THINKING ON THE GO: `isCurrent` names the option the robot is already doing, so it is listed
@@ -439,9 +473,22 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
     const q = positionGoal(w, r, pilot);
     out.push({ kind: 'position', label: q.label, x: q.x, y: q.y, feats: feats('position', q, q.h) });
   }
+  // the TIP CYCLE: worth it when the zone by the HIVE has elements (or a spill is coming)
+  if ((ph === 'auto' || ph === 'teleop') && ok('cycle')) {
+    const zone = cycleLoose(w, a);
+    const hive = B.hives[a];
+    const coming = hive.tipping > 0 && !hive.released && hive.contents.length >= 2;
+    if (zone.length >= 2 || (coming && free > 0)) {
+      const near = zone.reduce<Ball | null>((m, b) => (!m || dist(b.pos, r.pos) < dist(m.pos, r.pos) ? b : m), null);
+      const q = near ? near.pos : positionGoal(w, r, pilot);
+      const n = zone.length + (coming ? hive.contents.length : 0);
+      const nectar = zone.filter((b) => b.color !== 'yellow').length;
+      out.push({ kind: 'cycle', label: `the tip cycle by the HIVE (${zone.length} element${zone.length === 1 ? '' : 's'} there${coming ? ', a spill coming' : ''})`, x: q.x, y: q.y, feats: feats('cycle', q, null, { nectar: zone.length ? nectar / zone.length : 0, cluster: Math.min(n, 8), gain: Math.min(free, n), sweep: n * 0.4, center: hiveCentre(a) }) });
+    }
+  }
   const g = parkGoal(a, pilot);
   // PARK counts at the instant AUTO / the match ends, so go only when it takes about that long
-  const parkT = pilot.estTime(r, g, g.h) + PARK_MARGIN_S;
+  const parkT = pilot.estTime(r, g, g.h) + pilot.style.parkMarginS;
   if ((ph === 'auto' || ph === 'teleop') && w.match.phaseTimeLeft < parkT) {
     out.push({ kind: 'park', label: 'park in the loading zone', x: g.x, y: g.y, feats: feats('park', g, g.h) });
   }
@@ -457,7 +504,7 @@ function positionGoal(w: World, r: RobotState, pilot: Pilot): P & { h: number | 
   if (hive.tipping > 0 && !hive.released && hive.contents.length) {
     const hx = a === 'blue' ? BB.BB_HIVE_X : -BB.BB_HIVE_X;
     const sy = hive.up === 'north' ? 1 : -1; // the up cell is the one emptying
-    const p = { x: hx, y: sy * (BB.BB_HIVE_CELL_DY + BB.BB_CELL_OPEN.d / 2 + 26) };
+    const p = { x: hx, y: sy * (BB.BB_HIVE_CELL_DY + BB.BB_CELL_OPEN.d / 2 + pilot.style.spillWait) };
     const dir = Math.atan2(sy * BB.BB_HIVE_CELL_DY - p.y, hx - p.x);
     const h = Pilot.facing(pilot.bestEnd(r.heading, dir), dir);
     if (placeable(pilot.spec, p, h, 0.5)) return { ...p, h, label: 'wait beside the coming spill' };
@@ -509,7 +556,7 @@ export function approach(pilot: Pilot, r: { pos: P; heading: number }, b: P): { 
       const off = pilot.reach(e) - 1.5; // element at the roller
       const h = Pilot.facing(e, a + Math.PI);
       const goal = { x: b.x + u.x * off, y: b.y + u.y * off };
-      const pre = { x: b.x + u.x * (off + 12), y: b.y + u.y * (off + 12) };
+      const pre = { x: b.x + u.x * (off + pilot.style.preDist), y: b.y + u.y * (off + pilot.style.preDist) };
       if (placeable(pilot.spec, goal, h, 0.5) && placeable(pilot.spec, pre, h, 0.5)) return { pre, goal, h, direct: k === 0 };
     }
   }
@@ -518,8 +565,6 @@ export function approach(pilot: Pilot, r: { pos: P; heading: number }, b: P): { 
 
 // ─────────────────────────────── executing one option ───────────────────────────────
 export type Outcome = 'running' | 'done' | 'failed';
-/** a sweep ends after this long without a new element */
-const SWEEP_IDLE_TICKS = 360;
 
 export class Executor {
   private start = 0;
@@ -534,9 +579,9 @@ export class Executor {
   private readonly hopStart: number;
   private end: 'front' | 'back' = 'back';
   // a sweep
-  private readonly ids: Set<number>;
-  private readonly center: P;
-  private readonly radius: number;
+  private ids: Set<number>; // (the tip cycle re-reads its zone every tick)
+  private center: P;
+  private radius: number;
   private target: number | null = null;
   private targetAt = 0;
   private targetBudget = 0;
@@ -551,7 +596,6 @@ export class Executor {
     w: World,
     r: RobotState,
     private banned: Map<string, number> = new Map(),
-    private style: Style = DEFAULT_STYLE,
   ) {
     this.start = w.tick;
     this.lastGain = w.tick;
@@ -560,7 +604,8 @@ export class Executor {
     pilot.reset();
     if (opt.kind === 'flower') this.end = flowerEnd(opt.flower!, pilot, r.heading);
     const est = opt.kind === 'flower' ? pilot.estTime(r, flowerGoal(opt.flower!, pilot, this.end).pre, null) : pilot.estTime(r, opt, null);
-    this.budget = Math.round(60 * (1.8 * est + (opt.kind === 'flower' ? 4 : 2.5)));
+    const S = pilot.style;
+    this.budget = Math.round(60 * (S.budgetMul * est + S.budgetAddS + (opt.kind === 'flower' ? 1.5 : 0)));
     this.ids = new Set(opt.balls ?? []);
     const mem = w.balls.filter((b) => this.ids.has(b.id));
     this.center = mem.length ? { x: mem.reduce((s, b) => s + b.pos.x, 0) / mem.length, y: mem.reduce((s, b) => s + b.pos.y, 0) / mem.length } : { x: opt.x, y: opt.y };
@@ -606,37 +651,14 @@ export class Executor {
         if (this.phase === 'go') return { c: this.pilot.drive(r, t, g.pre, g.h), out: 'running' };
         // square in, slower than IMPACT_MAX (20 in/s), and keep pressing while it pulls POLLEN out
         if (t - this.lastGain > 90) return { c: cmd(), out: r.hopper.length > this.hopStart ? 'done' : 'failed' };
-        const c = this.pilot.drive(r, t, g.seat, g.h, { vCap: Math.min(14, this.pilot.vIntake), lockH: true });
+        const c = this.pilot.drive(r, t, g.seat, g.h, { vCap: Math.min(this.pilot.style.seatV, this.pilot.vIntake), lockH: true });
         c.intake = true;
         return { c, out: 'running' };
       }
-      case 'shoot': {
+      case 'shoot':
         if (r.hopper.length === 0) return { c: cmd(), out: 'done' };
         if (over) return { c: cmd(), out: 'failed' };
-        // where to fire from: right here when this is a measured scoring position for the target
-        // cell, else the nearest turn-safe spot. The target cell switches the moment a tip starts.
-        const cell = targetCell(w, r.alliance);
-        if (!this.hold || this.holdCell !== cell) {
-          this.hold = canScoreFrom(w, r.alliance, r.pos) ? { ...r.pos } : nearestSpot(w, r, this.pilot);
-          this.holdCell = cell;
-          this.holdH = null;
-          this.idle = 0;
-        }
-        const s = this.hold;
-        if (dist(r.pos, s) >= 3) return { c: this.pilot.drive(r, t, s, null), out: 'running' };
-        // there: hold still at firing speed. Waiting for the release after a tip is the one wait
-        // left (≤ 2 s); a turret that cannot find the cell from this heading turns slowly.
-        const gate = fireGate(w, r);
-        this.idle = gate && r.hopper.length >= this.hop0 ? this.idle + 1 : 0;
-        this.hop0 = Math.min(this.hop0, r.hopper.length);
-        this.holdH ??= r.heading;
-        if (this.idle > 40) this.holdH = r.heading + 0.6;
-        if (this.idle > 150) {
-          this.pilot.badSpots.push({ x: s.x, y: s.y, until: t + 1200 }); // no shot from here for this robot: avoid it 20 s
-          return { c: cmd(), out: 'failed' };
-        }
-        return { c: this.pilot.drive(r, t, s, this.holdH, { vMax: this.pilot.vFire }), out: 'running' };
-      }
+        return this.shootStep(w, r);
       case 'hp':
         return { c: cmd({ bbNectar: true }), out: 'done' };
       case 'position': {
@@ -650,7 +672,82 @@ export class Executor {
         if (ph !== 'auto' && ph !== 'teleop') return { c: cmd(), out: 'done' };
         return { c: this.pilot.drive(r, t, g, g.h, { vCap: 18 }), out: 'running' };
       }
+      case 'cycle':
+        return this.cycle(w, r, cap);
     }
+  }
+
+  /** SHOOTING from here when this is a measured scoring position for the target cell, else from
+   * the nearest turn-safe spot; the target cell switches the moment a tip starts. There: hold still
+   * at firing speed (fire is held by the brain whenever a shot can score). Waiting for the release
+   * after a tip is the one wait left (≤ 2 s); a turret that cannot find the cell from this heading
+   * turns slowly; a spot that gives no shot at all is given up ('failed') and avoided for 20 s. */
+  private shootStep(w: World, r: RobotState): { c: RobotCommand; out: Outcome } {
+    const t = w.tick;
+    const cell = targetCell(w, r.alliance);
+    if (!this.hold || this.holdCell !== cell) {
+      this.hold = canScoreFrom(w, r.alliance, r.pos) ? { ...r.pos } : nearestSpot(w, r, this.pilot);
+      this.holdCell = cell;
+      this.holdH = null;
+      this.idle = 0;
+    }
+    const s = this.hold;
+    if (dist(r.pos, s) >= 3) return { c: this.pilot.drive(r, t, s, null), out: 'running' };
+    const gate = fireGate(w, r);
+    this.idle = gate && r.hopper.length >= this.hop0 ? this.idle + 1 : 0;
+    this.hop0 = Math.min(this.hop0, r.hopper.length);
+    this.holdH ??= r.heading;
+    if (this.idle > Math.round(60 * this.pilot.style.shootTurnS)) this.holdH = r.heading + 0.6;
+    if (this.idle > Math.round(60 * this.pilot.style.shootGiveUpS)) {
+      this.pilot.badSpots.push({ x: s.x, y: s.y, until: t + 1200 }); // no shot from here for this robot: avoid it 20 s
+      return { c: cmd(), out: 'failed' };
+    }
+    return { c: this.pilot.drive(r, t, s, this.holdH, { vMax: this.pilot.vFire }), out: 'running' };
+  }
+
+  /** THE TIP CYCLE (cycleLoose): collect in the zone by the HIVE — the sweep, with the zone as its
+   * group — firing whenever a shot can score; when full (or the zone is empty and it holds some),
+   * shoot from where it is or the nearest scoring spot; wait by a coming spill. It ends when there
+   * is nothing left to take or shoot, or nothing has been taken or shot for sweepIdleS. */
+  private lastShotT = 0;
+  private dry = 0;
+  private cHop = -1;
+  private took = false;
+  private cycle(w: World, r: RobotState, cap: number): { c: RobotCommand; out: Outcome } {
+    const t = w.tick;
+    const a = r.alliance;
+    // progress: an element taken or a shot fired
+    if (this.cHop >= 0 && r.hopper.length > this.cHop) {
+      this.lastGain = t;
+      this.took = true;
+    } else if (this.cHop >= 0 && r.hopper.length < this.cHop) this.lastShotT = t;
+    this.cHop = r.hopper.length;
+    this.lastGain = Math.max(this.lastGain, this.lastShotT); // a shot is progress for the sweep inside too
+    // no element taken and no shot for sweepIdleS: the loop is not working here — a failure, so the
+    // brain leaves it alone for a while (a forced tip cycle once stalled every match by re-picking it)
+    if (t - this.lastGain > Math.round(60 * this.pilot.style.sweepIdleS)) return { c: cmd(), out: 'failed' };
+    const loose = cycleLoose(w, a, this.skip);
+    const hive = bb(w).hives[a];
+    const coming = hive.tipping > 0 && !hive.released && hive.contents.length >= 2;
+    this.dry = !loose.length && !coming && r.hopper.length === 0 ? this.dry + 1 : 0;
+    if (this.dry > 30) return { c: cmd(), out: this.took ? 'done' : 'failed' };
+    if (r.hopper.length >= cap || (!loose.length && r.hopper.length > 0 && !coming)) {
+      // shoot from the zone (the shoot job's own step: it gives a spot up when no shot comes)
+      const s = this.shootStep(w, r);
+      return s.out === 'failed' ? { c: s.c, out: 'failed' } : { c: s.c, out: 'running' };
+    }
+    this.hold = null;
+    this.hop0 = r.hopper.length;
+    if (!loose.length) {
+      const q = positionGoal(w, r, this.pilot); // a spill is coming: be beside it
+      return { c: this.pilot.drive(r, t, q, q.h), out: 'running' };
+    }
+    this.ids = new Set(loose.map((b) => b.id));
+    this.center = hiveCentre(a);
+    this.radius = CYCLE_R;
+    const s = this.sweep(w, r, cap);
+    if (s.out !== 'running') this.target = null; // (not expected: the cases the sweep ends on are handled above) — next tick picks again
+    return { c: s.c, out: 'running' };
   }
 
   /** SWEEP A GROUP: nearest-next through its elements (and any that rolled in beside them), the
@@ -662,8 +759,10 @@ export class Executor {
     const t = w.tick;
     const a = r.alliance;
     if (r.hopper.length >= cap) return { c: cmd(), out: 'done' };
-    if (t - this.lastGain > SWEEP_IDLE_TICKS) {
-      if (this.target !== null) this.banned.set(`b${this.target}`, t + 300); // not straight back to it
+    const S = this.pilot.style;
+    const ban = Math.round(60 * S.failBanS);
+    if (t - this.lastGain > Math.round(60 * S.sweepIdleS)) {
+      if (this.target !== null) this.banned.set(`b${this.target}`, t + ban); // not straight back to it
       return { c: cmd(), out: this.gained ? 'done' : 'failed' };
     }
     const loose = w.balls.filter(
@@ -672,7 +771,7 @@ export class Executor {
     let b = this.target === null ? undefined : loose.find((q) => q.id === this.target);
     if (b && (t - this.targetAt > this.targetBudget || (this.pilot.stuck && this.phase === 'go'))) {
       this.skip.add(b.id);
-      this.banned.set(`b${b.id}`, t + 300);
+      this.banned.set(`b${b.id}`, t + ban);
       b = undefined;
     }
     if (!b) {
@@ -689,7 +788,7 @@ export class Executor {
       b = best;
       this.target = b.id;
       this.targetAt = t;
-      this.targetBudget = Math.round(60 * (1.8 * bc + 2.5));
+      this.targetBudget = Math.round(60 * (S.budgetMul * bc + S.budgetAddS));
       this.app = null;
       this.phase = 'go';
       this.pilot.reset();
@@ -709,8 +808,8 @@ export class Executor {
     // when the robot is already on the approach line
     if (A.direct) this.phase = 'seat';
     if (this.phase === 'go' && ((dist(r.pos, A.pre) < 6 && Math.abs(wrap(A.h - r.heading)) < 0.15) || (d < Math.max(this.pilot.ext.rear, this.pilot.ext.front) + 6 && Math.abs(wrap(A.h - r.heading)) < 0.25))) this.phase = 'seat';
-    const S = this.style;
-    const fire = r.hopper.length >= Math.max(1, Math.ceil(S.fireHold)) && this.pilot.vFire / 0.85 >= S.fireMinV && fireGate(w, r) && canScoreFrom(w, a, r.pos);
+    // (a hair under: a Float32 gene decoding to 2.0000001 means 2)
+    const fire = r.hopper.length >= Math.max(1, Math.ceil(S.fireHold - 1e-6)) && this.pilot.vFire / 0.85 >= S.fireMinV && fireGate(w, r) && canScoreFrom(w, a, r.pos);
     const vMax = fire ? this.pilot.vFire : undefined;
     const c = this.phase === 'go' ? this.pilot.drive(r, t, A.pre, A.h, { vMax }) : this.pilot.drive(r, t, A.goal, A.h, { lockH: true, vCap: this.pilot.vIntake, vMax });
     return { c, out: 'running' };

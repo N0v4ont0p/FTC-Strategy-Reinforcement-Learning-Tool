@@ -36,6 +36,7 @@ Order: **SOLO first** (baseline, then teach), then DUO, then full 4-robot matche
 | 2026-09-22 | champion = best mean over fixed validation matches (not one match) |
 | 2026-09-23 | robots THINK ON THE GO (user: "deciding every time… thinking every way through"): re-score every option 4×/s with the current job flagged; switch past a stick gene; never idle (position, max 3 s); HP press alongside; no dead tick between jobs |
 | 2026-09-23 | user: "fitness is down". Found: champion by best-of-many on 8 fixed matches = winner's curse (220 validated → 192 unseen). Champion now starts as the no-learning robot (distilled) and changes only by racing on fresh paired matches (Pocock z ≥ 2.3) |
+| 2026-09-24 | the evolution trainer is replaced by LEARNING FROM EVERY DECISION: the user's "48 h" run had trained 47 min (13 generations; each robot judged on ONE match, so selection was mostly luck). Whole episode forkable → what-if lessons at every job start → a network regressing each option's points → CMA-ES on 18 skill settings → race (Pocock + worst-fifth) → fixed 64-match exam. One reward: DSIM score − guard fouls, no shaping. Thinking ahead only at job starts (every re-think: −26, dithering). Tip-cycle job from the replays' loop |
 
 Facts marked **(code)** were read from DSIM source on 2026-09-22 (zip snapshot, no git), and are
 re-verified in S0 against the pinned copy.
@@ -722,3 +723,35 @@ What changed, and why:
 | G409 | intake holds off 0.45 s near a just-spilled element: G409 flags 6 → 0 over 8 matches, score unchanged (213 vs 204 on 12) |
 
 **Measured:** greedy 12-match 213; thinking vs previous version 214 vs 203 on 36 paired (+11 ± 13, n.s.); 6 gens × 48: champion = baseline level (205 vs 211 on 16 unseen, tie), no contender proven. Signal: paired sd ≈ 40 points per match ⇒ ~100 paired matches to prove +10. Learning above the baseline needs long runs (Full push).
+
+**LEARNING FROM EVERY DECISION (2026-09-24/25): BUILT — gate `npm run check:train`** (guide `TRAINING.md`).
+
+| piece | what and why |
+|---|---|
+| forkable match (`train/fork.ts`, `harness/{rng,filters,perturb,dsim}.ts`, `train/policy.ts` Brain, `train/episode.ts` Episode) | every piece of match state is class/plain data; `deepClone` keeps prototypes and aliasing and REFUSES closures (a function must know `fork()`); rng streams fork and reseed. Proven: a copy played on is bit-identical; a copy played differently leaves the match untouched; lessons never change the real match; 10 reference matches (replays, frames, samples) identical before/after the refactor; 0.08 ms per copy |
+| reward | DSIM record score − guard fouls (G417/G407/G409/G426 = 15, G427 C = 5, physics exploit = 5); no hints |
+| what-if lessons | at every job start (and `thinkRate` of re-thinks): every option forced on a copy, played `horizon` s under a fresh luck draw shared by all options (CRN, never the real future), successive halving over `rounds` draws, then the rest-of-match predictor. A probe copy steps one tick to see whether the brain decides (a job can end on any tick) |
+| predictor (`train/value.ts`) | MLP [N_OBS, 32, 1] on Monte-Carlo points-to-come; starting fit from 48 no-learning matches (held-out ~25 pts vs 55 spread), refitted every generation |
+| learning (`train/learn.ts`, `bc.ts pointsLossAndGrad`) | candidate = champion + Adam on centred option points (Q_UNIT 10), L2 anchor, early stop on HELD-OUT REGRET (every 6th match held out). Soft-CE on softmax(q/τ) was tried first: loss fell but best-option hits fell (31 → 26 %), race −3 ± 15 |
+| skills (`train/cma.ts`, `skills.ts STYLE`) | 18 skill constants became genes (defaults = old constants, greedy identical); CMA-ES (μ/μ_w, λ) with full covariance, deterministic asks, IPOP restart when σ < 0.03 |
+| race (`train/engine.ts`) | arena ≤ 3; K fresh paired matches per generation; promote at z ≥ 2.3 AND worst-fifth not worse by > 5; drop z ≤ −1.645 after 2K or at 96 |
+| exam | 64 fixed seeds (EXAM_SEED, same for every run), paired vs the no-learning robot; thinking ahead on half; determinism re-run; champion on each replay's build + seed, one DSIM `verifyReplay` (score/hash/ticks identical) |
+| gap report (`train/gap.ts`) | one Tally for training matches and replays: points, tips, s/tip, pickups/min, shots/min, accuracy, shots per load, s per load, time share collect/shoot/drive/idle |
+| tip cycle (`skills.ts` 'cycle') | from the replays (256 tips: one per 4.3 s, ~9 shots per tip, robot ~44 in from its HIVE): stay in the 54 in zone, sweep, fire whenever possible, shoot from the zone when full, wait beside a coming spill. A first version stalled every forced match (its shoot step could not give up) → reuses the shoot job's step + a failed cycle is banned for failBanS |
+| studio | reward hero (+points over no-learning on the exam), learning curve by hours, points lost to choices, seconds lost, Race and Report tabs, decision inspector (options × network score × what-if points), heartbeat; auto-resume (`.training` flag kept when the studio closes, cleared by Stop), `caffeinate` while training |
+
+**Measured while building:**
+- Thinking ahead (no-learning robot, 18 paired): at job starts, best 3 options 10 s ahead ×2 draws: **+39.7 ± 19.4** (14/18 wins); every option 15 s: +46.4 ± 25.0; at every re-think: **−26.0 ± 25.7** (47 % of decisions flipped).
+- One generation of lessons (40 matches, 3,064 lessons, no-learning network start): held-out regret 7.19 → 6.46; race over 40 fresh paired: **+20.3 ± 12.9** (26/40).
+- The no-learning robot's choice loses ~6.8 what-if points per decision (a selection-biased upper estimate).
+- Gap (exam of the starting champion): you 801 (37.6 tips, 136 pickups/min, 160 shots/min, 98.6 %), the champion on your build and seeds ~390–470, on REAL-v0 ~205 (9 tips, 42 shots/min, 71 %).
+
+**Caught by the first Full push trial (2026-09-25):**
+- **Options not played out.** The lesson candidate raced at −31.5 ± 16.4 (z −3.8) although its held-out regret improved (9.17 → 8.36). A forced option in a what-if was dropped at the branch's next re-think when the champion disliked it (the tip cycle: greedy −100), so Q measured "start, drop", while the trained network kept the option. Fix: in LESSONS a forced option runs to completion before re-thinking (Sutton, Precup & Singh 1999 options; `Brain.force.commit`), so "carry on" at a re-think = "start" at a job start. THINKING AHEAD stays a one-step deviation (committed search measured +12.7 ± 14.0 on 24 paired vs +39.7 ± 19.4 uncommitted).
+- **Re-validated after the fix** (tip cycle on the list): one generation of committed lessons (40 matches, 3,209 lessons), held-out regret 9.15 → 7.41, candidate vs start over 40 fresh paired **+19.4 ± 14.3** (29/40), fouls 26.1 vs 28.5 per match.
+- **Replay mixing off by default.** The replay-fitted network raced at −12.5 ± 20.7; `demoWeight` 0 in Balanced / Full push; preset "Lean on my replays" keeps it.
+- **Measured costs:** Full push generation 36.5 min (lessons 25.2, learn 1.2, race 0.8, exam 9.3); the exam confirmed thinking ahead at **+35.0 ± 12.3** over the no-learning robot on 32 matches.
+- **Process check:** the Bash hook hides processes from `ps | grep`; three trainers once ran on one run directory. Use `/bin/ps` + `/usr/bin/grep`.
+
+**Not built, deliberately:** macro jobs beyond the tip cycle (search and lessons already evaluate sequences through their play-outs); duo / 4-robot; the old GA (deleted: `train/algos.ts`).
+

@@ -1,94 +1,137 @@
 // THE TRAINING ENGINE — one run: generation after generation with no built-in end, checkpointed
-// atomically every generation (resume is bit-exact, train/check.ts), plus the controls of a real
-// training stack: pause / resume / stop / abort a generation / step N generations; named and
-// automatic CHECKPOINTS you can pin, rename, REWIND to, FORK into a new run or delete; settings
-// changed between generations (logged, and part of the checkpoint) or all at once from a PRESET;
-// EVALUATIONS of any policy on held-out seeds; exact frames of every generation's best robot.
+// atomically every generation, with the controls of a real training stack: pause / resume / stop /
+// abort a generation / step N generations; named and automatic CHECKPOINTS you can pin, rename,
+// REWIND to, FORK into a new run or delete; settings changed between generations or all at once
+// from a PRESET; EVALUATIONS of any policy on held-out matches.
 //
-// How a generation works (GA):
-//   1. every robot plays `episodes` matches on the generation's common seeds (same field, same
-//      robot draw for everybody — differences are the policy's, not luck's);
-//   2. the best few (validateTop) are VALIDATED on `valEpisodes` fixed validation matches: the
-//      CHAMPION is the best validated mean, never a single lucky match (the winner's curse), and it
-//      only changes when a challenger beats it on the very same matches;
-//   3. the champion's own decisions become EXPERIENCE; students (train/algos.ts) learn from it and
-//      from the team's replays (the run's DATA SET, pinned by key so rewinds re-learn identically);
-//   4. the GA breeds the next generation, the champion kept in it (hall of fame).
+// HOW THE ROBOT LEARNS — every generation:
+//   1. COLLECT: the champion plays `collect` matches. At its decisions (every job start, a share
+//      of the quarter-second re-thinks) the match is copied and EVERY option is played out on the
+//      copies with the same fresh luck: the points each one made are a lesson (train/episode.ts).
+//      Its matches also record what it scored from each moment on, for the rest-of-match predictor.
+//   2. LEARN: a candidate network is trained on the lessons of the last `window` generations to
+//      prefer options by their what-if points (train/learn.ts), the predictor is refitted
+//      (train/value.ts), and CMA-ES proposes skill settings, each measured on matches against the
+//      champion with identical luck (train/cma.ts).
+//   3. RACE: the candidates race the champion on brand-new matches, both on the same ones. A
+//      candidate takes over only when its lead passes a group-sequential test (Pocock) AND it is
+//      not worse in its bad matches (the worst fifth). Nothing is ever crowned by luck.
+//   4. EXAM: every new champion takes the same 64-match exam (fixed matches, the same for every
+//      run) — alone and thinking ahead during the match (search) — next to the no-learning robot
+//      on the same matches. That is the learning curve. The exam also re-checks determinism,
+//      DSIM-verifies a replay, and measures the gap to the team's replays (train/gap.ts).
+//
+// THE REWARD everywhere is one number: DSIM's score minus the foul points of the rules DSIM does
+// not enforce (train/episode.ts FOUL). No hints, no shaping.
 import { EventEmitter } from 'node:events';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { availableParallelism } from 'node:os';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { WorkerPool, type Job } from '../harness/pool';
 import { seedOf } from '../harness/rng';
 import { exportReplay } from '../harness/export';
 import type { Replay } from '../harness/dsim';
-import { DEFAULTS, TUNABLE, makeAlgo, validate, type Algo, type AlgoConfig, type AlgoName, type Lineage, type Teacher } from './algos';
-import { fromB64, skipOffset, toB64 } from './net';
-import { SHAPE } from './policy';
-import { N_OBS } from './obs';
-import { N_OPT_FEATS, OPTION_KINDS } from './skills';
-import { unpack, type Packed, type Sample } from './bc';
-import { currentKey, ensureData, ensureGreedy, hasSet, loadSet, setSamples } from './imitate';
-import { DEFAULT_PENALTY, DEFAULT_SHAPING, type Death, type EpisodeArgs, type EpisodeResult, type Parts, type Penalty, type Shaping, type Stage } from './episode';
+import { fromB64, styleOffset, toB64 } from './net';
+import { SHAPE, STYLE } from './policy';
+import { cmaAsk, cmaInit, cmaRecenter, cmaTell, type CmaState } from './cma';
+import { DATA_DIR, currentKey, dataFiles, ensureData, ensureGreedy, ensureValue, hasSet } from './imitate';
+import { gapRow, type GapRow, type Played } from './gap';
+import type { Death, EpisodeArgs, EpisodeResult, Inspected, Mistakes, Parts } from './episode';
+import type { FitJobArgs, FitJobResult, FitReport, LessonFile } from './learn';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const RUNS = join(ROOT, 'runs');
 export const NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,47}$/;
-
-export interface RunConfig extends AlgoConfig {
-  name: string;
-  profile: string;
-  sampleProfile: boolean;
-  driver: 'human' | 'oracle';
-  episodes: number; // matches per individual per generation (common seeds across the population)
-  /** 'curriculum' = AUTO-only episodes until mastered, then full matches */
-  stage: Stage | 'curriculum';
-  curriculum: { autoScore: number; holdGens: number; minGens: number; maxGens: number };
-  annealGens: number; // shaping falls linearly to 0 over this many generations
-  shaping: Shaping;
-  penalty: Penalty;
-  init: 'random' | 'imitation'; // generation 0: random networks, or mutants of the network fitted to "Training data/"
-  validateTop: number; // the best this many of each generation are validated (0 = champion by one match)
-  valEpisodes: number; // validation matches per candidate (fixed seeds for the whole run)
-  confirmEpisodes: number; // fresh matches a candidate must beat the champion on (paired); 0 = off
-  workers: number;
-  keepGens: number; // generation files kept on disk (every 100th is kept forever)
-  ckEvery: number; // automatic checkpoint every N generations (0 = off)
-  ckKeep: number; // automatic checkpoints kept (pinned and named ones are never pruned)
-  maxGens: number; // 0 = no limit
-  preset: string; // the preset last applied ('' = none / changed since)
-}
-
-/** settings that can change mid-run (everything else defines the run) */
-export const LIVE_KEYS = [...TUNABLE, 'episodes', 'annealGens', 'shaping', 'penalty', 'validateTop', 'valEpisodes', 'confirmEpisodes', 'workers', 'keepGens', 'ckEvery', 'ckKeep', 'maxGens', 'stage', 'driver', 'sampleProfile', 'preset'] as const;
-
 const CORES = availableParallelism();
 
+export interface RunConfig {
+  name: string;
+  seed: number;
+  profile: string;
+  sampleProfile: boolean; // a new robot from the profile's range every match
+  driver: 'human' | 'oracle';
+  workers: number;
+  // 1. collect
+  collect: number; // champion matches with lessons per generation
+  thinkRate: number; // share of the quarter-second re-thinks that become lessons (every job start does)
+  horizon: number; // seconds each option is played out (then the predictor counts the rest)
+  rounds: number; // luck draws per lesson (successive halving: each round keeps the better half)
+  // 2. learn
+  window: number; // generations of lessons trained on
+  epochs: number;
+  lr: number;
+  anchor: number; // pull toward the champion's weights
+  demoWeight: number; // weight of your replays' decisions at generation 0 …
+  demoFade: number; // … falling to 0 over this many generations
+  cmaPop: number; // skill settings tried per generation (0 = skills are not tuned)
+  cmaMatches: number; // matches each is measured on
+  cmaSigma: number; // first step size (gene units)
+  // 3. race
+  raceMatches: number; // fresh matches per contender per generation
+  // 4. exam
+  examMatches: number;
+  examEvery: number; // an exam at least every this many generations (0 = only for a new champion)
+  searchExam: boolean; // also examine the champion thinking ahead during the match
+  // housekeeping
+  keepGens: number;
+  ckEvery: number;
+  ckKeep: number;
+  maxGens: number;
+  preset: string;
+}
+/** what defines a run (fixed); everything else can change between generations */
+const FIXED_KEYS = ['name', 'seed', 'profile', 'sampleProfile'] as const;
+export const LIVE_KEYS = ['driver', 'workers', 'collect', 'thinkRate', 'horizon', 'rounds', 'window', 'epochs', 'lr', 'anchor', 'demoWeight', 'demoFade', 'cmaPop', 'cmaMatches', 'cmaSigma', 'raceMatches', 'examMatches', 'examEvery', 'searchExam', 'keepGens', 'ckEvery', 'ckKeep', 'maxGens', 'preset'] as const;
+
+/** look-ahead during a match (the champion as a player): at each job start its network's best 3
+ * options are played 10 s ahead under 2 luck draws, and it switches only for more than 3 points.
+ * Measured on the no-learning robot over 18 paired matches: +40 ± 19 points (every option 15 s
+ * ahead: +46 ± 25 at 2.3× the cost; searching every quarter-second re-think made it WORSE, −26:
+ * noisy estimates flipped jobs back and forth) */
+export const SEARCH = { k: 3, horizon: 600, rounds: 2, thinkEvery: 1_000_000, margin: 3 };
+/** the exam: the same matches for every run */
+const EXAM_SEED = 424_242;
+/** a lesson's what-if play-outs */
+const RETURNS_EVERY = 30;
+const TRACKED = 16; // collected matches with a swarm track
+/** Pocock boundary (one-sided α = 0.05 over ~10 looks, rounded up): a contender is promoted only
+ * when its accumulated paired lead crosses it; looking every generation keeps a false promotion
+ * near 5 % per contender */
+export const Z_PROMOTE = 2.3;
+export const Z_DROP = 1.645;
+export const RACE_MAX = 96;
+export const ARENA = 3;
+/** reliability: the contender's worst fifth of matches may be at most this much below the
+ * champion's worst fifth on the same matches */
+const TAIL_TOL = 5;
+/** IPOP-CMA-ES (Auger & Hansen 2005): when the skill search's step size has collapsed it is stuck —
+ * restart it from the champion's settings with twice the population */
+const CMA_STUCK_SIGMA = 0.03;
+const LESSON_KEEP = 20;
+
 // ─────────────────────────────── presets ───────────────────────────────
-/** how hard and how to train — each preset sets every strategy key, so it is one click and one
- * state. What the robots play (stage, driver, robot, hints, penalties) is never touched. */
 const BALANCED = {
-  pop: 128,
-  episodes: 1,
-  sigma: 0.05,
-  mutProb: 0.2,
-  crossRate: 0.3,
-  elite: 4,
-  truncation: 0.25,
-  tournament: 3,
-  macroRate: 0.15,
-  immigrants: 0.03,
-  imitRate: 0.1,
-  imitAdapt: true,
-  imitMin: 0.03,
-  imitMax: 0.35,
-  lessonSteps: 40,
-  validateTop: 3,
-  valEpisodes: 8,
-  confirmEpisodes: 12,
   workers: Math.max(1, CORES - 1),
+  collect: 20,
+  thinkRate: 0.05,
+  horizon: 15,
+  rounds: 2,
+  window: 4,
+  epochs: 60,
+  lr: 0.002,
+  anchor: 0.001,
+  demoWeight: 0, // measured: the network fitted to the replays raced the no-learning network at −12.5 ± 20.7 (their build is not REAL-v0); on demand: preset "Lean on my replays"
+  demoFade: 10,
+  cmaPop: 12,
+  cmaMatches: 6,
+  cmaSigma: 0.5,
+  raceMatches: 12,
+  examMatches: 64,
+  examEvery: 10,
+  searchExam: true,
 };
 export interface Preset {
   id: string;
@@ -100,217 +143,152 @@ export const PRESETS: Preset[] = [
   {
     id: 'balanced',
     label: 'Balanced',
-    blurb: 'The default. 128 robots; the best 3 of every generation checked on 8 validation matches; a new champion must beat the old one on 12 fresh matches; 15% behaviour mutations; students learning from your replays (their share adapts); all cores but one.',
+    blurb: 'The default. 20 matches of lessons per generation (every option played out 15 s at every job start, 2 luck draws), 12 skill settings tried, a new champion must win over fresh matches, a 64-match exam for every new champion. All cores but one.',
     change: { ...BALANCED },
   },
   {
     id: 'full-push',
     label: 'Full push',
-    blurb: 'Maximum results, maximum load. 256 robots on 2 matches each (half the luck in the ranking), the best 4 checked on 16 validation matches, a new champion must win over 24 fresh matches, 6 elites, every core. About 4× the time per generation.',
-    change: { ...BALANCED, pop: 256, episodes: 2, elite: 6, validateTop: 4, valEpisodes: 16, confirmEpisodes: 24, workers: CORES },
-  },
-  {
-    id: 'explore',
-    label: 'Explore new strategies',
-    blurb: 'For when it has stalled. Bigger mutations, 30% behaviour mutations, 10% brand-new random robots, weaker selection. Scores drop for a while; new orders get tried.',
-    change: { ...BALANCED, pop: 192, sigma: 0.1, mutProb: 0.3, macroRate: 0.3, immigrants: 0.1, imitRate: 0.05, imitMin: 0.02, imitMax: 0.2, elite: 2, tournament: 2, truncation: 0.35, crossRate: 0.4 },
-  },
-  {
-    id: 'refine',
-    label: 'Refine the champion',
-    blurb: 'For polishing a good strategy. Small mutations, 3 matches per robot for accurate ranking, 8 elites, the best 5 proven on 16 validation matches.',
-    change: { ...BALANCED, episodes: 3, sigma: 0.02, mutProb: 0.1, crossRate: 0.2, elite: 8, tournament: 4, truncation: 0.2, immigrants: 0, imitRate: 0.05, imitMin: 0.02, imitMax: 0.15, validateTop: 5, valEpisodes: 16, confirmEpisodes: 24 },
+    blurb: 'The most learning per hour, the Mac fully busy. 40 matches of lessons per generation, 6 generations of lessons remembered, 16 skill settings on 8 matches each, 24 fresh race matches. Every core.',
+    change: { ...BALANCED, workers: CORES, collect: 40, window: 6, cmaPop: 16, cmaMatches: 8, raceMatches: 24 },
   },
   {
     id: 'replays',
-    label: 'Learn from my replays',
-    blurb: 'A third of every generation takes a longer lesson from your replays (up to half if it pays off). Use after adding new replays.',
-    change: { ...BALANCED, imitRate: 0.3, imitMin: 0.15, imitMax: 0.5, lessonSteps: 80, immigrants: 0.02 },
+    label: 'Lean on my replays',
+    blurb: 'Your replays\' decisions are mixed into what every candidate learns, as much as the robot\'s own lessons at first, fading out over 30 generations. Off by default: your replays drove a different robot, and a network fitted to them alone lost to the no-learning robot (−12.5 over 24 matches). The race still decides.',
+    change: { ...BALANCED, demoWeight: 1, demoFade: 30 },
   },
   {
     id: 'quick',
     label: 'Quick look',
-    blurb: '32 robots, fast generations for watching and testing settings. Noisy; not for real results.',
-    change: { ...BALANCED, pop: 32, elite: 2, validateTop: 1, valEpisodes: 4, confirmEpisodes: 6 },
+    blurb: '6 matches of lessons, 8 s play-outs, a 16-match exam without look-ahead. For watching and testing settings; not for real results.',
+    change: { ...BALANCED, collect: 6, horizon: 8, rounds: 1, window: 2, cmaPop: 6, cmaMatches: 3, raceMatches: 6, examMatches: 16, examEvery: 5, searchExam: false },
   },
   {
     id: 'background',
     label: 'Background',
-    blurb: 'Keeps the Mac usable: half the cores, 64 robots.',
-    change: { ...BALANCED, pop: 64, elite: 3, validateTop: 2, workers: Math.max(1, Math.floor(CORES / 2)) },
+    blurb: 'Keeps the Mac usable: half the cores, 10 matches of lessons per generation.',
+    change: { ...BALANCED, workers: Math.max(1, Math.floor(CORES / 2)), collect: 10, cmaPop: 8 },
   },
 ];
 
-export function defaultConfig(name: string, algo: AlgoName = 'ga'): RunConfig {
-  const c: RunConfig = {
-    name,
-    ...DEFAULTS[algo],
-    algo,
-    seed: 1,
-    profile: 'profiles/real-v0.json',
-    sampleProfile: true,
-    driver: 'oracle',
-    stage: 'full',
-    curriculum: { autoScore: 60, holdGens: 20, minGens: 30, maxGens: 3000 },
-    annealGens: 1000,
-    shaping: { ...DEFAULT_SHAPING },
-    penalty: { ...DEFAULT_PENALTY },
-    init: 'imitation',
-    keepGens: 300,
-    ckEvery: 10,
-    ckKeep: 30,
-    maxGens: 0,
-    ...(algo === 'ga' ? BALANCED : { pop: BALANCED.pop, episodes: 1, validateTop: 3, valEpisodes: 8, confirmEpisodes: 12, workers: BALANCED.workers }),
-    preset: '',
-  };
+export function defaultConfig(name: string): RunConfig {
+  const c: RunConfig = { name, seed: 1, profile: 'profiles/real-v0.json', sampleProfile: true, driver: 'oracle', ...BALANCED, keepGens: 60, ckEvery: 5, ckKeep: 30, maxGens: 0, preset: '' };
   c.preset = presetOf(c);
   return c;
 }
 
-export interface GenSummary {
-  gen: number;
-  stage: Stage;
-  shaping: number;
-  best: number;
-  mean: number;
-  median: number;
-  p90: number;
-  bestScore: number;
-  meanScore: number;
-  deaths: Record<Death, number>;
-  meanLifeS: number;
-  spawnedTotal: number;
-  matchesTotal: number;
-  simHoursTotal: number;
-  wallS: number;
-  robotsPerMin: number;
-  bestEver: number;
-  bestEverScore: number;
-  newBest: boolean;
-  /** how this generation's robots were made */
-  ops: Record<string, number>;
-  meanMuts: number;
-  bestOp: string;
-  /** mean share of decisions per option kind across the population */
-  choices: Record<string, number>;
-  meanTips: number;
-  /** champion: validated mean score and its 95 % half-width */
-  champScore: number;
-  champCi: number;
-  /** champion test of this generation's candidate: paired difference on fresh matches */
-  confirm: { id: number; diff: number; se: number; n: number; promoted: boolean } | null;
-  /** candidates validated this generation: id, mean score, mean fitness */
-  validated: { id: number; score: number; fitness: number; ci: number }[];
-  /** share of each operator's children that reached the parent set (this generation / smoothed) */
-  opRates: Record<string, number>;
-  opSmooth: Record<string, number>;
-  /** share of the next generation made as students */
-  imitShare: number;
-}
-
-export interface Val {
-  fitness: number; // mean over the validation matches (score − penalties, no hints)
-  score: number;
-  sd: number;
-  ci95: number; // on the score
-  n: number;
-  key: string; // what it was validated on (stage, matches, robot, penalties) — changes force a re-check
-}
-
-export interface Best {
-  fitness: number;
-  score: number;
-  gen: number;
-  genome: string;
-  parts: Parts;
+// ─────────────────────────────── records ───────────────────────────────
+/** where a robot came from */
+export interface Lineage {
   id: number;
-  val: Val | null; // null: chosen by one match (validation off)
-  conf?: Conf | null; // its results on fresh test matches (never selected on), summed
-  baseline?: boolean; // the no-learning robot as a network, the bar the run started with
+  op: 'baseline' | 'replays' | 'lessons' | 'skills' | 'champion';
+  parents: number[];
+  muts: number;
+  born: number;
 }
-/** running sums of a robot's results on fresh matches */
+/** running sums of rewards on fresh matches */
 export interface Conf {
   n: number;
-  fit: number;
-  fitSq: number;
-  score: number;
-  scoreSq: number;
+  sum: number;
+  sumSq: number;
 }
-/** a contender racing the champion: its paired advantage (fitness − champion's, same fresh matches) */
+export function confStats(c: Conf): { score: number; ci95: number; n: number } {
+  const m = c.sum / Math.max(1, c.n);
+  const v = c.n > 1 ? Math.max(0, (c.sumSq - c.n * m * m) / (c.n - 1)) : 0;
+  return { score: m, ci95: c.n > 1 ? (1.96 * Math.sqrt(v)) / Math.sqrt(c.n) : 0, n: c.n };
+}
+const addConf = (c: Conf | null, rs: number[]): Conf => {
+  const o = c ? { ...c } : { n: 0, sum: 0, sumSq: 0 };
+  for (const r of rs) {
+    o.n++;
+    o.sum += r;
+    o.sumSq += r * r;
+  }
+  return o;
+};
+export interface MeanCi {
+  mean: number;
+  ci95: number;
+  n: number;
+}
+const meanCi = (v: number[]): MeanCi => {
+  const n = v.length;
+  const mean = v.reduce((a, b) => a + b, 0) / Math.max(1, n);
+  const sd = n > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;
+  return { mean, ci95: n > 1 ? (1.96 * sd) / Math.sqrt(n) : 0, n };
+};
+/** mean of the worst fifth */
+const tail = (v: number[]): number => {
+  const s = [...v].sort((a, b) => a - b);
+  const k = Math.max(1, Math.floor(s.length / 5));
+  return s.slice(0, k).reduce((a, b) => a + b, 0) / k;
+};
+
+export interface ExamResult {
+  gen: number;
+  time: string;
+  hours: number; // training hours when it was taken
+  champ: number;
+  champOp: string;
+  net: MeanCi & { tips: number }; // the champion's network alone
+  vsBase: MeanCi; // paired, against the no-learning robot on the same matches
+  search: (MeanCi & { vsNet: MeanCi; vsBase: MeanCi; changed: number }) | null; // thinking ahead during the match
+  mistakes: Mistakes; // per match, the network alone
+  gap: GapRow[]; // you on your replays · the champion on your build, same matches · the champion on REAL-v0
+  checks: { deterministic: boolean; dsim: { ok: boolean; exact: boolean; detail: string } | null };
+}
+
 export interface ArenaEntry {
   id: number;
   genome: string;
   lineage: Lineage;
-  val: Val | null;
-  since: number; // generation it entered
-  n: number;
-  sd: number; // Σ differences
-  sd2: number; // Σ squared differences
-  conf: Conf | null; // its own results on those matches
+  since: number;
+  pairs: [number, number][]; // (its reward, the champion's) on the same fresh matches
+  fit?: FitReport;
 }
-/** contenders raced at once */
-export const ARENA = 3;
-/** Pocock boundary (Pocock 1977), one-sided α = 0.05 over up to ~10 looks (≈ 2.23 for 8, 2.28 for 10;
- * rounded up): looking at the accumulating evidence every generation keeps the chance of promoting a
- * contender that is NOT better near 5 % per contender. (Three race at once, so a merely EQUAL robot
- * can occasionally take over — harmless; a worse one practically never.) */
-export const Z_PROMOTE = 2.3;
-/** a contender this far below the champion (z) is dropped */
-export const Z_DROP = 1.645;
-/** the most fresh matches a contender gets to prove itself (8 looks at the default 12) */
-export const RACE_MAX = 96;
-function diffStats(a: ArenaEntry): { mean: number; se: number } {
-  if (a.n < 2) return { mean: a.n ? a.sd / a.n : 0, se: Infinity };
-  const mean = a.sd / a.n;
-  const v = Math.max(0, (a.sd2 - a.n * mean * mean) / (a.n - 1));
-  return { mean, se: Math.sqrt(v / a.n) };
-}
-/** the contender's paired z-score against the champion (0 without evidence) */
-export function zOf(a: ArenaEntry): number {
-  const { mean, se } = diffStats(a);
-  return se > 0 && Number.isFinite(se) ? mean / se : 0;
+export interface Champ {
+  id: number;
+  genome: string;
+  lineage: Lineage;
+  born: number;
+  conf: Conf | null; // its rewards on fresh race matches
+  exam: ExamResult | null;
+  parts: Parts | null; // its showcase match
 }
 
-/** has the champion been measured yet (the starting baseline has not, before generation 0) */
-const scored = (b: Best | null): boolean => !!b && Number.isFinite(b.fitness);
-function addConf(c: Conf | null, rs: EpisodeResult[]): Conf {
-  const o = c ? { ...c } : { n: 0, fit: 0, fitSq: 0, score: 0, scoreSq: 0 };
-  for (const r of rs) {
-    o.n++;
-    o.fit += r.fitness;
-    o.fitSq += r.fitness * r.fitness;
-    o.score += r.score;
-    o.scoreSq += r.score * r.score;
-  }
-  return o;
-}
-/** mean fitness, mean score and the 95 % half-width of the score */
-export function confStats(c: Conf): { fitness: number; score: number; ci95: number; n: number } {
-  const m = c.score / c.n;
-  const v = c.n > 1 ? Math.max(0, (c.scoreSq - c.n * m * m) / (c.n - 1)) : 0;
-  return { fitness: c.fit / c.n, score: m, ci95: c.n > 1 ? (1.96 * Math.sqrt(v)) / Math.sqrt(c.n) : 0, n: c.n };
-}
-
-/** checkpoint format: 4 = thinking on the go (option 'position', 'current' feature, stick gene) */
-export const CK_VERSION = 4;
-const LEGACY: Record<number, string> = {
-  1: 'made by the first training version (a raw joystick policy — the one that never learned to shoot)',
-  2: 'made before the group-intake skills and the new network (its robots cannot run on them)',
-  3: 'made before the robots learned to think on the go (the network gained inputs; its robots cannot run on it)',
-};
-
-interface Checkpoint {
-  version: number;
-  config: RunConfig;
-  algoState: object;
-  stage: Stage;
-  autoHeld: number; // consecutive gens at/above the curriculum AUTO score
-  totals: { spawned: number; matches: number; simSeconds: number; wallSeconds: number; deaths: Record<Death, number> };
-  bestEver: Best | null;
-  demoKey: string; // the data set (team replays) students learn from; '' = none
-  experience: Packed | null; // the champion's own decisions
-  valCache: Record<string, Val>; // candidates already validated (by id), for the ones still alive
-  arena?: ArenaEntry[]; // contenders racing the champion on fresh matches
+export interface GenSummary {
+  gen: number;
+  time: string;
+  hours: number;
+  wallS: number;
+  phases: { collect: number; learn: number; race: number; exam: number };
+  matchesTotal: number;
+  simHoursTotal: number;
+  lessonsTotal: number;
+  // the champion's own play this generation (the collected matches)
+  meanScore: number;
+  bestScore: number;
+  meanReward: number;
+  deaths: Record<Death, number>;
+  meanTips: number;
+  mistakes: Mistakes; // per match
+  choices: Record<string, number>; // share of job decisions per option kind
+  lessons: number;
+  regret: number; // points the champion's choice lost to the best what-if, per lesson decision
+  fit: FitReport | null;
+  value: { rmse: number; startRmse: number; samples: number } | null;
+  cma: { gen: number; sigma: number; best: number; mean: number; entered: boolean } | null;
+  arena: { id: number; op: string; n: number; diff: number; se: number; z: number }[];
+  confirm: { id: number; op: string; diff: number; se: number; n: number; promoted: boolean } | null;
+  champId: number;
+  champOp: string;
+  champScore: number; // running mean reward on fresh race matches
+  champCi: number;
+  champN: number;
+  newChamp: boolean;
+  exam: ExamResult | null;
+  matchesPerMin: number;
 }
 
 export interface CheckpointMeta {
@@ -320,9 +298,9 @@ export interface CheckpointMeta {
   auto: boolean;
   pinned: boolean;
   time: string;
-  bestFitness: number | null;
-  bestScore: number | null;
-  config: Pick<RunConfig, 'algo' | 'pop' | 'sigma' | 'lr' | 'elite' | 'crossRate' | 'mutProb'> & { preset?: string };
+  champScore: number | null;
+  exam: number | null; // the champion's exam score then
+  config: { preset?: string; collect: number; horizon: number };
 }
 
 export interface EvalResult {
@@ -341,113 +319,141 @@ export interface EvalResult {
   time: string;
 }
 
+/** 5 = learning from every decision (what-if lessons, predictor, CMA-ES skills, racing, exam) */
+export const CK_VERSION = 5;
+const LEGACY: Record<number, string> = {
+  1: 'made by the first training version (a raw joystick policy)',
+  2: 'made before the group-intake skills',
+  3: 'made before the robots learned to think on the go',
+  4: 'made by the evolution trainer (replaced by learning from every decision)',
+};
+
+interface Checkpoint {
+  version: number;
+  config: RunConfig;
+  gen: number;
+  nextId: number;
+  champion: Champ;
+  value: string | null;
+  arena: ArenaEntry[];
+  cma: CmaState | null;
+  cmaRestarts?: number; // IPOP: each restart doubles the skill settings tried
+  totals: { matches: number; simSeconds: number; wallSeconds: number; lessons: number; deaths: Record<Death, number> };
+  demoKey: string;
+  baseExam: number[] | null; // the no-learning robot's exam rewards, match by match
+  lastGenAt: string | null;
+}
+
 const EVAL_SEED = 777_000;
 const now = (): string => new Date().toISOString();
-const meanSd = (v: number[]): { mean: number; sd: number; ci95: number } => {
-  const mean = v.reduce((a, b) => a + b, 0) / Math.max(1, v.length);
-  const sd = v.length > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (v.length - 1)) : 0;
-  return { mean, sd, ci95: v.length > 1 ? (1.96 * sd) / Math.sqrt(v.length) : 0 };
-};
-/** the preference genes a behaviour mutation may shift: skip weights on the option-kind features */
-const PREF_GENES = OPTION_KINDS.map((_, k) => skipOffset(SHAPE) + N_OBS + k);
-const PROBES = 256;
-
+const seed7 = (...p: (number | string)[]): number => seedOf(...p) % 1_000_000_007;
 function atomicWrite(p: string, data: string | Buffer): void {
   writeFileSync(p + '.tmp', data);
   renameSync(p + '.tmp', p); // a crash never leaves a half-written file
 }
+const STYLE_AT = styleOffset(SHAPE);
+const styleOf = (genome: string): number[] => Array.from(fromB64(genome).subarray(STYLE_AT, STYLE_AT + STYLE.length));
+const withStyle = (genome: string, genes: number[]): string => {
+  const p = fromB64(genome);
+  p.set(genes, STYLE_AT);
+  return toB64(p);
+};
+function diffStats(a: ArenaEntry): { mean: number; se: number } {
+  const n = a.pairs.length;
+  if (n < 2) return { mean: n ? a.pairs[0][0] - a.pairs[0][1] : 0, se: Infinity };
+  const d = a.pairs.map(([x, y]) => x - y);
+  const mean = d.reduce((s, v) => s + v, 0) / n;
+  const v = d.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1);
+  return { mean, se: Math.sqrt(v / n) };
+}
+export function zOf(a: ArenaEntry): number {
+  const { mean, se } = diffStats(a);
+  return se > 0 && Number.isFinite(se) ? mean / se : 0;
+}
+const emptyMistakes = (): Mistakes => ({ missedShots: 0, emptyTrips: 0, emptyTripS: 0, blockedShots: 0, blockedShotS: 0, idleS: 0, fouls: 0, regret: 0, regretN: 0 });
+function meanMistakes(rs: EpisodeResult[]): Mistakes {
+  const m = emptyMistakes();
+  for (const r of rs) for (const k of Object.keys(m) as (keyof Mistakes)[]) m[k] += r.mistakes[k] / Math.max(1, rs.length);
+  return m;
+}
+const played = (r: EpisodeResult): Played => ({ points: r.score, parts: r.parts, activity: r.activity, loads: r.loads });
 
 export class Engine extends EventEmitter {
   readonly dir: string;
-  private algo: Algo;
   private ck: Checkpoint;
   private pool: WorkerPool | null = null;
   private stopFlag = false;
   private abortFlag = false;
-  private stepsLeft = -1; // -1 = run on; n = run n more generations, then pause
+  private keepFlag = false;
+  private stepsLeft = -1;
   private evalQueue: { target: string; n: number; resolve: (r: EvalResult) => void; reject: (e: Error) => void }[] = [];
   private loop: Promise<void> | null = null;
-  private busy = false; // inside a generation
-  private pendingCk: string[] = []; // named checkpoints asked for mid-generation
-  private demoCache: { key: string; samples: Sample[] } | null = null;
+  private busy = false;
+  private pendingCk: string[] = [];
+  private awake: ChildProcess | null = null;
   paused = false;
   running = false;
   private _phase: 'idle' | 'generation' | 'evaluating' | 'paused' = 'idle';
   get phase(): 'idle' | 'generation' | 'evaluating' | 'paused' {
     return this._phase;
   }
-  /** every phase change reaches the viewer (its buttons depend on it) */
   set phase(p: 'idle' | 'generation' | 'evaluating' | 'paused') {
     if (p === this._phase) return;
     this._phase = p;
     this.emit('state');
   }
 
-  /** open an existing run */
   static open(name: string): Engine {
     const dir = join(RUNS, name);
     if (!existsSync(join(dir, 'checkpoint.json'))) throw new Error(`no run called "${name}"`);
     const ck = JSON.parse(readFileSync(join(dir, 'checkpoint.json'), 'utf8')) as Checkpoint;
-    const v = ck.version ?? 1; // the first version wrote no version number
+    const v = ck.version ?? 1;
     if (v !== CK_VERSION) throw new Error(`"${name}" was ${LEGACY[v] ?? `made by another version (${v})`}; it cannot continue. Its files are untouched; start a new run`);
     return new Engine(dir, ck);
   }
 
-  /** create a new run (never overwrites one). With init 'imitation' the replays must already be
-   * fitted (the studio does that in a worker) or they are fitted here (~20 s). */
+  /** create a new run (never overwrites one). The replays, the distilled no-learning network and
+   * the starting predictor must be built (the studio does that in a worker) or are built here. */
   static create(cfg: RunConfig, log: (s: string) => void = () => {}): Engine {
     if (!NAME_RE.test(cfg.name)) throw new Error('run names use letters, digits, - and _ (up to 48)');
-    const err = validate(cfg) ?? checkRun(cfg);
+    const err = checkRun(cfg);
     if (err) throw new Error(err);
     const dir = join(RUNS, cfg.name);
     if (existsSync(join(dir, 'checkpoint.json'))) throw new Error(`run "${cfg.name}" already exists`);
     const data = ensureData(log);
-    // generation 0 starts AT the bar: the no-learning robot distilled into a network is always a seed,
-    // and the network fitted to your replays is the other one (when there are replays)
-    let init: { genome: Float32Array; op: 'seed' | 'greedy' }[] | undefined;
     const greedy = ensureGreedy(log).genome;
-    if (cfg.init === 'imitation') {
-      init = [...(data ? [{ genome: fromB64(data.report.genome), op: 'seed' as const }] : []), { genome: fromB64(greedy), op: 'greedy' as const }];
-      if (!data) log('no replays in "Training data/": generation 0 starts from the no-learning robot as a network');
-    }
+    const value = ensureValue(log);
     const ck: Checkpoint = {
       version: CK_VERSION,
       config: cfg,
-      algoState: {},
-      stage: cfg.stage === 'auto' || cfg.stage === 'curriculum' ? 'auto' : 'full',
-      autoHeld: 0,
-      totals: { spawned: 0, matches: 0, simSeconds: 0, wallSeconds: 0, deaths: { survived: 0, crash: 0, stall: 0 } },
-      bestEver: null,
+      gen: 0,
+      nextId: 2,
+      // the starting champion is the no-learning robot as a network (the bar); the network fitted
+      // to your replays starts in the race against it
+      champion: { id: 0, genome: greedy, lineage: { id: 0, op: 'baseline', parents: [], muts: 0, born: 0 }, born: 0, conf: null, exam: null, parts: null },
+      value: value.genome,
+      arena: data ? [{ id: 1, genome: data.report.genome, lineage: { id: 1, op: 'replays', parents: [], muts: 0, born: 0 }, since: 0, pairs: [] }] : [],
+      cma: null,
+      totals: { matches: 0, simSeconds: 0, wallSeconds: 0, lessons: 0, deaths: { survived: 0, crash: 0, stall: 0 } },
       demoKey: data?.key ?? '',
-      experience: null,
-      valCache: {},
+      baseExam: null,
+      lastGenAt: null,
     };
-    // THE STARTING CHAMPION is the no-learning robot as a network — the bar. With the champion test
-    // on, a robot replaces it only by beating it on fresh matches, so the champion can never be
-    // worse than the baseline (the first version crowned generation 0's validated best without a
-    // test, and it lost 14 of 16 unseen matches to the baseline)
-    if (cfg.confirmEpisodes > 0) {
-      const gi = cfg.init === 'imitation' ? (data ? 1 : 0) : -1; // its id in generation 0, if it is there
-      ck.bestEver = { fitness: -Infinity, score: 0, gen: 0, genome: greedy, parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, id: gi, val: null, conf: null, baseline: true };
-    }
     mkdirSync(join(dir, 'gens'), { recursive: true });
     mkdirSync(join(dir, 'checkpoints'), { recursive: true });
-    const e = new Engine(dir, ck, init);
+    mkdirSync(join(dir, 'lessons'), { recursive: true });
+    const e = new Engine(dir, ck);
     e.save();
-    e.event(`created: ${cfg.algo.toUpperCase()}, population ${cfg.pop}, ${cfg.init === 'imitation' ? `generation 0 = ${data ? 'the network fitted to your replays, ' : ''}the no-learning robot as a network, their mutants and random robots` : 'random generation 0'}${data ? `; students learn from ${data.report.files.filter((f) => f.samples > 0).length} replays` : ''}`);
+    e.event(`created: the champion starts as the no-learning robot (a network); ${data ? `the network fitted to your ${data.report.files.filter((f) => f.samples > 0).length} replays races it from generation 0` : 'no replays to race it'}; the rest-of-match predictor starts off by ${value.rmse.toFixed(0)} points`);
     e.saveCheckpoint('start', false, true);
     return e;
   }
 
-  private constructor(dir: string, ck: Checkpoint, init?: { genome: Float32Array; op: 'seed' | 'greedy' }[]) {
+  private constructor(dir: string, ck: Checkpoint) {
     super();
     this.dir = dir;
     this.ck = ck;
-    mkdirSync(join(dir, 'gens'), { recursive: true });
-    mkdirSync(join(dir, 'checkpoints'), { recursive: true });
-    const restore = init || !Object.keys(ck.algoState).length ? undefined : ck.algoState;
-    this.algo = makeAlgo({ ...ck.config }, SHAPE, restore, init, PREF_GENES, this.teacher());
-    if (!restore) this.ck.algoState = this.algo.state();
+    for (const d of ['gens', 'checkpoints', 'lessons']) mkdirSync(join(dir, d), { recursive: true });
   }
 
   get name(): string {
@@ -457,71 +463,47 @@ export class Engine extends EventEmitter {
     return this.ck.config;
   }
   get gen(): number {
-    return this.algo.gen;
+    return this.ck.gen;
   }
   get totals(): Checkpoint['totals'] {
     return this.ck.totals;
   }
-  get bestEver(): Best | null {
-    return this.ck.bestEver;
+  get champion(): Champ {
+    return this.ck.champion;
   }
-  get stage(): Stage {
-    return this.ck.stage;
+  get arena(): ArenaEntry[] {
+    return this.ck.arena;
   }
-  /** the data set this run's students learn from, and whether it is still on disk */
-  get data(): { key: string; onDisk: boolean; latest: string; experience: number } {
-    return { key: this.ck.demoKey, onDisk: hasSet(this.ck.demoKey), latest: currentKey(), experience: this.ck.experience?.n ?? 0 };
+  get lastGenAt(): string | null {
+    return this.ck.lastGenAt;
+  }
+  get data(): { key: string; onDisk: boolean; latest: string } {
+    return { key: this.ck.demoKey, onDisk: hasSet(this.ck.demoKey), latest: currentKey() };
   }
 
-  history(): GenSummary[] {
-    const p = join(this.dir, 'metrics.jsonl');
+  private readLines<T>(f: string): T[] {
+    const p = join(this.dir, f);
     if (!existsSync(p)) return [];
-    return readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as GenSummary);
+    return readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as T);
+  }
+  history(): GenSummary[] {
+    return this.readLines<GenSummary>('metrics.jsonl');
   }
   events(): { time: string; gen: number; text: string }[] {
-    const p = join(this.dir, 'events.jsonl');
-    if (!existsSync(p)) return [];
-    return readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { time: string; gen: number; text: string });
+    return this.readLines('events.jsonl');
   }
   evals(): EvalResult[] {
-    const p = join(this.dir, 'evals.jsonl');
-    if (!existsSync(p)) return [];
-    return readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as EvalResult);
+    return this.readLines<EvalResult>('evals.jsonl');
   }
-
-  /** a line in the run's event log (also shown live) */
+  exams(): ExamResult[] {
+    return this.readLines<ExamResult>('exams.jsonl');
+  }
   event(text: string): void {
-    const e = { time: now(), gen: this.gen, text };
-    appendFileSync(join(this.dir, 'events.jsonl'), JSON.stringify(e) + '\n');
+    appendFileSync(join(this.dir, 'events.jsonl'), JSON.stringify({ time: now(), gen: this.gen, text }) + '\n');
     this.emit('log', text);
   }
 
-  // ─────────────────────────────── the teacher ───────────────────────────────
-  /** what students learn from: the run's pinned data set + the champion's decisions. A function of
-   * the checkpoint only, so a rewound run re-learns exactly as before. */
-  private teacher(): Teacher {
-    const key = this.ck.demoKey;
-    if (this.demoCache?.key !== key) {
-      let samples: Sample[] = [];
-      if (key && hasSet(key)) {
-        try {
-          samples = setSamples(loadSet(key));
-        } catch {
-          samples = [];
-        }
-      }
-      this.demoCache = { key, samples };
-    }
-    const demos = this.demoCache.samples;
-    const exp = this.ck.experience ? unpack(this.ck.experience, N_OBS, N_OPT_FEATS) : [];
-    // probe decisions: evenly spread over the replays, then the champion's own
-    const nd = Math.min(demos.length, PROBES - Math.min(exp.length, 64));
-    const probes = [...Array.from({ length: nd }, (_, i) => demos[Math.floor((i * demos.length) / nd)]), ...exp.slice(0, PROBES - nd)];
-    return { demos, exp, probes };
-  }
-  /** switch this run's students to another data set (the latest by default). Mid-generation it
-   * waits for the generation to end — a data set changes only between generations, so a rewind
-   * re-learns exactly as before. */
+  /** switch the replays used as demonstrations (the latest set by default) */
   useData(key = currentKey()): void {
     if (key && !hasSet(key)) throw new Error('that data set is not built yet — refresh the training data first');
     if (this.busy) {
@@ -533,18 +515,42 @@ export class Engine extends EventEmitter {
     if (key === this.ck.demoKey) return;
     this.ck.demoKey = key;
     this.save();
-    const n = key ? this.teacher().demos.length : 0;
-    this.event(key ? `students now learn from the refreshed training data (${n} demonstrations) from generation ${this.gen}` : 'students no longer learn from replays');
+    this.event(key ? `your replays (the refreshed set) are used as demonstrations from generation ${this.gen}` : 'your replays are no longer used');
     this.emit('state');
   }
   private pendingData: string | null = null;
 
   // ─────────────────────────────── control ───────────────────────────────
-  /** start (or continue) training in the background */
+  private flagPath(): string {
+    return join(this.dir, '.training');
+  }
+  /** true when this run was training (not paused) when the studio last closed */
+  get wasTraining(): boolean {
+    return existsSync(this.flagPath());
+  }
+  private setFlag(on: boolean): void {
+    if (on) writeFileSync(this.flagPath(), now());
+    else rmSync(this.flagPath(), { force: true });
+  }
+  /** macOS: no idle or system sleep while training (released when training stops) */
+  private stayAwake(on: boolean): void {
+    if (process.platform !== 'darwin') return;
+    if (on && !this.awake) {
+      this.awake = spawn('caffeinate', ['-ims', '-w', String(process.pid)], { stdio: 'ignore' });
+      this.awake.on('error', () => (this.awake = null));
+    } else if (!on && this.awake) {
+      this.awake.kill();
+      this.awake = null;
+    }
+  }
+
   start(steps = -1): void {
     this.stepsLeft = steps;
     this.paused = false;
     this.stopFlag = false;
+    this.keepFlag = false;
+    this.setFlag(steps < 0);
+    this.stayAwake(true);
     if (this.loop) {
       this.emit('state');
       return;
@@ -554,6 +560,8 @@ export class Engine extends EventEmitter {
       this.loop = null;
       this.running = false;
       this.phase = 'idle';
+      if (!this.keepFlag) this.setFlag(false);
+      this.stayAwake(false);
       this.emit('stopped');
       this.emit('state');
     });
@@ -561,81 +569,70 @@ export class Engine extends EventEmitter {
   }
   pause(): void {
     this.paused = true;
+    this.setFlag(false);
+    this.stayAwake(false);
     this.emit('log', 'pausing after this generation');
     this.emit('state');
   }
   resume(): void {
     this.stepsLeft = -1;
     this.paused = false;
+    this.setFlag(true);
+    this.stayAwake(true);
     this.emit('state');
   }
-  /** finish this generation, checkpoint, stop */
   stop(): void {
     this.stopFlag = true;
     this.paused = false;
     this.emit('log', 'stop requested — finishing this generation, then checkpointing');
     this.emit('state');
   }
-  /** throw away the generation in progress (nothing of it is kept) and stop */
   abort(): void {
     this.stopFlag = true;
     this.paused = false;
     if (this.busy) {
       this.abortFlag = true;
       this.pool?.close();
-      this.emit('log', 'generation aborted — its robots are discarded; the run is exactly as it was before it started');
+      this.emit('log', 'generation aborted — nothing of it is kept; the run is exactly as it was before it started');
     }
     this.emit('state');
   }
-  /** resolves when the training loop has fully stopped */
-  async halt(abort = false): Promise<void> {
+  /** stop the loop. `keep`: the studio is closing, not the user stopping — training resumes by
+   * itself the next time the studio starts */
+  async halt(abort = false, keep = false): Promise<void> {
     if (!this.loop) return;
+    this.keepFlag = keep && this.wasTraining;
     if (abort) this.abort();
     else this.stop();
     await this.loop;
   }
 
-  private shaping(): number {
-    return Math.max(0, 1 - this.algo.gen / Math.max(1, this.ck.config.annealGens));
-  }
-
-  private job(genome: string | null, seed: number, o: { stage?: Stage; track?: boolean; frames?: boolean; record?: boolean; samples?: boolean; shaping?: number } = {}): Job {
+  private job(genome: string | null, seed: number, o: Partial<EpisodeArgs> = {}): Job {
     const c = this.ck.config;
-    const args: EpisodeArgs = {
-      genome,
-      profile: c.profile,
-      sampleProfile: c.sampleProfile,
-      seed,
-      stage: o.stage ?? this.ck.stage,
-      shaping: o.shaping ?? this.shaping(),
-      weights: { shaping: c.shaping, penalty: c.penalty },
-      driver: c.driver,
-      track: o.track ?? false,
-      frames: o.frames ?? false,
-      record: o.record ?? false,
-      samples: o.samples ?? false,
-    };
+    const args: EpisodeArgs = { genome, profile: c.profile, sampleProfile: c.sampleProfile, seed, stage: 'full', driver: c.driver, track: false, record: false, ...o };
     return { module: '../train/episode.ts', fn: 'runEpisode', args };
   }
-  private genSeed(gen: number, e: number): number {
-    return seedOf(this.ck.config.seed, 'episode', gen, e) % 1_000_000_007; // common random numbers across the generation
-  }
-  /** the run's fixed validation matches (never used for training, never the evaluation seeds) */
-  private valSeed(k: number): number {
-    return seedOf(this.ck.config.seed, 'validate', k) % 1_000_000_007;
-  }
-  /** what a validation result is only comparable within */
-  private valKey(): string {
-    const c = this.ck.config;
-    return JSON.stringify([this.ck.stage, c.valEpisodes, c.profile, c.sampleProfile, c.driver, c.penalty]);
-  }
-
   private ensurePool(): WorkerPool {
     if (!this.pool || this.pool.size !== this.ck.config.workers) {
       this.pool?.close();
       this.pool = new WorkerPool(this.ck.config.workers);
     }
     return this.pool;
+  }
+  private check(): void {
+    if (this.abortFlag) throw new Error('aborted');
+  }
+  private async map<T>(jobs: Job[], stage: string): Promise<T[]> {
+    const gen = this.gen;
+    this.emit('progress', { gen, done: 0, total: jobs.length, stage });
+    const res = await this.ensurePool().map<T>(jobs, (done, total) => this.emit('progress', { gen, done, total, stage }));
+    if (this.abortFlag || res.length !== jobs.length || res.some((r) => !r)) throw new Error('aborted');
+    return res;
+  }
+  private count(rs: EpisodeResult[]): void {
+    const T = this.ck.totals;
+    T.matches += rs.length;
+    for (const r of rs) T.simSeconds += r.ticks / 60;
   }
 
   private async runLoop(): Promise<void> {
@@ -651,6 +648,8 @@ export class Engine extends EventEmitter {
         if (this.stepsLeft === 0) {
           this.paused = true;
           this.stepsLeft = -1;
+          this.setFlag(false);
+          this.stayAwake(false);
           this.emit('log', 'step finished — paused');
           this.emit('state');
         }
@@ -667,18 +666,14 @@ export class Engine extends EventEmitter {
           await this.generation();
         } catch (e) {
           if (!this.abortFlag) throw e;
-          // an aborted generation leaves nothing behind: the in-memory run goes back to the last save,
-          // keeping only settings changed while it ran
-          const { config, stage } = this.ck;
+          const { config } = this.ck;
           this.ck = JSON.parse(saved) as Checkpoint;
           this.ck.config = config;
-          this.ck.stage = stage;
-          this.algo = makeAlgo({ ...config }, SHAPE, this.ck.algoState, undefined, PREF_GENES, this.teacher());
         } finally {
           this.busy = false;
           if (this.abortFlag) {
             this.abortFlag = false;
-            this.pool = null; // closed by abort(); a fresh one next time
+            this.pool = null;
           }
         }
         if (this.stepsLeft > 0) this.stepsLeft--;
@@ -689,292 +684,340 @@ export class Engine extends EventEmitter {
     }
   }
 
-  private check(): void {
-    if (this.abortFlag) throw new Error('aborted');
-  }
-
+  // ─────────────────────────────── one generation ───────────────────────────────
   private async generation(): Promise<void> {
     const c = this.ck.config;
-    const gen = this.algo.gen;
+    const gen = this.ck.gen;
     const t0 = performance.now();
-    const cand = this.algo.ask();
-    const lin: Lineage[] = this.algo.lineage();
-    const genomes = cand.map(toB64);
-    const jobs: Job[] = [];
-    for (let i = 0; i < cand.length; i++) for (let e = 0; e < c.episodes; e++) jobs.push(this.job(genomes[i], this.genSeed(gen, e), { track: e === 0 }));
-    this.emit('progress', { gen, done: 0, total: jobs.length });
-    const pool = this.ensurePool();
-    const res = await pool.map<EpisodeResult>(jobs, (done, total) => this.emit('progress', { gen, done, total }));
-    if (this.abortFlag || res.length !== jobs.length || res.some((r) => !r)) throw new Error('aborted');
-    const fit: number[] = [];
-    const score: number[] = [];
-    for (let i = 0; i < cand.length; i++) {
-      const rs = res.slice(i * c.episodes, (i + 1) * c.episodes);
-      fit.push(rs.reduce((t, r) => t + r.fitness, 0) / rs.length);
-      score.push(rs.reduce((t, r) => t + r.score, 0) / rs.length);
-    }
-    const order = fit.map((f, i) => [f, i] as const).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
-    const [bf, bi] = order[0];
-
-    // VALIDATION of the best few (and of the champion when what it was validated on changed), in
-    // one batch with the exact-frames re-run of the generation's best
-    const vk = this.valKey();
-    const champ = this.ck.bestEver;
-    const toVal: { i: number; id: number; genome: string }[] = [];
-    if (c.validateTop > 0) {
-      for (const [, i] of order.slice(0, c.validateTop)) {
-        const v = this.ck.valCache[lin[i].id];
-        if (!v || v.key !== vk) toVal.push({ i, id: lin[i].id, genome: genomes[i] });
-      }
-      if (champ && (!champ.val || champ.val.key !== vk) && !toVal.some((q) => q.id === champ.id)) toVal.push({ i: -1, id: champ.id, genome: champ.genome });
-    }
-    const valJobs = toVal.flatMap((q) => Array.from({ length: c.valEpisodes }, (_, k) => this.job(q.genome, this.valSeed(k), { shaping: 0 })));
-    const focusJob = this.job(genomes[bi], this.genSeed(gen, 0), { frames: true });
-    this.emit('progress', { gen, done: 0, total: valJobs.length + 1, stage: 'validating' });
-    const [focus, ...vres] = await pool.map<EpisodeResult>([focusJob, ...valJobs], (done, total) => this.emit('progress', { gen, done, total, stage: 'validating' }));
-    this.check();
-    atomicWrite(join(this.dir, 'gens', `${gen}.frames.json.gz`), gzipSync(JSON.stringify({ gen, fitness: focus.fitness, score: focus.score, death: focus.death, parts: focus.parts, lineage: lin[bi], frames: focus.frames, events: focus.events })));
-    const validated: GenSummary['validated'] = [];
-    toVal.forEach((q, k) => {
-      const rs = vres.slice(k * c.valEpisodes, (k + 1) * c.valEpisodes);
-      const s = meanSd(rs.map((r) => r.score));
-      const v: Val = { fitness: rs.reduce((a, r) => a + r.fitness, 0) / rs.length, score: s.mean, sd: s.sd, ci95: s.ci95, n: rs.length, key: vk };
-      this.ck.valCache[q.id] = v;
-      if (champ && q.id === champ.id) {
-        champ.val = v;
-        champ.fitness = v.fitness;
-        champ.score = v.score;
-        champ.conf = null; // what it is measured on changed: its running fresh-match score starts over
-        this.ck.arena = []; // …and so does every race against it
-      }
-      if (q.i >= 0) validated.push({ id: q.id, score: v.score, fitness: v.fitness, ci: v.ci95 });
-    });
-
-    // THE CHAMPION. The candidate is the best VALIDATED robot of this generation (or, with validation
-    // off, the best single match). Picking the best of many on the same validation matches inflates
-    // its score — the winner's curse; measured: validated 220, then 192 on unseen matches. So, with
-    // confirmEpisodes on, a candidate REPLACES the champion only when it beats it on brand-new matches
-    // (never used before, both robots on the same ones), by more than chance allows (one-sided 95 %
-    // paired test). The champion replays fresh matches every generation, so the score shown for it
-    // is a running mean over matches it was never selected on.
-    let newBest = false;
-    let challenger: { i: number; fitness: number; score: number; val: Val | null } | null = null;
-    if (c.validateTop > 0) {
-      for (const [, i] of order.slice(0, c.validateTop)) {
-        const v = this.ck.valCache[lin[i].id];
-        if (v && v.key === vk && (!challenger || v.fitness > challenger.fitness)) challenger = { i, fitness: v.fitness, score: v.score, val: v };
-      }
-    } else challenger = { i: bi, fitness: bf, score: score[bi], val: null };
     const T = this.ck.totals;
-    const K = c.confirmEpisodes;
-    const cur = this.ck.bestEver;
-    const isNew = !!challenger && (!cur || lin[challenger.i].id !== cur.id);
-    let confirm: GenSummary['confirm'] = null;
-    let winner: { genome: string; id: number; lineage: Lineage; val: Val | null; fitness: number; score: number; conf: Conf | null } | null = null;
-    if (K > 0 && !cur) {
-      // no champion at all (never the case for a new run, which starts with the baseline): the
-      // first validated robot takes the place
-      if (challenger) winner = { genome: genomes[challenger.i], id: lin[challenger.i].id, lineage: lin[challenger.i], val: challenger.val, fitness: challenger.fitness, score: challenger.score, conf: null };
-    } else if (K > 0 && cur) {
-      // RACING (as in irace / F-race): up to ARENA contenders stay across generations. Each generation
-      // the champion and every contender play the same K brand-new matches; each contender's paired
-      // advantage over the champion accumulates. It is promoted when that advantage crosses a
-      // group-sequential boundary (Pocock, Z_PROMOTE: safe although it is looked at every generation),
-      // dropped when it is clearly worse or has used RACE_MAX matches without proving itself.
-      const arena = (this.ck.arena ??= []);
-      if (isNew && challenger && !arena.some((a) => a.id === lin[challenger.i].id)) {
-        if (arena.length >= ARENA) arena.splice(arena.reduce((w, a, k) => (zOf(a) < zOf(arena[w]) ? k : w), 0), 1); // make room: drop the weakest
-        arena.push({ id: lin[challenger.i].id, genome: genomes[challenger.i], lineage: lin[challenger.i], val: challenger.val, since: gen, n: 0, sd: 0, sd2: 0, conf: null });
-      }
-      const fresh = Array.from({ length: K }, (_, k) => seedOf(c.seed, 'confirm', gen, k) % 1_000_000_007);
-      const who = [cur.genome, ...arena.map((a) => a.genome)];
-      const cres = await pool.map<EpisodeResult>(
-        who.flatMap((g) => fresh.map((sd) => this.job(g, sd, { shaping: 0 }))),
-        (done, total) => this.emit('progress', { gen, done, total, stage: 'confirming' }),
-      );
+    let ch = this.ck.champion;
+    const phases = { collect: 0, learn: 0, race: 0, exam: 0 };
+    let tp = performance.now();
+    const lap = (k: keyof typeof phases): void => {
+      phases[k] += (performance.now() - tp) / 1000;
+      tp = performance.now();
+    };
+
+    // 0. the first generation: the no-learning robot's exam (the bar on the exam matches) and the
+    //    starting champion's showcase
+    if (!this.ck.baseExam || this.ck.baseExam.length !== c.examMatches) {
+      const ex = Array.from({ length: c.examMatches }, (_, k) => this.job(null, seed7(EXAM_SEED, 'exam', k)));
+      const rs = await this.map<EpisodeResult>(ex, 'exam');
       this.check();
-      T.matches += cres.length;
-      for (const r of cres) T.simSeconds += r.ticks / 60;
-      const champRes = cres.slice(0, K);
-      cur.conf = addConf(cur.conf ?? null, champRes);
-      arena.forEach((a, j) => {
-        const rs = cres.slice((j + 1) * K, (j + 2) * K);
-        for (let k = 0; k < K; k++) {
-          const d = rs[k].fitness - champRes[k].fitness;
-          a.n++;
-          a.sd += d;
-          a.sd2 += d * d;
-        }
-        a.conf = addConf(a.conf, rs);
-      });
-      // the strongest contender is promoted once it crosses the boundary
-      const top = arena.reduce<ArenaEntry | null>((b, a) => (!b || zOf(a) > zOf(b) ? a : b), null);
-      if (top) {
-        const { mean, se } = diffStats(top);
-        const promoted = zOf(top) >= Z_PROMOTE;
-        confirm = { id: top.id, diff: mean, se, n: top.n, promoted };
-        this.emit('log', `champion race: #${top.id} vs champion over ${top.n} fresh matches ${mean >= 0 ? '+' : ''}${mean.toFixed(1)} ± ${(1.96 * se).toFixed(1)} (z ${zOf(top).toFixed(2)}, promote at ${Z_PROMOTE})${promoted ? ' — NEW CHAMPION' : ''}`);
-        if (promoted) {
-          const q = confStats(top.conf!);
-          winner = { genome: top.genome, id: top.id, lineage: top.lineage, val: top.val, fitness: q.fitness, score: q.score, conf: top.conf };
-          arena.splice(arena.indexOf(top), 1);
-          for (const a of arena) Object.assign(a, { n: 0, sd: 0, sd2: 0 }); // their evidence was against the old champion
-        }
-      }
-      // drop the clearly worse and the ones that had their chance
-      for (let k = arena.length - 1; k >= 0; k--) if (arena[k].n >= 2 * K && (zOf(arena[k]) <= -Z_DROP || arena[k].n >= RACE_MAX)) arena.splice(k, 1);
-      if (!winner) {
-        const q = confStats(cur.conf);
-        cur.fitness = q.fitness;
-        cur.score = q.score;
-      }
-    } else if (isNew && challenger && (!cur || challenger.fitness > cur.fitness)) {
-      winner = { genome: genomes[challenger.i], id: lin[challenger.i].id, lineage: lin[challenger.i], val: challenger.val, fitness: challenger.fitness, score: challenger.score, conf: null };
-    }
-    if (winner) {
-      newBest = true;
-      const rec = await this.showcase(pool, winner.genome, winner.lineage, gen, winner.val);
-      this.ck.bestEver = { fitness: winner.fitness, score: winner.score, gen, genome: winner.genome, parts: rec.parts, id: winner.id, val: winner.val, conf: winner.conf };
-      this.emit('best', this.ck.bestEver);
-    } else if (cur && !existsSync(join(this.dir, 'best.frames.json.gz'))) {
-      // a champion without a showcase yet (the starting baseline, or after a rewind to before one)
-      const rec = await this.showcase(pool, cur.genome, { id: cur.id, parents: [], op: cur.baseline ? 'greedy' : 'elite', muts: 0, born: cur.gen }, gen, cur.val);
-      cur.parts = rec.parts;
-      this.emit('best', cur);
+      this.count(rs);
+      this.ck.baseExam = rs.map((r) => r.reward);
+      const s = meanCi(this.ck.baseExam);
+      this.event(`exam: the no-learning robot scores ${s.mean.toFixed(1)} ± ${s.ci95.toFixed(1)} on the ${rs.length} exam matches — the bar`);
+      lap('exam');
     }
 
+    // 1. COLLECT — the champion's matches, with lessons at its decisions
+    const L = { thinkRate: c.thinkRate, horizon: Math.round(60 * c.horizon), rounds: c.rounds };
+    const cjobs = Array.from({ length: c.collect }, (_, k) => this.job(ch.genome, seed7(c.seed, 'collect', gen, k), { value: this.ck.value, lessons: L, returns: RETURNS_EVERY, track: k < TRACKED }));
+    const col = await this.map<EpisodeResult>(cjobs, 'collecting lessons');
+    this.check();
+    this.count(col);
+    const file: LessonFile = { gen, champ: ch.id, matches: col.map((r) => ({ lessons: r.lessons ?? null, values: r.values ?? null })) };
+    atomicWrite(join(this.dir, 'lessons', `${gen}.json.gz`), gzipSync(JSON.stringify(file)));
+    const nLessons = col.reduce((a, r) => a + (r.lessons?.n ?? 0), 0);
+    T.lessons += nLessons;
+    lap('collect');
+
+    // 2. LEARN — the candidate network + predictor (one worker) while CMA-ES measures skill settings
+    const fade = c.demoFade > 0 ? Math.max(0, 1 - gen / c.demoFade) : 0;
+    const gens = this.lessonGens(gen);
+    const fitArgs: FitJobArgs = { dir: this.dir, gens, start: ch.genome, value: this.ck.value, demoKey: this.ck.demoKey, opts: { epochs: c.epochs, lr: c.lr, anchor: c.anchor, demoWeight: c.demoWeight * fade, seed: seedOf(c.seed, 'fit', gen) }, valueEpochs: 30 };
+    const learnJobs: Job[] = [{ module: '../train/learn.ts', fn: 'fitJob', args: fitArgs }];
+    let cmaX: number[][] = [];
+    const cmaSeeds = Array.from({ length: c.cmaMatches }, (_, k) => seed7(c.seed, 'cma', gen, k));
+    if (c.cmaPop > 0) {
+      const base = styleOf(ch.genome);
+      if (!this.ck.cma || this.ck.cma.n !== base.length) this.ck.cma = cmaInit(base, c.cmaSigma, seedOf(c.seed, 'cma'));
+      cmaX = cmaAsk(this.ck.cma, Math.min(64, Math.max(4, c.cmaPop) * 2 ** (this.ck.cmaRestarts ?? 0))).x;
+      for (const s of cmaSeeds) learnJobs.push(this.job(ch.genome, s));
+      for (const x of cmaX) for (const s of cmaSeeds) learnJobs.push(this.job(withStyle(ch.genome, x), s));
+    }
+    const lres = await this.map<unknown>(learnJobs, 'learning');
+    this.check();
+    const fit = lres[0] as FitJobResult;
+    const cres = lres.slice(1) as EpisodeResult[];
+    this.count(cres);
+    this.ck.value = fit.value;
+    const newId = (): number => this.ck.nextId++;
+    const arena = this.ck.arena;
+    const enter = (a: ArenaEntry): void => {
+      if (arena.length >= ARENA) arena.splice(arena.reduce((w, q, k) => (zOf(q) < zOf(arena[w]) ? k : w), 0), 1);
+      arena.push(a);
+    };
+    // a candidate network enters the race only if it picks better than the champion on lessons it never saw
+    if (fit.report.regret < fit.report.startRegret) {
+      const id = newId();
+      enter({ id, genome: fit.genome, lineage: { id, op: 'lessons', parents: [ch.id], muts: 0, born: gen }, since: gen, pairs: [], fit: fit.report });
+    }
+    let cmaSum: GenSummary['cma'] = null;
+    if (c.cmaPop > 0 && this.ck.cma) {
+      const m = c.cmaMatches;
+      const champR = cres.slice(0, m).map((r) => r.reward);
+      const fitness = cmaX.map((_, i) => cres.slice(m * (i + 1), m * (i + 2)).reduce((a, r, k) => a + r.reward - champR[k], 0) / m);
+      this.ck.cma = cmaTell(this.ck.cma, cmaX, fitness);
+      if (this.ck.cma.sigma < CMA_STUCK_SIGMA) {
+        this.ck.cmaRestarts = (this.ck.cmaRestarts ?? 0) + 1;
+        this.ck.cma = cmaInit(styleOf(ch.genome), c.cmaSigma, seedOf(c.seed, 'cma', this.ck.cmaRestarts));
+        this.event(`skill search restarted (IPOP): it had narrowed to nothing; ${Math.min(64, Math.max(4, c.cmaPop) * 2 ** this.ck.cmaRestarts)} settings per generation from now on`);
+      }
+      const mean = this.ck.cma.mean;
+      const base = styleOf(ch.genome);
+      const moved = mean.some((v, i) => Math.abs(v - base[i]) > 0.02);
+      if (moved) {
+        const id = newId();
+        enter({ id, genome: withStyle(ch.genome, mean), lineage: { id, op: 'skills', parents: [ch.id], muts: 0, born: gen }, since: gen, pairs: [] });
+      }
+      cmaSum = { gen: this.ck.cma.gen, sigma: this.ck.cma.sigma, best: Math.max(...fitness), mean: fitness.reduce((a, b) => a + b, 0) / fitness.length, entered: moved };
+    }
+    lap('learn');
+
+    // 3. RACE — the champion and every contender on the same brand-new matches
+    const K = c.raceMatches;
+    const fresh = Array.from({ length: K }, (_, k) => seed7(c.seed, 'race', gen, k));
+    const who = [ch.genome, ...arena.map((a) => a.genome)];
+    const tracked = col.map((r, i) => ({ r, i })).filter((q) => q.i < TRACKED);
+    const best = tracked.reduce((b, q) => (q.r.reward > b.r.reward ? q : b), tracked[0]);
+    const focusJob = this.job(ch.genome, seed7(c.seed, 'collect', gen, best.i), { frames: true });
+    const [focus, ...rres] = await this.map<EpisodeResult>([focusJob, ...who.flatMap((g) => fresh.map((s) => this.job(g, s)))], 'racing');
+    this.check();
+    this.count([focus, ...rres]);
+    const champR = rres.slice(0, K).map((r) => r.reward);
+    ch.conf = addConf(ch.conf, champR);
+    arena.forEach((a, j) => {
+      const rs = rres.slice((j + 1) * K, (j + 2) * K);
+      rs.forEach((r, k) => a.pairs.push([r.reward, champR[k]]));
+    });
+    let confirm: GenSummary['confirm'] = null;
+    let winner: ArenaEntry | null = null;
+    const top = arena.reduce<ArenaEntry | null>((b, a) => (!b || zOf(a) > zOf(b) ? a : b), null);
+    if (top) {
+      const { mean, se } = diffStats(top);
+      const z = zOf(top);
+      const reliable = tail(top.pairs.map((p) => p[0])) >= tail(top.pairs.map((p) => p[1])) - TAIL_TOL;
+      const promoted = z >= Z_PROMOTE && reliable;
+      confirm = { id: top.id, op: top.lineage.op, diff: mean, se, n: top.pairs.length, promoted };
+      this.emit('log', `race: #${top.id} (${top.lineage.op}) vs champion over ${top.pairs.length} fresh matches ${mean >= 0 ? '+' : ''}${mean.toFixed(1)} ± ${(1.96 * se).toFixed(1)} (z ${z.toFixed(2)}, promote at ${Z_PROMOTE})${z >= Z_PROMOTE && !reliable ? ' — ahead on average but worse in its bad matches: not promoted' : ''}${promoted ? ' — NEW CHAMPION' : ''}`);
+      if (promoted) winner = top;
+    }
+    for (let k = arena.length - 1; k >= 0; k--) {
+      const a = arena[k];
+      if (a === winner) continue;
+      if (a.pairs.length >= 2 * K && (zOf(a) <= -Z_DROP || a.pairs.length >= RACE_MAX)) arena.splice(k, 1);
+    }
+    lap('race');
+
+    // 4. A NEW CHAMPION — its showcase and its exam
+    let exam: ExamResult | null = null;
+    if (winner) {
+      arena.splice(arena.indexOf(winner), 1);
+      for (const a of arena) a.pairs = []; // their evidence was against the old champion
+      const q = confStats({ n: winner.pairs.length, sum: winner.pairs.reduce((s, p) => s + p[0], 0), sumSq: winner.pairs.reduce((s, p) => s + p[0] * p[0], 0) });
+      ch = this.ck.champion = { id: winner.id, genome: winner.genome, lineage: winner.lineage, born: gen, conf: addConf(null, winner.pairs.map((p) => p[0])), exam: null, parts: null };
+      if (this.ck.cma) this.ck.cma = cmaRecenter(this.ck.cma, styleOf(ch.genome));
+      this.event(`NEW CHAMPION #${ch.id} (${ch.lineage.op === 'lessons' ? 'learned from what-if lessons' : ch.lineage.op === 'skills' ? 'tuned skill settings' : ch.lineage.op === 'replays' ? 'fitted to your replays' : ch.lineage.op}): ${q.score.toFixed(1)} over ${q.n} fresh matches`);
+    }
+    if (winner || !ch.exam || (c.examEvery > 0 && gen - ch.exam.gen >= c.examEvery)) {
+      exam = await this.exam(gen);
+      ch.exam = exam;
+      lap('exam');
+    }
+    if (winner || !existsSync(join(this.dir, 'best.frames.json.gz'))) {
+      await this.showcase(gen);
+      lap('exam');
+    }
+    if (winner) this.emit('best', ch);
+
+    // the generation file (LIVE: the champion's collected matches) and its best match, exactly
+    const wall = (performance.now() - t0) / 1000;
+    T.wallSeconds += wall;
     const deaths: Record<Death, number> = { survived: 0, crash: 0, stall: 0 };
-    let life = 0;
-    let tips = 0;
     const choices: Record<string, number> = {};
-    for (const r of res) {
+    let decN = 0;
+    for (const r of col) {
       deaths[r.death]++;
       T.deaths[r.death]++;
-      life += r.deathTick;
-      tips += r.parts.tips;
-      T.simSeconds += r.ticks / 60;
-      const d = r.decisions ?? [];
-      for (const q of d) choices[q[1]] = (choices[q[1]] ?? 0) + 1 / Math.max(1, d.length) / res.length;
-    }
-    for (const r of [focus, ...vres]) T.simSeconds += r.ticks / 60;
-    const wall = (performance.now() - t0) / 1000;
-    T.spawned += res.length;
-    T.matches += res.length + 1 + vres.length;
-    T.wallSeconds += wall;
-
-    // generation file for the viewer: every robot's path and choices, best first, with lineage
-    const indiv = order.map(([f, i]) => {
-      const r = res[i * c.episodes];
-      return { i, ...lin[i], fitness: f, score: score[i], death: r.death, deathTick: r.deathTick, track: r.track, events: r.events, decisions: r.decisions, point: r.point, parts: r.parts, val: this.ck.valCache[lin[i].id]?.key === vk ? this.ck.valCache[lin[i].id] : undefined };
-    });
-    atomicWrite(join(this.dir, 'gens', `${gen}.json`), JSON.stringify({ gen, stage: this.ck.stage, individuals: indiv }));
-    this.pruneGens(gen);
-
-    // advance the algorithm (the champion stays in the population), then the curriculum
-    const keep = this.ck.bestEver ? { genome: fromB64(this.ck.bestEver.genome), id: this.ck.bestEver.id } : null;
-    this.algo.setTeacher(this.teacher());
-    this.algo.tell(fit, keep);
-    const st = this.algo.stats();
-    // validation results are kept only for robots still alive (and the champion)
-    const alive = new Set(this.algo.lineage().map((l) => String(l.id)));
-    if (this.ck.bestEver) alive.add(String(this.ck.bestEver.id));
-    for (const id of Object.keys(this.ck.valCache)) if (!alive.has(id)) delete this.ck.valCache[id];
-
-    const sorted = [...fit].sort((a, b) => a - b);
-    const q = (p: number): number => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
-    const ops: Record<string, number> = {};
-    let muts = 0;
-    for (const l of lin) {
-      ops[l.op] = (ops[l.op] ?? 0) + 1;
-      muts += l.muts;
-    }
-    const be = this.ck.bestEver!;
-    const summary: GenSummary = {
-      gen,
-      stage: this.ck.stage,
-      shaping: this.shaping(),
-      best: bf,
-      mean: fit.reduce((t, f) => t + f, 0) / fit.length,
-      median: q(0.5),
-      p90: q(0.9),
-      bestScore: Math.max(...score),
-      meanScore: score.reduce((t, s) => t + s, 0) / score.length,
-      deaths,
-      meanLifeS: life / res.length / 60,
-      spawnedTotal: T.spawned,
-      matchesTotal: T.matches,
-      simHoursTotal: T.simSeconds / 3600,
-      wallS: wall,
-      robotsPerMin: (res.length / wall) * 60,
-      bestEver: be.fitness,
-      bestEverScore: be.score,
-      newBest,
-      ops,
-      meanMuts: muts / lin.length,
-      bestOp: lin[bi].op,
-      choices,
-      meanTips: tips / res.length,
-      champScore: be.score,
-      champCi: be.conf?.n ? confStats(be.conf).ci95 : (be.val?.ci95 ?? 0),
-      confirm,
-      validated,
-      opRates: st.rates,
-      opSmooth: st.smooth,
-      imitShare: st.imitShare,
-    };
-    if (this.ck.stage === 'auto' && c.stage === 'curriculum') {
-      this.ck.autoHeld = summary.bestScore >= c.curriculum.autoScore ? this.ck.autoHeld + 1 : 0;
-      const g = this.algo.gen;
-      if ((g >= c.curriculum.minGens && this.ck.autoHeld >= c.curriculum.holdGens) || g >= c.curriculum.maxGens) {
-        this.ck.stage = 'full';
-        this.event(`curriculum: AUTO mastered (best AUTO score ≥ ${c.curriculum.autoScore} for ${this.ck.autoHeld} generations) — full matches from now on; the champion is re-validated on full matches`);
+      for (const d of r.decisions ?? []) {
+        choices[d[1]] = (choices[d[1]] ?? 0) + 1;
+        decN++;
       }
     }
-    this.ck.algoState = this.algo.state();
+    for (const k of Object.keys(choices)) choices[k] /= Math.max(1, decN);
+    const indiv = tracked
+      .map(({ r, i }) => ({ i, id: i, op: 'champion', parents: [ch.id], muts: 0, born: gen, fitness: r.reward, score: r.score, death: r.death, deathTick: r.deathTick, track: r.track, events: r.events, decisions: r.decisions, point: r.point, parts: r.parts }))
+      .sort((a, b) => b.fitness - a.fitness || a.i - b.i);
+    atomicWrite(join(this.dir, 'gens', `${gen}.json`), JSON.stringify({ gen, stage: 'full', individuals: indiv }));
+    atomicWrite(join(this.dir, 'gens', `${gen}.frames.json.gz`), gzipSync(JSON.stringify({ gen, fitness: focus.reward, score: focus.score, death: focus.death, parts: focus.parts, lineage: { id: ch.id, op: 'champion', parents: [], muts: 0, born: gen }, frames: focus.frames, events: focus.events })));
+    this.prune(gen);
+
+    const cs = confStats(ch.conf ?? { n: 0, sum: 0, sumSq: 0 });
+    const regretN = col.reduce((a, r) => a + r.mistakes.regretN, 0);
+    const summary: GenSummary = {
+      gen,
+      time: now(),
+      hours: T.wallSeconds / 3600,
+      wallS: wall,
+      phases,
+      matchesTotal: T.matches,
+      simHoursTotal: T.simSeconds / 3600,
+      lessonsTotal: T.lessons,
+      meanScore: col.reduce((a, r) => a + r.score, 0) / col.length,
+      bestScore: Math.max(...col.map((r) => r.score)),
+      meanReward: col.reduce((a, r) => a + r.reward, 0) / col.length,
+      deaths,
+      meanTips: col.reduce((a, r) => a + r.parts.tips, 0) / col.length,
+      mistakes: meanMistakes(col),
+      choices,
+      lessons: nLessons,
+      regret: regretN ? col.reduce((a, r) => a + r.mistakes.regret, 0) / regretN : 0,
+      fit: fit.report,
+      value: { rmse: fit.valueRmse, startRmse: fit.valueStartRmse, samples: fit.valueSamples },
+      cma: cmaSum,
+      arena: arena.map((a) => {
+        const d = diffStats(a);
+        return { id: a.id, op: a.lineage.op, n: a.pairs.length, diff: d.mean, se: d.se, z: zOf(a) };
+      }),
+      confirm,
+      champId: ch.id,
+      champOp: ch.lineage.op,
+      champScore: cs.score,
+      champCi: cs.ci95,
+      champN: cs.n,
+      newChamp: !!winner,
+      exam,
+      matchesPerMin: 0,
+    };
+    summary.matchesPerMin = ((T.matches - (this.history().at(-1)?.matchesTotal ?? 0)) / wall) * 60;
+    this.ck.gen = gen + 1;
+    this.ck.lastGenAt = summary.time;
     appendFileSync(join(this.dir, 'metrics.jsonl'), JSON.stringify(summary) + '\n');
     this.save();
     this.emit('generation', summary);
-    if (c.ckEvery > 0 && this.algo.gen % c.ckEvery === 0) this.saveCheckpoint(`auto · gen ${this.algo.gen}`, true);
+    if (c.ckEvery > 0 && this.ck.gen % c.ckEvery === 0) this.saveCheckpoint(`auto · gen ${this.ck.gen}`, true);
     for (const l of this.pendingCk.splice(0)) this.saveCheckpoint(l);
   }
 
-  /** the champion's showcase life — exact frames for the viewer, a DSIM replay and paste snippet —
-   * and its decisions, which become the experience students learn from */
-  private async showcase(pool: WorkerPool, genome: string, lineage: Lineage, gen: number, val: Val | null): Promise<EpisodeResult> {
+  /** lesson files in the window ending at `gen` */
+  private lessonGens(gen: number): number[] {
+    const out: number[] = [];
+    for (let g = gen; g > gen - this.ck.config.window && g >= 0; g--) if (existsSync(join(this.dir, 'lessons', `${g}.json.gz`))) out.push(g);
+    return out;
+  }
+
+  /** THE EXAM: the champion on the fixed exam matches — alone, and thinking ahead (search) — paired
+   * with the no-learning robot on the same matches; a determinism re-run; the champion on your
+   * replays' build and match seeds (one of them re-simulated by DSIM itself); the gap report */
+  private async exam(gen: number): Promise<ExamResult> {
     const c = this.ck.config;
-    const seed = c.validateTop > 0 ? this.valSeed(0) : this.genSeed(gen, 0);
-    const [rec] = await pool.map<EpisodeResult>([this.job(genome, seed, { frames: true, record: true, samples: true, shaping: 0 })]);
+    const ch = this.ck.champion;
+    const seeds = Array.from({ length: c.examMatches }, (_, k) => seed7(EXAM_SEED, 'exam', k));
+    const reps = dataFiles().filter((f) => f.included);
+    const searchN = Math.max(4, Math.floor(seeds.length / 2)); // look-ahead is ~20× the cost of a plain match: half the exam
+    const player = c.searchExam ? { value: this.ck.value, search: SEARCH } : {};
+    const jobs: Job[] = [
+      ...seeds.map((s) => this.job(ch.genome, s)),
+      ...(c.searchExam ? seeds.slice(0, searchN).map((s) => this.job(ch.genome, s, { value: this.ck.value, search: SEARCH })) : []),
+      this.job(ch.genome, seeds[0]), // determinism: the same match again
+      ...reps.map((f) => ({ module: '../train/gap.ts', fn: 'replayJob', args: { dir: DATA_DIR, file: f.name } })),
+    ];
+    const res = await this.map<unknown>(jobs, 'exam');
     this.check();
-    this.ck.experience = rec.samples && rec.samples.n ? rec.samples : this.ck.experience;
+    const N = seeds.length;
+    const net = res.slice(0, N) as EpisodeResult[];
+    const srch = (c.searchExam ? res.slice(N, N + searchN) : []) as EpisodeResult[];
+    const again = res[N + srch.length] as EpisodeResult;
+    const human = res.slice(N + srch.length + 1) as (Played & { seed: number; file: string })[];
+    this.count([...net, ...srch, again]);
+    // the champion on each replay's own build and match seed (the build check); the first one recorded and DSIM-verified
+    const bjobs = human.map((h, i) => this.job(ch.genome, h.seed, { profile: `replay:${h.file}`, sampleProfile: false, record: i === 0, verify: i === 0, ...player }));
+    const built = bjobs.length ? await this.map<EpisodeResult>(bjobs, 'exam') : [];
+    this.check();
+    this.count(built);
+    const base = this.ck.baseExam ?? [];
+    const rw = net.map((r) => r.reward);
+    const paired = (a: number[], b: number[]): MeanCi => meanCi(a.map((x, i) => x - b[i]));
+    const hours = this.ck.totals.wallSeconds / 3600;
+    const ex: ExamResult = {
+      gen,
+      time: now(),
+      hours,
+      champ: ch.id,
+      champOp: ch.lineage.op,
+      net: { ...meanCi(rw), tips: net.reduce((a, r) => a + r.parts.tips, 0) / N },
+      vsBase: paired(rw, base),
+      search: srch.length
+        ? { ...meanCi(srch.map((r) => r.reward)), vsNet: paired(srch.map((r) => r.reward), rw.slice(0, srch.length)), vsBase: paired(srch.map((r) => r.reward), base.slice(0, srch.length)), changed: srch.reduce((a, r) => a + (r.searched?.changed ?? 0), 0) / Math.max(1, srch.reduce((a, r) => a + (r.searched?.n ?? 0), 0)) }
+        : null,
+      mistakes: meanMistakes(net),
+      gap: [
+        ...(human.length ? [gapRow('you', 'your build', human)] : []),
+        ...(built.length ? [gapRow(c.searchExam ? 'champion (thinking ahead)' : 'champion', 'your build, your matches', built.map(played))] : []),
+        gapRow('champion', c.profile.replace('profiles/', '').replace('.json', ''), net.map(played)),
+      ],
+      checks: { deterministic: again.reward === net[0].reward && again.ticks === net[0].ticks, dsim: built[0]?.verified ?? null },
+    };
+    appendFileSync(join(this.dir, 'exams.jsonl'), JSON.stringify(ex) + '\n');
+    const s = ex.search;
+    this.event(
+      `exam (champion #${ch.id}): ${ex.net.mean.toFixed(1)} ± ${ex.net.ci95.toFixed(1)} on ${N} matches, ${ex.vsBase.mean >= 0 ? '+' : ''}${ex.vsBase.mean.toFixed(1)} ± ${ex.vsBase.ci95.toFixed(1)} over the no-learning robot` +
+        (s ? `; thinking ahead ${s.mean.toFixed(1)} (${s.vsBase.mean >= 0 ? '+' : ''}${s.vsBase.mean.toFixed(1)} ± ${s.vsBase.ci95.toFixed(1)})` : '') +
+        `${ex.checks.deterministic ? '' : ' — ⚠ NOT DETERMINISTIC'}${ex.checks.dsim && !ex.checks.dsim.ok ? ' — ⚠ DSIM replay mismatch' : ''}`,
+    );
+    this.emit('exam', ex);
+    return ex;
+  }
+
+  /** the champion's showcase match (exam match 0, thinking ahead when the exam does): exact frames,
+   * the what-if values at its decisions, a DSIM replay and paste snippet */
+  private async showcase(gen: number): Promise<void> {
+    const c = this.ck.config;
+    const ch = this.ck.champion;
+    const [rec] = await this.map<EpisodeResult>(
+      [this.job(ch.genome, seed7(EXAM_SEED, 'exam', 0), { frames: true, record: true, inspect: true, value: this.ck.value, ...(c.searchExam ? { search: SEARCH } : { lessons: { thinkRate: 0, horizon: 600, rounds: 1 } }) })],
+      'showcase',
+    );
+    this.check();
+    this.count([rec]);
+    ch.parts = rec.parts;
     if (rec.replay) {
       exportReplay(join(this.dir, 'best'), rec.replay as Replay, {
-        title: `${c.name} champion (gen ${gen})`,
+        title: `${c.name} champion #${ch.id} (gen ${gen})`,
         profile: `${c.profile}${c.sampleProfile ? ' (sampled robot)' : ''}, ${c.driver} driver`,
         score: rec.score,
         replayExact: rec.replayExact ?? false,
       });
     }
-    atomicWrite(join(this.dir, 'best.frames.json.gz'), gzipSync(JSON.stringify({ gen, fitness: rec.fitness, score: rec.score, death: rec.death, parts: rec.parts, lineage, frames: rec.frames, events: rec.events, val })));
-    this.ck.totals.matches += 1;
-    this.ck.totals.simSeconds += rec.ticks / 60;
-    return rec;
+    atomicWrite(
+      join(this.dir, 'best.frames.json.gz'),
+      gzipSync(JSON.stringify({ gen, fitness: rec.reward, score: rec.score, death: rec.death, parts: rec.parts, lineage: ch.lineage, frames: rec.frames, events: rec.events, inspect: rec.inspect as Inspected[], search: c.searchExam })),
+    );
   }
 
   private save(): void {
     atomicWrite(join(this.dir, 'checkpoint.json'), JSON.stringify(this.ck));
-    const b = this.ck.bestEver;
+    const ch = this.ck.champion;
     atomicWrite(
       join(this.dir, 'summary.json'),
-      JSON.stringify({ name: this.name, gen: this.gen, algo: this.ck.config.algo, pop: this.ck.config.pop, bestFitness: scored(b) ? b!.fitness : null, bestScore: scored(b) ? b!.score : null, updated: now(), version: CK_VERSION }),
+      JSON.stringify({ name: this.name, gen: this.gen, champion: ch.id, champOp: ch.lineage.op, exam: ch.exam ? ch.exam.net.mean : null, search: ch.exam?.search?.mean ?? null, vsBase: ch.exam ? ch.exam.vsBase.mean : null, updated: now(), version: CK_VERSION }),
     );
   }
-
-  private pruneGens(gen: number): void {
-    const keep = this.ck.config.keepGens;
-    for (const f of readdirSync(join(this.dir, 'gens'))) {
-      const g = Number(f.split('.')[0]);
-      if (Number.isFinite(g) && g < gen - keep && g % 100 !== 0) rmSync(join(this.dir, 'gens', f));
-    }
+  /** generation files: the last keepGens and every 100th. Lessons (~70 KB per match): the last
+   * LESSON_KEEP generations (or the window, if longer) — a rewind further back than that trains on
+   * the lessons still on disk, so it is exact only within them */
+  private prune(gen: number): void {
+    const c = this.ck.config;
+    const rm = (d: string, keep: (g: number) => boolean): void => {
+      for (const f of readdirSync(join(this.dir, d))) {
+        const g = Number(f.split('.')[0]);
+        if (Number.isFinite(g) && !keep(g)) rmSync(join(this.dir, d, f));
+      }
+    };
+    rm('gens', (g) => g >= gen - c.keepGens || g % 100 === 0);
+    rm('lessons', (g) => g > gen - Math.max(LESSON_KEEP, c.window));
   }
 
   // ─────────────────────────────── checkpoints ───────────────────────────────
@@ -990,18 +1033,16 @@ export class Engine extends EventEmitter {
     if (!/^[a-z0-9-]+$/.test(id)) throw new Error('bad checkpoint id');
     return join(this.dir, 'checkpoints', `${id}.${part === 'meta' ? 'meta.json' : part === 'state' ? 'state.json.gz' : 'metrics.jsonl.gz'}`);
   }
-  /** a named checkpoint now — or, mid-generation, right after it (a checkpoint is always between
-   * generations, so it restores exactly) */
   checkpoint(label: string): CheckpointMeta | null {
     if (!this.busy) return this.saveCheckpoint(label);
     this.pendingCk.push(label);
     this.emit('log', `checkpoint "${label}" will be saved when this generation finishes`);
     return null;
   }
-  /** snapshot the run as it is now (between generations) */
   saveCheckpoint(label: string, auto = false, pinned = false): CheckpointMeta {
     const id = `g${this.gen}-${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
     const c = this.ck.config;
+    const ch = this.ck.champion;
     const meta: CheckpointMeta = {
       id,
       gen: this.gen,
@@ -1009,13 +1050,14 @@ export class Engine extends EventEmitter {
       auto,
       pinned,
       time: now(),
-      bestFitness: scored(this.ck.bestEver) ? this.ck.bestEver!.fitness : null,
-      bestScore: scored(this.ck.bestEver) ? this.ck.bestEver!.score : null,
-      config: { algo: c.algo, pop: c.pop, sigma: c.sigma, lr: c.lr, elite: c.elite, crossRate: c.crossRate, mutProb: c.mutProb, preset: c.preset },
+      champScore: ch.conf?.n ? confStats(ch.conf).score : null,
+      exam: ch.exam ? ch.exam.net.mean : null,
+      config: { preset: c.preset, collect: c.collect, horizon: c.horizon },
     };
     const m = join(this.dir, 'metrics.jsonl');
+    const x = join(this.dir, 'exams.jsonl');
     atomicWrite(this.ckPath(id, 'state'), gzipSync(JSON.stringify(this.ck)));
-    atomicWrite(this.ckPath(id, 'metrics'), gzipSync(existsSync(m) ? readFileSync(m) : Buffer.alloc(0)));
+    atomicWrite(this.ckPath(id, 'metrics'), gzipSync(JSON.stringify({ metrics: existsSync(m) ? readFileSync(m, 'utf8') : '', exams: existsSync(x) ? readFileSync(x, 'utf8') : '' })));
     const bestFrames = join(this.dir, 'best.frames.json.gz');
     if (existsSync(bestFrames)) copyFileSync(bestFrames, join(this.dir, 'checkpoints', `${id}.best.frames.json.gz`));
     atomicWrite(this.ckPath(id, 'meta'), JSON.stringify(meta));
@@ -1035,7 +1077,6 @@ export class Engine extends EventEmitter {
     this.emit('checkpoints');
     if (!quiet) this.event(`checkpoint deleted: "${m.label}"`);
   }
-  /** delete many at once: every automatic unpinned one, or every unpinned one */
   deleteCheckpoints(which: 'auto' | 'unpinned'): number {
     const list = this.listCheckpoints().filter((m) => !m.pinned && (which === 'unpinned' || m.auto));
     for (const m of list) this.deleteCheckpoint(m.id, true);
@@ -1059,33 +1100,32 @@ export class Engine extends EventEmitter {
     if (!l) throw new Error('give the checkpoint a name');
     this.editMeta(id, (m) => {
       m.label = l;
-      m.auto = false; // a named checkpoint is never pruned automatically
+      m.auto = false;
     });
   }
-  private loadCheckpoint(id: string): { ck: Checkpoint; metrics: Buffer; meta: CheckpointMeta } {
+  private loadCheckpoint(id: string): { ck: Checkpoint; logs: { metrics: string; exams: string }; meta: CheckpointMeta } {
     const mp = this.ckPath(id, 'meta');
     if (!existsSync(mp)) throw new Error('no such checkpoint');
     return {
       meta: JSON.parse(readFileSync(mp, 'utf8')) as CheckpointMeta,
       ck: JSON.parse(gunzipSync(readFileSync(this.ckPath(id, 'state'))).toString('utf8')) as Checkpoint,
-      metrics: gunzipSync(readFileSync(this.ckPath(id, 'metrics'))),
+      logs: JSON.parse(gunzipSync(readFileSync(this.ckPath(id, 'metrics'))).toString('utf8')) as { metrics: string; exams: string },
     };
   }
-
-  /** go back to a checkpoint. The present is saved first as a checkpoint ("before rewind"), so a
-   * rewind can itself be undone. Generations after the checkpoint are removed from this run. */
+  /** go back to a checkpoint; the present is saved first (pinned), so a rewind can be undone */
   async rewind(id: string): Promise<CheckpointMeta> {
-    await this.halt(true); // a generation in progress belongs to the timeline being left
-    const { ck, metrics, meta } = this.loadCheckpoint(id);
+    await this.halt(true);
+    const { ck, logs, meta } = this.loadCheckpoint(id);
     const undo = this.saveCheckpoint(`before rewind to gen ${meta.gen}`, false, true);
-    ck.config.name = this.name; // the run's name is its identity (it may have been renamed since)
+    ck.config.name = this.name;
     this.ck = ck;
-    this.algo = makeAlgo({ ...ck.config }, SHAPE, ck.algoState, undefined, PREF_GENES, this.teacher());
-    atomicWrite(join(this.dir, 'metrics.jsonl'), metrics);
-    for (const f of readdirSync(join(this.dir, 'gens'))) {
-      const g = Number(f.split('.')[0]);
-      if (Number.isFinite(g) && g >= meta.gen) rmSync(join(this.dir, 'gens', f));
-    }
+    atomicWrite(join(this.dir, 'metrics.jsonl'), logs.metrics);
+    atomicWrite(join(this.dir, 'exams.jsonl'), logs.exams);
+    for (const d of ['gens', 'lessons'])
+      for (const f of readdirSync(join(this.dir, d))) {
+        const g = Number(f.split('.')[0]);
+        if (Number.isFinite(g) && g >= meta.gen) rmSync(join(this.dir, d, f));
+      }
     const bf = join(this.dir, 'checkpoints', `${id}.best.frames.json.gz`);
     if (existsSync(bf)) copyFileSync(bf, join(this.dir, 'best.frames.json.gz'));
     else rmSync(join(this.dir, 'best.frames.json.gz'), { force: true });
@@ -1095,24 +1135,28 @@ export class Engine extends EventEmitter {
     this.emit('state');
     return meta;
   }
-
   /** a NEW run that starts from a checkpoint (or from now), optionally with changed settings */
   fork(id: string | 'now', name: string, overrides: Partial<RunConfig> = {}): string {
     if (!NAME_RE.test(name)) throw new Error('run names use letters, digits, - and _ (up to 48)');
     const dir = join(RUNS, name);
     if (existsSync(dir)) throw new Error(`run "${name}" already exists`);
     if (id === 'now' && this.busy) throw new Error('wait for this generation to finish (or fork from a checkpoint)');
-    const src = id === 'now' ? { ck: structuredClone(this.ck), metrics: existsSync(join(this.dir, 'metrics.jsonl')) ? readFileSync(join(this.dir, 'metrics.jsonl')) : Buffer.alloc(0) } : this.loadCheckpoint(id);
+    const read = (f: string): string => (existsSync(join(this.dir, f)) ? readFileSync(join(this.dir, f), 'utf8') : '');
+    const src = id === 'now' ? { ck: structuredClone(this.ck), logs: { metrics: read('metrics.jsonl'), exams: read('exams.jsonl') } } : this.loadCheckpoint(id);
     const ck = src.ck;
     const cfg = { ...ck.config, ...pickLive(overrides), name };
-    const err = validate(cfg) ?? checkRun(cfg);
+    const err = checkRun(cfg);
     if (err) throw new Error(err);
-    if (cfg.algo !== ck.config.algo) throw new Error('a fork keeps its algorithm (start a new run to change it)');
     ck.config = cfg;
-    mkdirSync(join(dir, 'gens'), { recursive: true });
-    mkdirSync(join(dir, 'checkpoints'), { recursive: true });
+    for (const d of ['gens', 'checkpoints', 'lessons']) mkdirSync(join(dir, d), { recursive: true });
+    // the lessons the fork learns from next come along
+    for (let g = ck.gen - 1; g >= 0 && g >= ck.gen - cfg.window; g--) {
+      const f = join(this.dir, 'lessons', `${g}.json.gz`);
+      if (existsSync(f)) copyFileSync(f, join(dir, 'lessons', `${g}.json.gz`));
+    }
     atomicWrite(join(dir, 'checkpoint.json'), JSON.stringify(ck));
-    atomicWrite(join(dir, 'metrics.jsonl'), src.metrics);
+    atomicWrite(join(dir, 'metrics.jsonl'), src.logs.metrics);
+    atomicWrite(join(dir, 'exams.jsonl'), src.logs.exams);
     const bf = id === 'now' ? join(this.dir, 'best.frames.json.gz') : join(this.dir, 'checkpoints', `${id}.best.frames.json.gz`);
     if (existsSync(bf)) copyFileSync(bf, join(dir, 'best.frames.json.gz'));
     const e = Engine.open(name);
@@ -1123,24 +1167,19 @@ export class Engine extends EventEmitter {
   }
 
   // ─────────────────────────────── settings ───────────────────────────────
-  /** change settings between generations; returns the applied change */
   setConfig(change: Partial<RunConfig>): Partial<RunConfig> {
-    const fixed = Object.keys(change).filter((k) => !(LIVE_KEYS as readonly string[]).includes(k) && JSON.stringify((change as Record<string, unknown>)[k]) !== JSON.stringify((this.ck.config as unknown as Record<string, unknown>)[k]));
+    const fixed = Object.keys(change).filter((k) => (FIXED_KEYS as readonly string[]).includes(k) && JSON.stringify((change as Record<string, unknown>)[k]) !== JSON.stringify((this.ck.config as unknown as Record<string, unknown>)[k]));
     if (fixed.length) throw new Error(`${fixed.join(', ')} ${fixed.length > 1 ? 'define' : 'defines'} the run and cannot change mid-run — fork it or start a new run`);
     const live = pickLive(change);
-    // a hand edit of a strategy key means the settings are no longer that preset
     if (!('preset' in change)) live.preset = presetOf({ ...this.ck.config, ...live });
     const next = { ...this.ck.config, ...live };
-    const err = validate(next) ?? checkRun(next);
+    const err = checkRun(next);
     if (err) throw new Error(err);
     const diff: Partial<RunConfig> = {};
     for (const [k, v] of Object.entries(live)) if (JSON.stringify((this.ck.config as unknown as Record<string, unknown>)[k]) !== JSON.stringify(v)) (diff as Record<string, unknown>)[k] = v;
     if (!Object.keys(diff).length) return diff;
     this.ck.config = next;
-    this.algo.setConfig(next);
-    if (diff.stage && diff.stage !== 'curriculum') this.ck.stage = diff.stage;
-    this.ck.algoState = this.algo.state();
-    if (!this.busy) this.save(); // mid-generation the next checkpoint write carries it
+    if (!this.busy) this.save();
     const shown = Object.entries(diff).filter(([k]) => k !== 'preset');
     if (shown.length) this.event(`settings changed${diff.preset ? ` (preset "${PRESETS.find((p) => p.id === diff.preset)?.label}")` : ''}: ${shown.map(([k, v]) => `${k} → ${JSON.stringify(v)}`).join(', ')}`);
     this.emit('state');
@@ -1149,14 +1188,12 @@ export class Engine extends EventEmitter {
   applyPreset(id: string): Partial<RunConfig> {
     const p = PRESETS.find((q) => q.id === id);
     if (!p) throw new Error('no such preset');
-    const change: Partial<RunConfig> = { ...p.change, preset: id };
-    if (this.ck.config.algo === 'es') for (const k of GA_ONLY) delete change[k];
-    return this.setConfig(change);
+    return this.setConfig({ ...p.change, preset: id });
   }
 
   // ─────────────────────────────── evaluation ───────────────────────────────
-  /** score a policy on n held-out seeds (full matches, no shaping). target: 'champion' |
-   * 'current' | 'greedy' | 'imitation' | a checkpoint id (its champion). Runs between generations. */
+  /** score a policy on n held-out matches. target: 'champion' (its network) | 'player' (the
+   * champion thinking ahead) | 'greedy' | 'baseline' | 'imitation' | a checkpoint id */
   evaluate(target: string, n: number): Promise<EvalResult> {
     if (!(Number.isInteger(n) && n >= 1 && n <= 2000)) return Promise.reject(new Error('evaluate 1 to 2000 matches'));
     return new Promise((resolve, reject) => {
@@ -1165,53 +1202,37 @@ export class Engine extends EventEmitter {
       if (!this.loop) void this.drainEvals().finally(() => this.emit('state'));
     });
   }
-  private genomeOf(target: string): { genome: string | null; label: string } {
-    if (target === 'greedy') return { genome: null, label: 'greedy baseline (no learning)' };
-    if (target === 'champion') {
-      if (!this.ck.bestEver) throw new Error('no champion yet');
-      return { genome: this.ck.bestEver.genome, label: `champion (gen ${this.ck.bestEver.gen})` };
-    }
-    if (target === 'current') return { genome: toB64(this.algo.current()), label: `current policy (gen ${this.gen})` };
+  private policyOf(target: string): { genome: string | null; label: string; extra: Partial<EpisodeArgs> } {
+    const ch = this.ck.champion;
+    if (target === 'greedy') return { genome: null, label: 'greedy baseline (no learning)', extra: {} };
+    if (target === 'baseline') return { genome: ensureGreedy().genome, label: 'the no-learning robot as a network', extra: {} };
+    if (target === 'champion') return { genome: ch.genome, label: `champion #${ch.id} (its network)`, extra: {} };
+    if (target === 'player') return { genome: ch.genome, label: `champion #${ch.id} thinking ahead`, extra: { value: this.ck.value, search: SEARCH } };
     if (target === 'imitation') {
       const d = ensureData();
       if (!d) throw new Error('no replays in "Training data/"');
-      return { genome: d.report.genome, label: 'imitation of your replays (no evolution)' };
+      return { genome: d.report.genome, label: 'imitation of your replays', extra: {} };
     }
     const { ck, meta } = this.loadCheckpoint(target);
-    if (!ck.bestEver) throw new Error('that checkpoint has no champion yet');
-    return { genome: ck.bestEver.genome, label: `champion at checkpoint "${meta.label}"` };
+    return { genome: ck.champion.genome, label: `champion at checkpoint "${meta.label}"`, extra: {} };
   }
   private async drainEvals(): Promise<void> {
     while (this.evalQueue.length) {
       const q = this.evalQueue.shift()!;
       try {
-        const { genome, label } = this.genomeOf(q.target);
+        const { genome, label, extra } = this.policyOf(q.target);
         this.phase = 'evaluating';
-        this.emit('state');
-        const jobs = Array.from({ length: q.n }, (_, k) => this.job(genome, seedOf(EVAL_SEED, 'eval', k) % 1_000_000_007, { stage: 'full', shaping: 0 }));
+        const jobs = Array.from({ length: q.n }, (_, k) => this.job(genome, seed7(EVAL_SEED, 'eval', k), extra));
         const pool = this.ensurePool();
         const res = await pool.map<EpisodeResult>(jobs, (done, total) => this.emit('progress', { gen: this.gen, done, total, eval: label }));
-        const s = res.map((r) => r.score);
-        const { mean, sd, ci95 } = meanSd(s);
+        const s = res.map((r) => r.reward);
+        const { mean, ci95 } = meanCi(s);
+        const sd = s.length > 1 ? Math.sqrt(s.reduce((a, b) => a + (b - mean) ** 2, 0) / (s.length - 1)) : 0;
         const deaths: Record<Death, number> = { survived: 0, crash: 0, stall: 0 };
         for (const r of res) deaths[r.death]++;
-        const out: EvalResult = {
-          id: `e${Date.now().toString(36)}`,
-          target: label,
-          gen: this.gen,
-          n: s.length,
-          scores: s,
-          mean,
-          sd,
-          ci95,
-          min: Math.min(...s),
-          max: Math.max(...s),
-          tips: res.reduce((a, r) => a + r.parts.tips, 0) / res.length,
-          deaths,
-          time: now(),
-        };
+        const out: EvalResult = { id: `e${Date.now().toString(36)}`, target: label, gen: this.gen, n: s.length, scores: s, mean, sd, ci95, min: Math.min(...s), max: Math.max(...s), tips: res.reduce((a, r) => a + r.parts.tips, 0) / res.length, deaths, time: now() };
         appendFileSync(join(this.dir, 'evals.jsonl'), JSON.stringify(out) + '\n');
-        this.event(`evaluated ${label}: mean ${mean.toFixed(1)} ± ${out.ci95.toFixed(1)} (95% CI) over ${s.length} matches, ${out.tips.toFixed(1)} tips`);
+        this.event(`evaluated ${label}: ${mean.toFixed(1)} ± ${ci95.toFixed(1)} (95% CI) over ${s.length} matches, ${out.tips.toFixed(1)} tips`);
         this.emit('eval', out);
         q.resolve(out);
       } catch (e) {
@@ -1226,11 +1247,6 @@ export class Engine extends EventEmitter {
       }
     }
   }
-
-  /** the population's current genomes (for export) */
-  currentGenome(): string {
-    return toB64(this.algo.current());
-  }
 }
 
 function pickLive(c: Partial<RunConfig>): Partial<RunConfig> {
@@ -1238,29 +1254,35 @@ function pickLive(c: Partial<RunConfig>): Partial<RunConfig> {
   for (const k of LIVE_KEYS) if (k in c) (out as Record<string, unknown>)[k] = (c as Record<string, unknown>)[k];
   return out;
 }
-/** settings only the GA has (ES runs ignore them in presets) */
-const GA_ONLY = ['elite', 'truncation', 'crossRate', 'mutProb', 'tournament', 'macroRate', 'immigrants', 'imitRate', 'imitAdapt', 'imitMin', 'imitMax', 'lessonSteps'] as const;
-/** the preset these settings are exactly, or '' */
 export function presetOf(c: RunConfig): string {
-  const p = PRESETS.find((q) =>
-    Object.entries(q.change).every(([k, v]) => (c.algo === 'es' && (GA_ONLY as readonly string[]).includes(k)) || JSON.stringify((c as unknown as Record<string, unknown>)[k]) === JSON.stringify(v)),
-  );
-  return p?.id ?? '';
+  return PRESETS.find((q) => Object.entries(q.change).every(([k, v]) => JSON.stringify((c as unknown as Record<string, unknown>)[k]) === JSON.stringify(v)))?.id ?? '';
 }
 export function checkRun(c: RunConfig): string | null {
-  if (!Number.isInteger(c.workers) || c.workers < 1 || c.workers > 64) return 'workers must be 1–64';
-  if (!Number.isInteger(c.episodes) || c.episodes < 1 || c.episodes > 32) return 'matches per robot must be 1–32';
-  if (!Number.isInteger(c.validateTop) || c.validateTop < 0 || c.validateTop > Math.min(32, c.pop)) return 'robots validated per generation must be 0–32 (and at most the population)';
-  if (!Number.isInteger(c.valEpisodes) || c.valEpisodes < 1 || c.valEpisodes > 64) return 'validation matches must be 1–64';
-  if (!Number.isInteger(c.confirmEpisodes) || (c.confirmEpisodes !== 0 && (c.confirmEpisodes < 2 || c.confirmEpisodes > 64))) return 'champion test matches must be 0 (off) or 2–64';
-  if (!['auto', 'full', 'curriculum'].includes(c.stage)) return 'stage must be auto, full or curriculum';
+  const int = (v: number, lo: number, hi: number): boolean => Number.isInteger(v) && v >= lo && v <= hi;
+  const num = (v: number, lo: number, hi: number): boolean => typeof v === 'number' && v >= lo && v <= hi;
+  if (!int(c.workers, 1, 64)) return 'workers must be 1–64';
+  if (!int(c.collect, 1, 512)) return 'lesson matches per generation must be 1–512';
+  if (!num(c.thinkRate, 0, 1)) return 'share of re-thinks that are lessons must be 0–1';
+  if (!num(c.horizon, 1, 60)) return 'play-out length must be 1–60 s';
+  if (!int(c.rounds, 1, 8)) return 'luck draws must be 1–8';
+  if (!int(c.window, 1, 50)) return 'generations of lessons remembered must be 1–50';
+  if (!int(c.epochs, 1, 1000)) return 'epochs must be 1–1000';
+  if (!num(c.lr, 1e-5, 0.1)) return 'learning rate must be 0.00001–0.1';
+  if (!num(c.anchor, 0, 10)) return 'anchor must be 0–10';
+  if (!num(c.demoWeight, 0, 10)) return 'replay weight must be 0–10';
+  if (!int(c.demoFade, 0, 10000)) return 'replay fade must be a whole number of generations';
+  if (!int(c.cmaPop, 0, 64) || (c.cmaPop > 0 && c.cmaPop < 4)) return 'skill settings tried must be 0 (off) or 4–64';
+  if (!int(c.cmaMatches, 1, 64)) return 'matches per skill setting must be 1–64';
+  if (!num(c.cmaSigma, 0.01, 5)) return 'skill step size must be 0.01–5';
+  if (!int(c.raceMatches, 2, 64)) return 'race matches must be 2–64';
+  if (!int(c.examMatches, 4, 512)) return 'exam matches must be 4–512';
+  if (!int(c.examEvery, 0, 10000)) return 'exam interval must be a whole number ≥ 0';
+  if (typeof c.searchExam !== 'boolean') return 'thinking-ahead exam must be on or off';
   if (!['human', 'oracle'].includes(c.driver)) return 'driver must be human or oracle';
-  if (!(c.annealGens >= 1)) return 'shaping fade must be ≥ 1 generation';
-  for (const [k, v] of Object.entries({ ...c.shaping, ...c.penalty })) if (!(typeof v === 'number' && v >= 0 && v <= 1000)) return `${k} must be 0–1000`;
-  if (!Number.isInteger(c.ckEvery) || c.ckEvery < 0) return 'checkpoint interval must be a whole number ≥ 0';
-  if (!Number.isInteger(c.ckKeep) || c.ckKeep < 1) return 'automatic checkpoints kept must be ≥ 1';
-  if (!Number.isInteger(c.keepGens) || c.keepGens < 10) return 'generations kept must be ≥ 10';
-  if (!Number.isInteger(c.maxGens) || c.maxGens < 0) return 'generation limit must be a whole number ≥ 0';
+  if (!int(c.ckEvery, 0, 1e6)) return 'checkpoint interval must be a whole number ≥ 0';
+  if (!int(c.ckKeep, 1, 1e6)) return 'automatic checkpoints kept must be ≥ 1';
+  if (!int(c.keepGens, 10, 1e6)) return 'generations kept must be ≥ 10';
+  if (!int(c.maxGens, 0, 1e9)) return 'generation limit must be a whole number ≥ 0';
   if (typeof c.preset !== 'string' || (c.preset && !PRESETS.some((p) => p.id === c.preset))) return 'unknown preset';
   return null;
 }
@@ -1269,12 +1291,12 @@ export function checkRun(c: RunConfig): string | null {
 export interface RunInfo {
   name: string;
   gen: number;
-  algo: string;
-  pop: number;
-  bestFitness: number | null;
-  bestScore: number | null;
+  champion: number | null;
+  exam: number | null; // the champion's exam score
+  search: number | null; // …thinking ahead
+  vsBase: number | null; // …above the no-learning robot
   updated: string;
-  legacy?: string; // why it cannot be opened
+  legacy?: string;
   bytes: number;
 }
 function dirBytes(d: string): number {
@@ -1282,7 +1304,6 @@ function dirBytes(d: string): number {
   for (const f of readdirSync(d, { withFileTypes: true })) n += f.isDirectory() ? dirBytes(join(d, f.name)) : statSync(join(d, f.name)).size;
   return n;
 }
-/** every run on disk (small summaries, newest first) */
 export function listRuns(): RunInfo[] {
   if (!existsSync(RUNS)) return [];
   return readdirSync(RUNS)
@@ -1290,39 +1311,29 @@ export function listRuns(): RunInfo[] {
     .map((n) => {
       const dir = join(RUNS, n);
       const s = join(dir, 'summary.json');
-      // the summary carries the version (written every generation); older runs are read in full
-      const sum = existsSync(s) ? (JSON.parse(readFileSync(s, 'utf8')) as Omit<RunInfo, 'bytes'> & { version?: number }) : null;
-      let version = sum?.version;
-      let base: Omit<RunInfo, 'bytes'> | null = sum;
-      if (version === undefined || !base) {
-        const ck = JSON.parse(readFileSync(join(dir, 'checkpoint.json'), 'utf8')) as Checkpoint;
-        version = ck.version ?? 1;
-        base ??= { name: n, gen: (ck.algoState as { gen?: number }).gen ?? 0, algo: ck.config.algo, pop: ck.config.pop, bestFitness: ck.bestEver?.fitness ?? null, bestScore: ck.bestEver?.score ?? null, updated: '' };
-      }
+      const sum = existsSync(s) ? (JSON.parse(readFileSync(s, 'utf8')) as Record<string, unknown>) : null;
+      let version = sum?.version as number | undefined;
+      if (version === undefined) version = (JSON.parse(readFileSync(join(dir, 'checkpoint.json'), 'utf8')) as { version?: number }).version ?? 1;
       const legacy = version !== CK_VERSION ? (LEGACY[version] ?? `made by another version (${version})`) : undefined;
-      const { version: _v, ...rest } = base as Omit<RunInfo, 'bytes'> & { version?: number };
-      void _v;
-      return { ...rest, name: n, ...(legacy ? { legacy } : {}), bytes: dirBytes(dir) };
+      const num = (k: string): number | null => (typeof sum?.[k] === 'number' ? (sum[k] as number) : null);
+      return { name: n, gen: num('gen') ?? 0, champion: legacy ? null : num('champion'), exam: legacy ? null : num('exam'), search: legacy ? null : num('search'), vsBase: legacy ? null : num('vsBase'), updated: String(sum?.updated ?? ''), ...(legacy ? { legacy } : {}), bytes: dirBytes(dir) };
     })
     .sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
 }
-
-/** delete a whole run (the viewer asks for the name typed back) */
 export function deleteRun(name: string): void {
   if (!NAME_RE.test(name) || !existsSync(join(RUNS, name, 'checkpoint.json'))) throw new Error(`no run called "${name}"`);
   rmSync(join(RUNS, name), { recursive: true, force: true });
 }
-/** rename a run (not open / not training — the server checks) */
 export function renameRun(from: string, to: string): void {
   if (!NAME_RE.test(from) || !existsSync(join(RUNS, from, 'checkpoint.json'))) throw new Error(`no run called "${from}"`);
   if (!NAME_RE.test(to)) throw new Error('run names use letters, digits, - and _ (up to 48)');
   if (existsSync(join(RUNS, to))) throw new Error(`run "${to}" already exists`);
   renameSync(join(RUNS, from), join(RUNS, to));
   const p = join(RUNS, to, 'checkpoint.json');
-  const ck = JSON.parse(readFileSync(p, 'utf8')) as Checkpoint;
+  const ck = JSON.parse(readFileSync(p, 'utf8')) as { config: { name: string }; gen?: number };
   ck.config.name = to;
   atomicWrite(p, JSON.stringify(ck));
   const s = join(RUNS, to, 'summary.json');
   if (existsSync(s)) atomicWrite(s, JSON.stringify({ ...JSON.parse(readFileSync(s, 'utf8')), name: to }));
-  appendFileSync(join(RUNS, to, 'events.jsonl'), JSON.stringify({ time: now(), gen: (ck.algoState as { gen?: number }).gen ?? 0, text: `renamed from "${from}"` }) + '\n');
+  appendFileSync(join(RUNS, to, 'events.jsonl'), JSON.stringify({ time: now(), gen: ck.gen ?? 0, text: `renamed from "${from}"` }) + '\n');
 }

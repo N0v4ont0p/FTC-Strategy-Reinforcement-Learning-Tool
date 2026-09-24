@@ -3,12 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>BIOBUZZ Evolution Studio</title>
+    <title>BIOBUZZ Learning Studio</title>
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
     <header class="bar">
-      <div class="brand"><span class="mark" aria-hidden="true"></span><span class="title">BIOBUZZ Evolution</span></div>
+      <div class="brand"><span class="mark" aria-hidden="true"></span><span class="title">BIOBUZZ Learning</span></div>
       <div class="runpick">
         <label for="runSel" class="k">Run</label>
         <select id="runSel" aria-label="Open run"></select>
@@ -42,7 +42,7 @@
           <div class="overlay" id="overlay"></div>
           <div class="empty" id="empty" hidden>
             <p class="emptyhead">No run open</p>
-            <p>A run is one line of evolution: its robots, checkpoints and history.</p>
+            <p>A run is one line of learning: its champion, lessons, checkpoints and history.</p>
             <button id="btnNew2" type="button">Create a run</button>
           </div>
         </div>
@@ -62,31 +62,36 @@
             <button type="button" role="radio" data-speed="2" aria-checked="false">2×</button>
           </div>
         </div>
+        <div class="inspector" id="inspector" hidden>
+          <div class="cardhead"><h2>Decision inspector</h2><span class="sub" id="inspWhen"></span></div>
+          <div id="inspBody" class="table"></div>
+          <p class="hint" id="inspHint"></p>
+        </div>
         <div class="legend" id="fieldLegend"></div>
       </section>
 
       <aside class="side">
         <div class="tabs" role="tablist" aria-label="Panels">
           <button role="tab" aria-selected="true" data-tab="overview" type="button">Overview</button>
+          <button role="tab" aria-selected="false" data-tab="race" type="button">Race</button>
+          <button role="tab" aria-selected="false" data-tab="report" type="button">Report</button>
           <button role="tab" aria-selected="false" data-tab="runs" type="button">Runs</button>
           <button role="tab" aria-selected="false" data-tab="checkpoints" type="button">Checkpoints</button>
           <button role="tab" aria-selected="false" data-tab="settings" type="button">Settings</button>
           <button role="tab" aria-selected="false" data-tab="data" type="button">Training data</button>
           <button role="tab" aria-selected="false" data-tab="evaluate" type="button">Evaluate</button>
-          <button role="tab" aria-selected="false" data-tab="lineage" type="button">Lineage</button>
           <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
         </div>
 
         <div class="panel" data-panel="overview">
           <div class="counters">
-            <div class="big"><span class="k">robots spawned</span><span class="v mono" id="spawned">0</span></div>
             <div class="pair">
-              <div><span class="k">died</span><span class="v mono" id="died">0</span><span class="sub" id="diedSplit"></span></div>
-              <div><span class="k">lived a whole match</span><span class="v mono" id="survived">0</span></div>
+              <div><span class="k">generation</span><span class="v mono" id="gen">0</span><span class="sub" id="genWhen"></span></div>
+              <div><span class="k">lessons learned</span><span class="v mono" id="lessonsN">0</span><span class="sub">decisions, every option played out</span></div>
             </div>
             <div class="pair">
-              <div><span class="k">generation</span><span class="v mono" id="gen">0</span><span class="sub" id="stage"></span></div>
-              <div><span class="k">throughput</span><span class="v mono" id="rpm">—</span><span class="sub">robots / min</span></div>
+              <div><span class="k">matches played</span><span class="v mono" id="matchesN">0</span><span class="sub" id="simTime"></span></div>
+              <div><span class="k">throughput</span><span class="v mono" id="rpm">—</span><span class="sub">matches / min</span></div>
             </div>
           </div>
           <div class="card champ">
@@ -98,23 +103,62 @@
               <a id="dlChamp" class="btnlink" href="/api/export/champion.json" download>Download network</a>
               <a id="dlCsv" class="btnlink" href="/api/export/metrics.csv" download>Metrics CSV</a>
             </div>
-            <p class="hint" id="snippetHint">The champion is the robot with the best mean over the run's fixed validation matches, not one lucky match. To see it in DSIM (http://localhost:5173), paste the snippet into the console (Safari: Develop → Show Web Inspector), then open Records → Career.</p>
+            <p class="hint" id="snippetHint">Every champion takes the same exam: 64 fixed matches (the same for every run), next to the no-learning robot on the same matches. A robot becomes champion only by beating the champion on brand-new matches with identical luck, by more than chance allows. To see it in DSIM (http://localhost:5173), paste the snippet into the console (Safari: Develop → Show Web Inspector), then open Records → Career.</p>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Learning curve</h2><span class="sub">the exam, by hours of training</span></div>
+            <canvas id="chartExam" height="170" aria-label="Exam score of each champion by hours of training, with the no-learning robot as a reference line"></canvas>
+            <div class="chartlegend" id="examLegend"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Points lost to choices</h2><span class="sub">per decision, what-if</span></div>
+            <canvas id="chartRegret" height="110" aria-label="Points the champion's choice lost against the best option found by what-if play, per decision, by generation"></canvas>
+            <div class="chartlegend" id="regretLegend"></div>
+            <p class="hint">At each lesson decision every option is played out on copies of the match. This is how many points the option the champion chose made less than the best one — its mistakes, measured. It falls as the robot learns. (Picking the best of noisy play-outs slightly overstates it; the trend is what counts.)</p>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Seconds lost per match</h2><span class="sub">the champion's lesson matches</span></div>
+            <canvas id="chartLost" height="110" aria-label="Seconds per match lost to idling, empty trips and blocked shots, by generation"></canvas>
+            <div class="chartlegend" id="lostLegend"></div>
+            <div class="sub" id="lostNow"></div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>DSIM score by generation</h2><button id="tableToggle" type="button" class="link">Show table</button></div>
-            <canvas id="chartScore" height="170" aria-label="DSIM score by generation, with reference lines"></canvas>
+            <canvas id="chartScore" height="150" aria-label="DSIM score by generation, with reference lines"></canvas>
             <div class="chartlegend" id="scoreLegend"></div>
             <div id="fitTable" class="table" hidden></div>
           </div>
+        </div>
+
+        <div class="panel" data-panel="race" hidden>
           <div class="card">
-            <div class="cardhead"><h2>Fitness by generation</h2></div>
-            <canvas id="chartFit" height="130" aria-label="Fitness by generation: best, mean and median"></canvas>
-            <div class="chartlegend" id="fitLegend"></div>
+            <div class="cardhead"><h2>The race</h2><span class="sub" id="raceNow"></span></div>
+            <div id="raceTable" class="table"></div>
+            <p class="hint">Each generation the champion and every contender play the same brand-new matches with the same luck. A contender takes over when its lead passes the boundary (z ≥ 2.3: safe although it is looked at every generation) and it is not worse in its bad matches (its worst fifth). Clearly worse ones, and ones that could not prove themselves in 96 matches, are dropped.</p>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>How each generation's robots ended</h2></div>
-            <canvas id="chartDeaths" height="70" aria-label="Deaths by cause per generation"></canvas>
-            <div class="chartlegend" id="deathLegend"></div>
+            <div class="cardhead"><h2>What was learned this generation</h2></div>
+            <div id="learnNow" class="sub"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>The champion's skill settings</h2><span class="sub">tuned by CMA-ES</span></div>
+            <div id="styleTable" class="table"></div>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="report" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>Gap report</h2><span class="sub" id="gapWhen"></span></div>
+            <div id="gapTable" class="table"></div>
+            <p class="hint">Measured the same way for everyone, from DSIM state. Your replays re-simulated in DSIM; the champion on your replays' own robot (ideal limits, no misses) and on each replay's own match — the same field luck you had; the champion on the exam. The rows split the gap: what the robot build costs, and what the brain and skills cost. A load starts with the first shot after a pickup.</p>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Checks</h2></div>
+            <div id="checks" class="sub"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Mistakes on the exam</h2><span class="sub">per match</span></div>
+            <div id="examMistakes" class="table"></div>
           </div>
         </div>
 
@@ -148,19 +192,19 @@
             <div id="presetList" class="presets" role="radiogroup" aria-label="Training presets"></div>
             <div id="presetDiff" class="sub diff"></div>
             <div class="row"><button id="presetApply" type="button" disabled>Apply preset</button></div>
-            <p class="hint">A preset sets how hard and how the run trains: robots per generation, matches per robot, how the champion is proven, mutations, students. What the robots play (episodes, driver, robot, hints, penalties) is never touched. Applies from the next generation.</p>
+            <p class="hint">A preset sets how hard the run trains: how many matches of lessons per generation, how many luck draws per lesson, how many skill settings are tried, how the champion is proven, how many cores. What the robots play (robot, driver) is never touched. Applies from the next generation.</p>
           </div>
           <details class="card adv" id="advanced">
             <summary><h2>Every setting</h2><span class="sub" id="cfgAlgo"></span></summary>
             <form id="cfgForm" class="advform">
-              <div class="cardhead"><h2>Population and selection</h2></div>
-              <div class="fields" id="cfgEvo"></div>
-              <div class="cardhead"><h2>Mutations and learning from replays</h2></div>
+              <div class="cardhead"><h2>Lessons</h2></div>
+              <div class="fields" id="cfgCollect"></div>
+              <div class="cardhead"><h2>Learning</h2></div>
               <div class="fields" id="cfgLearn"></div>
-              <div class="cardhead"><h2>Accuracy</h2></div>
-              <div class="fields" id="cfgAcc"></div>
-              <div class="cardhead"><h2>What counts</h2></div>
-              <div class="fields" id="cfgFit"></div>
+              <div class="cardhead"><h2>Skill settings (CMA-ES)</h2></div>
+              <div class="fields" id="cfgSkills"></div>
+              <div class="cardhead"><h2>Race and exam</h2></div>
+              <div class="fields" id="cfgRace"></div>
               <div class="cardhead"><h2>The robots' world</h2></div>
               <div class="fields" id="cfgWorld"></div>
               <div class="cardhead"><h2>Housekeeping</h2></div>
@@ -175,7 +219,7 @@
         <div class="panel" data-panel="data" hidden>
           <div class="card">
             <div class="cardhead"><h2>Training data</h2><span class="sub" id="dataState"></span></div>
-            <p class="sub">Your DSIM replays in <span class="mono">Training data/</span>. Each one is re-simulated in DSIM and every decision in it (which group, FLOWER, shoot, human player) becomes a lesson. Generation 0 starts from a network fitted to them, and every generation a share of robots are <b>students</b>: a parent that takes a short lesson from these replays and from the champion's own decisions. How big that share is follows how well students do.</p>
+            <p class="sub">Your DSIM replays in <span class="mono">Training data/</span>. Each one is re-simulated in DSIM and every decision in it (which group, FLOWER, shoot, human player) becomes a demonstration. A network fitted to them races the champion from generation 0, and your decisions are mixed into what every candidate learns, fading out as the robot's own what-if lessons take over (the run's replay weight and fade). They are also the "you" row of the gap report.</p>
             <div id="dataList" class="datalist"></div>
             <div class="row">
               <button id="dataRefresh" type="button">Refresh training data</button>
@@ -184,16 +228,12 @@
             <p class="hint" id="dataRun"></p>
             <p class="hint">Refresh re-simulates the ticked replays and refits (a few seconds per replay); the open run then learns from the new set from its next generation. In DSIM, save a replay with Records → the run → ↓ Data.</p>
           </div>
-          <div class="card">
-            <div class="cardhead"><h2>What the students achieve</h2></div>
-            <div id="studentStats" class="sub"></div>
-          </div>
         </div>
 
         <div class="panel" data-panel="evaluate" hidden>
           <form id="evalForm" class="card">
             <div class="cardhead"><h2>Evaluate a policy</h2></div>
-            <p class="hint">Full matches on held-out seeds (never used in training or validation), no hints in the score. Runs between generations.</p>
+            <p class="hint">Full matches on held-out seeds (never used for lessons, the race or the exam); the reward is DSIM's score minus fouls DSIM does not call. Runs between generations.</p>
             <div class="fields">
               <label>Policy <select id="evalTarget"></select></label>
               <label>Matches <input id="evalN" type="number" min="1" max="2000" value="32" /></label>
@@ -206,19 +246,6 @@
           </div>
         </div>
 
-        <div class="panel" data-panel="lineage" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>What works</h2><span class="sub">share of each kind of child that made the top quarter</span></div>
-            <div id="opStats" class="opstats"></div>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>How generation <span id="linGen">—</span> was made</h2></div>
-            <div id="linOps" class="ops"></div>
-            <div id="linTable" class="table tall"></div>
-            <p class="hint">elite = kept unchanged · champion = the validated best, always kept · mutant = small nudges to some genes · crossover = genes mixed from two parents · behaviour mutation = a large change proven to alter what it chooses (or a skill setting) · student = a parent after a lesson from your replays · random = a brand-new robot. "Behaviour" is the share of test decisions where it now chooses differently from its parent.</p>
-          </div>
-        </div>
-
         <div class="panel" data-panel="log" hidden>
           <div class="card">
             <div class="cardhead"><h2>Run log</h2></div>
@@ -228,10 +255,10 @@
       </aside>
 
       <section class="combwrap" aria-label="Every generation so far">
-        <div class="combhead"><h2>What the robots choose to do</h2><span class="sub">share of decisions per generation, whole population · the order is what evolution learns</span></div>
+        <div class="combhead"><h2>What the champion chooses to do</h2><span class="sub">share of its job decisions per generation, in its lesson matches</span></div>
         <canvas id="chartChoice" height="90" aria-label="Share of each option chosen per generation"></canvas>
         <div class="chartlegend" id="choiceLegend"></div>
-        <div class="combhead gap"><h2>Every generation so far</h2><span class="sub">one cell per generation · brighter = higher best score · click to replay its best robot</span><div class="ramp" id="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div>
+        <div class="combhead gap"><h2>Every generation so far</h2><span class="sub">one cell per generation · brighter = higher best lesson-match score · click to replay its best match</span><div class="ramp" id="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div>
         <canvas id="comb" aria-label="Honeycomb of generations"></canvas>
       </section>
     </main>
@@ -242,15 +269,9 @@
         <div class="fields">
           <label>Name <input name="name" required pattern="[A-Za-z0-9_][A-Za-z0-9_\-]{0,47}" placeholder="solo-1" /></label>
           <label>How to train <select name="preset" id="newPreset"></select></label>
-          <label>Algorithm
-            <select name="algo"><option value="ga">Genetic algorithm</option><option value="es">Evolution strategies</option></select></label>
-          <label>Population <input name="pop" type="number" min="4" max="8192" placeholder="from the preset" /></label>
-          <label>Generation 0
-            <select name="init"><option value="imitation">Learned from your replays</option><option value="random">Random networks</option></select></label>
           <label>Robot <select name="profile" id="newProfile"></select></label>
-          <label class="check"><input name="sampleProfile" type="checkbox" checked /> a different robot from its range every life</label>
+          <label class="check"><input name="sampleProfile" type="checkbox" checked /> a different robot from its range every match</label>
           <label>Driver <select name="driver"><option value="oracle">Exact (no reaction delay)</option><option value="human">Human (0.25 s reaction)</option></select></label>
-          <label>Episodes <select name="stage"><option value="full">Full 2:30 matches</option><option value="curriculum">AUTO first, then full matches</option><option value="auto">AUTO only</option></select></label>
           <label>Seed <input name="seed" type="number" min="1" value="1" /></label>
         </div>
         <p class="hint" id="newErr" role="alert"></p>
@@ -264,8 +285,7 @@
         <p class="hint" id="forkFrom"></p>
         <div class="fields">
           <label>New run name <input name="name" required pattern="[A-Za-z0-9_][A-Za-z0-9_\-]{0,47}" /></label>
-          <label>Population <input name="pop" type="number" min="4" max="8192" /></label>
-          <label>Mutation size σ <input name="sigma" type="number" step="0.001" min="0.001" max="2" /></label>
+          <label>Lesson matches per generation <input name="collect" type="number" min="1" max="512" /></label>
           <label class="check"><input name="open" type="checkbox" checked /> open it now</label>
         </div>
         <p class="hint" id="forkErr" role="alert"></p>
@@ -286,7 +306,7 @@
     <div id="closed" class="closed" hidden>
       <div>
         <p class="emptyhead">Studio closed</p>
-        <p>Training, DSIM and the studio have stopped. Your runs are saved. Start again with <span class="mono">./start.sh</span>.</p>
+        <p>Training, DSIM and the studio have stopped. Your runs are saved. Start again with <span class="mono">./start.sh</span> — a run that was training carries on by itself.</p>
         <p class="sub" id="closedHint">You can close this tab.</p>
       </div>
     </div>

@@ -116,6 +116,11 @@ export class LineChart<T> {
     const d = this.o.digits ?? 1;
     ctx.font = `11px ${css('--f-mono')}`;
     ctx.fillStyle = css('--smoke');
+    if (!H.length && !this.refs.length) {
+      ctx.textAlign = 'center';
+      ctx.fillText(this.o.empty ?? 'press Start — the first generation appears here', w / 2, h / 2);
+      return;
+    }
     ctx.strokeStyle = '#2c241c';
     ctx.lineWidth = 1;
     for (let k = 0; k <= 3; k++) {

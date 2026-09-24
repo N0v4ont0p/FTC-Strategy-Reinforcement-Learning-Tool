@@ -77,7 +77,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
 
   function status() {
     const e = engine;
-    return e ? { running: e.running, paused: e.paused, phase: e.phase, gen: e.gen, config: e.config, data: e.data, lastGenAt: e.lastGenAt } : null;
+    return e ? { running: e.running, paused: e.paused, phase: e.phase, gen: e.gen, config: e.config, data: e.data, lastGenAt: e.lastGenAt, progress: e.running ? e.progress : null } : null;
   }
   /** the training data: every replay, what the current data set made of it, and the fit */
   function data() {
@@ -110,6 +110,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
         paused: e.paused,
         phase: e.phase,
         lastGenAt: e.lastGenAt,
+        progress: e.running ? e.progress : null,
         champion: champ(e.champion),
         arena: e.arena.map((a) => ({ id: a.id, op: a.lineage.op, since: a.since, n: a.pairs.length })),
         history: e.history(),

@@ -622,10 +622,16 @@ export class Engine extends EventEmitter {
   private check(): void {
     if (this.abortFlag) throw new Error('aborted');
   }
+  /** the latest progress (a page opened mid-phase shows it at once) */
+  progress: { gen: number; done: number; total: number; stage?: string; eval?: string } | null = null;
   private async map<T>(jobs: Job[], stage: string): Promise<T[]> {
     const gen = this.gen;
-    this.emit('progress', { gen, done: 0, total: jobs.length, stage });
-    const res = await this.ensurePool().map<T>(jobs, (done, total) => this.emit('progress', { gen, done, total, stage }));
+    const tell = (done: number, total: number): void => {
+      this.progress = { gen, done, total, stage };
+      this.emit('progress', this.progress);
+    };
+    tell(0, jobs.length);
+    const res = await this.ensurePool().map<T>(jobs, (done, total) => tell(done, total));
     if (this.abortFlag || res.length !== jobs.length || res.some((r) => !r)) throw new Error('aborted');
     return res;
   }

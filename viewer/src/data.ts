@@ -28,6 +28,7 @@ export interface RunState {
   paused: boolean;
   phase: 'idle' | 'generation' | 'evaluating' | 'paused';
   lastGenAt: string | null;
+  progress: Progress | null;
   champion: Champion;
   arena: { id: number; op: string; since: number; n: number }[];
   history: GenSummary[];
@@ -62,6 +63,14 @@ export interface Status {
   config: RunConfig;
   data: RunData;
   lastGenAt: string | null;
+  progress: Progress | null;
+}
+export interface Progress {
+  gen: number;
+  done: number;
+  total: number;
+  stage?: string;
+  eval?: string;
 }
 
 export interface Individual extends Lineage {

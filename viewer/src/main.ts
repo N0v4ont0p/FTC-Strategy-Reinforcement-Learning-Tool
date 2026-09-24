@@ -1,6 +1,6 @@
 import { Comb } from './comb';
 import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
-import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type GenFile, type GenSummary, type Inspected, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
+import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type GenFile, type GenSummary, type Inspected, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
 import type { World } from '../../dsim-main/src/types';
 
@@ -583,7 +583,7 @@ function renderViewInfo(): void {
   const n = newest();
   let html = '';
   if (!run) html = '';
-  else if (mode === 'live') html = liveGen >= 0 ? `generation ${fmt(liveGen)} · the champion's lesson matches · follows training` : 'no generations yet — press Start training';
+  else if (mode === 'live') html = liveGen >= 0 ? `generation ${fmt(liveGen)} · the champion's lesson matches · follows training` : run.running && !run.paused ? `generation ${fmt(run.gen)} is being played — its lesson matches appear here when it finishes` : 'no generations yet — press Start training';
   else if (mode === 'best') html = bestGen >= 0 ? `generation ${fmt(bestGen)} · its best lesson match · exactly as played${n > bestGen ? ` · <button type="button" class="link" id="loadNewest">newest: ${fmt(n)}</button>` : ''}` : 'no generations yet';
   else {
     const c = run.champion;
@@ -879,6 +879,7 @@ async function reset(state: State): Promise<void> {
     presetPick = '';
   }
   renderRun();
+  renderProgress(run?.progress ?? null);
   renderSettings();
   renderCheckpoints(run?.checkpoints ?? []);
   renderEvals(run?.evals ?? []);
@@ -894,6 +895,22 @@ async function reset(state: State): Promise<void> {
   if (switched || mode === 'live' || (mode === 'best' && !onDisk.includes(bestGen))) await showLive(newest());
   renderViewInfo();
 }
+function renderProgress(p: Progress | null): void {
+  if (!p) {
+    $('progFill').style.transform = 'scaleX(0)';
+    $('progText').textContent = '';
+    return;
+  }
+  $('progFill').style.transform = `scaleX(${p.total ? p.done / p.total : 0})`;
+  const what: Record<string, string> = {
+    'collecting lessons': 'the champion plays; every option at its decisions is played out',
+    learning: 'training a candidate on the lessons · measuring skill settings',
+    racing: 'the race: contenders and champion on the same fresh matches',
+    exam: 'the exam',
+    showcase: "the new champion's showcase match",
+  };
+  $('progText').textContent = p.eval ? `evaluating ${p.eval} · ${fmt(p.done)} of ${fmt(p.total)} matches` : `generation ${fmt(p.gen)} · ${what[p.stage ?? ''] ?? p.stage ?? ''} · ${fmt(p.done)} of ${fmt(p.total)}`;
+}
 function connect(): void {
   const es = new EventSource('/api/events');
   es.addEventListener('reset', (e) => void reset(JSON.parse((e as MessageEvent).data) as State));
@@ -904,23 +921,13 @@ function connect(): void {
     const dataChanged = JSON.stringify(run.data) !== JSON.stringify(s.data);
     Object.assign(run, { running: s.running, paused: s.paused, phase: s.phase, gen: s.gen, config: s.config, data: s.data, lastGenAt: s.lastGenAt });
     renderHeartbeat();
+    if (!s.running) renderProgress(null);
     renderStatus();
     if (cfgChanged) renderSettings();
     if (dataChanged) renderData();
     pace();
   });
-  es.addEventListener('progress', (e) => {
-    const p = JSON.parse((e as MessageEvent).data) as { gen: number; done: number; total: number; eval?: string; stage?: string };
-    $('progFill').style.transform = `scaleX(${p.total ? p.done / p.total : 0})`;
-    const what: Record<string, string> = {
-      'collecting lessons': 'the champion plays; every option at its decisions is played out',
-      learning: 'training a candidate on the lessons · measuring skill settings',
-      racing: 'the race: contenders and champion on the same fresh matches',
-      exam: 'the exam',
-      showcase: "the new champion's showcase match",
-    };
-    $('progText').textContent = p.eval ? `evaluating ${p.eval} · ${fmt(p.done)} of ${fmt(p.total)} matches` : `generation ${fmt(p.gen)} · ${what[p.stage ?? ''] ?? p.stage ?? ''} · ${fmt(p.done)} of ${fmt(p.total)}`;
-  });
+  es.addEventListener('progress', (e) => renderProgress(JSON.parse((e as MessageEvent).data) as Progress));
   es.addEventListener('generation', async (e) => {
     const g = JSON.parse((e as MessageEvent).data) as GenSummary;
     if (!run) return;

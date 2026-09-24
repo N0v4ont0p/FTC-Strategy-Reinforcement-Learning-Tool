@@ -57,7 +57,7 @@ const D = '\x1b[38;5;244m';
 const B = '\x1b[1m';
 const R = '\x1b[0m';
 console.log(`
-  ${B}${A}BIOBUZZ EVOLUTION STUDIO${R}   ${D}nothing is training — press Start in the studio${R}
+  ${B}${A}BIOBUZZ LEARNING STUDIO${R}   ${D}nothing is training — press Start in the studio${R}
 
   ${A}studio${R}  ${B}${studio.url}${R}   ${D}runs, training controls, checkpoints, rewind, settings, evaluation${R}
   ${flag('no-dsim') ? '' : `${A}DSIM  ${R}  ${B}http://localhost:${dsimPort}${R}   ${D}the real simulator (alpha) — paste a champion's DSIM snippet here${R}`}

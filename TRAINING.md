@@ -105,6 +105,18 @@ Why this is sound:
   option. The "points lost to choices" chart tracks that number for the champion. Picking the best
   of noisy play-outs overstates it a little, so watch the trend.
 
+### The first live Full push generation (2026-09-25)
+- The candidate learned from generation 0's lessons (3,193 lessons; held-out points lost per
+  decision 9.63 → 7.51, best-option hits 27 % → 35 %) won the race on 24 fresh matches with the
+  same luck, **+28.1 ± 17.6**, and became champion.
+- **Its exam (64 fixed matches): 221.0, +26.6 ± 9.9 over the no-learning robot. Thinking ahead:
+  251.7, +61.4 ± 14.4** (32 matches). Deterministic ✓, DSIM-verified ✓.
+- Mistakes per exam match, starting champion → new one:
+  - missed shots 30.5 → 20.2;
+  - empty trips 19.3 (48 s) → 7.0 (22 s);
+  - foul points 25 → 20.6.
+- The generation took 38.5 min: lessons 26.3, learning 1.3, race 0.9, exam 10.0.
+
 ## The tip cycle (from your replays)
 
 Measured on your 7 replays: a tip every 4.3 s, about 9 shots per tip, the robot about 44 in from its

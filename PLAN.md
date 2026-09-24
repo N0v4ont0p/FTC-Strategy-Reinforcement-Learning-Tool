@@ -753,5 +753,7 @@ What changed, and why:
 - **Measured costs:** Full push generation 36.5 min (lessons 25.2, learn 1.2, race 0.8, exam 9.3); the exam confirmed thinking ahead at **+35.0 ± 12.3** over the no-learning robot on 32 matches.
 - **Process check:** the Bash hook hides processes from `ps | grep`; three trainers once ran on one run directory. Use `/bin/ps` + `/usr/bin/grep`.
 
+**First live Full push generation (run `full-push-1`, 2026-09-25):** 3,193 lessons, held-out regret 9.63 → 7.51, hits 27 → 35 %; lesson candidate #2 won the race +28.1 ± 17.6 over 24 fresh (promoted in generation 0); exam **221.0 (+26.6 ± 9.9 over no-learning, 64 matches)**, thinking ahead **251.7 (+61.4 ± 14.4, 32)**; deterministic + DSIM-verified; exam mistakes: missed 30.5 → 20.2, empty trips 19.3/48 s → 7.0/22 s, fouls 25 → 20.6; 38.5 min per generation.
+
 **Not built, deliberately:** macro jobs beyond the tip cycle (search and lessons already evaluate sequences through their play-outs); duo / 4-robot; the old GA (deleted: `train/algos.ts`).
 

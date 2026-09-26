@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { BB, bb, bbEvalStart, coerce, footprintCorners, init, newMatch } from '../harness/dsim';
-import { loadProfile, resolve } from '../harness/profiles';
+import { loadProfile, profileProblems, resolve } from '../harness/profiles';
 import { polysOverlap, rect } from '../harness/geom';
 import { mulberry32 } from '../harness/rng';
 import { fromB64, paramCount, skipOffset, styleOffset, toB64 } from './net';
@@ -40,6 +40,16 @@ const prof = resolve(loadProfile(join(ROOT, 'profiles/real-v0.json')));
   const beside = poses.every(({ p }) => p.x > 55 && p.y > f3.y + BB.BB_FLOWER_FOOT.along / 2 && p.y < f3.y + 16 && p.headingDeg === 180);
   check('1 spawn: G304-legal for the nominal robot and all 4 size corners of REAL-v0', legal);
   check('1 spawn: against the blue wall just right of FLOWER F3 (bottom right of the view), facing the field', beside, poses.map(({ p }) => `(${p.x}, ${p.y})`).join(' '));
+}
+
+// ---- 1b. every profile builds as written over its whole range (a clamped draw throws mid-run) ---------------
+{
+  const files = readdirSync(join(ROOT, 'profiles')).filter((f) => f.endsWith('.json'));
+  const bad = files.flatMap((f) => profileProblems(loadProfile(join(ROOT, 'profiles', f)), true).slice(0, 1).map((x) => `${f}: ${x}`));
+  check(`1 profiles: every robot a run can draw from the ${files.length} profiles is the one its file describes`, files.length >= 3 && bad.length === 0, bad.join('; '));
+  const tooLight = JSON.parse(readFileSync(join(ROOT, 'profiles/real-v1.json'), 'utf8'));
+  tooLight.spec.massLb.min = 22; // under DSIM's floor for a double turret + Box Tube
+  check('1 profiles: a range DSIM cannot build is caught before a run starts', profileProblems(tooLight, true).some((x) => x.startsWith('massLb')) && checkRun({ ...defaultConfig('x'), profile: 'profiles/none.json' }) === 'unknown profile');
 }
 
 // ---- 2. the skills play the game (greedy baseline, full real-robot limits, rule guards on) ------------------

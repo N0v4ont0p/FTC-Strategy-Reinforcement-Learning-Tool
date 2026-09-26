@@ -32,6 +32,7 @@ import { availableParallelism } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { WorkerPool, type Job } from '../harness/pool';
 import { seedOf } from '../harness/rng';
+import { loadProfile, profileProblems } from '../harness/profiles';
 import { exportReplay } from '../harness/export';
 import type { Replay } from '../harness/dsim';
 import { fromB64, styleOffset, toB64 } from './net';
@@ -545,6 +546,10 @@ export class Engine extends EventEmitter {
   }
 
   start(steps = -1): void {
+    if (!this.loop) {
+      const err = checkRun(this.ck.config);
+      if (err) throw new Error(`cannot start training: ${err}`);
+    }
     this.stepsLeft = steps;
     this.paused = false;
     this.stopFlag = false;
@@ -556,7 +561,12 @@ export class Engine extends EventEmitter {
       return;
     }
     this.running = true;
-    this.loop = this.runLoop().finally(() => {
+    // an error ends the run, never the studio: without this catch the rejection is unhandled
+    // and Node exits the whole process (the page just shows "reconnecting")
+    this.loop = this.runLoop().catch((e: unknown) => {
+      console.error(e);
+      this.event(`training stopped by an error: ${e instanceof Error ? e.message : String(e)}`);
+    }).finally(() => {
       this.loop = null;
       this.running = false;
       this.phase = 'idle';
@@ -1290,6 +1300,15 @@ export function checkRun(c: RunConfig): string | null {
   if (!int(c.keepGens, 10, 1e6)) return 'generations kept must be ≥ 10';
   if (!int(c.maxGens, 0, 1e9)) return 'generation limit must be a whole number ≥ 0';
   if (typeof c.preset !== 'string' || (c.preset && !PRESETS.some((p) => p.id === c.preset))) return 'unknown preset';
+  // every robot the run can draw must be the one the profile describes, or a job throws mid-run
+  if (typeof c.profile !== 'string' || !/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(c.profile) || !existsSync(join(ROOT, c.profile))) return 'unknown profile';
+  let bad: string[];
+  try {
+    bad = profileProblems(loadProfile(join(ROOT, c.profile)), c.sampleProfile);
+  } catch (e) {
+    return `profile ${c.profile} cannot be read: ${(e as Error).message}`;
+  }
+  if (bad.length) return `profile ${c.profile}: DSIM builds a different robot — ${bad.slice(0, 3).join('; ')}${bad.length > 3 ? ` (+${bad.length - 3} more)` : ''}`;
   return null;
 }
 

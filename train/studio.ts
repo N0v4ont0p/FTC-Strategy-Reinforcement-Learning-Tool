@@ -3,12 +3,27 @@
 // generation in progress is discarded; the run stays exactly at its last checkpointed generation).
 //   · the training studio (viewer + API)   http://localhost:4747
 //   · DSIM itself (alpha channel, local)   http://localhost:5173  — to watch champions in the real app
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { init } from '../harness/dsim';
 import { ROOT } from './engine';
 import { startServer } from './server';
+
+// A crash must leave its reason behind: the terminal it printed to may be long closed.
+// Appended to runs/studio-crash.log, then the studio exits as Node would have.
+for (const ev of ['uncaughtException', 'unhandledRejection'] as const)
+  process.on(ev, (e: unknown) => {
+    const text = `${new Date().toISOString()} ${ev}: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n\n`;
+    try {
+      mkdirSync(join(ROOT, 'runs'), { recursive: true });
+      appendFileSync(join(ROOT, 'runs', 'studio-crash.log'), text);
+    } catch {
+      /* nowhere to write: the terminal still gets it */
+    }
+    process.stderr.write(`\n  studio crashed — reason saved in runs/studio-crash.log\n${text}`);
+    process.exit(1);
+  });
 
 const argv = process.argv.slice(2);
 const flag = (k: string): boolean => argv.includes(`--${k}`);

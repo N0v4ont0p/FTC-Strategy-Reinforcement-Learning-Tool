@@ -18,6 +18,8 @@ interface Slot {
   p: ChildProcess;
   ready: Promise<void>;
   busy: boolean;
+  /** exited or failed to start: never handed another job */
+  dead: boolean;
 }
 
 export class WorkerPool {
@@ -33,9 +35,26 @@ export class WorkerPool {
   private start(): Slot {
     const p = spawn(TSX, [join(here, 'worker.ts')], { stdio: ['pipe', 'pipe', 'inherit'] });
     let markReady!: () => void;
-    const slot: Slot = { p, ready: new Promise<void>((r) => (markReady = r)), busy: false };
+    const slot: Slot = { p, ready: new Promise<void>((r) => (markReady = r)), busy: false, dead: false };
+    // A worker's failure must end the batch, never the process that owns the pool: every event
+    // below is one that, unhandled, would throw out of a stream callback and kill the studio.
+    const fail = (why: string): void => {
+      slot.dead = true;
+      markReady(); // a worker lost before it was ready must not leave map() waiting forever
+      if (this.closed) return;
+      for (const [, w] of this.waiting) w.reject(new Error(why));
+      this.waiting.clear();
+    };
+    p.on('error', (e) => fail(`worker could not run: ${e.message}`));
+    p.stdin!.on('error', (e) => fail(`worker stopped taking jobs: ${e.message}`)); // EPIPE: it died
     createInterface({ input: p.stdout! }).on('line', (line) => {
-      const msg = JSON.parse(line) as { ready?: boolean; id: number; ok: boolean; result?: unknown; error?: string };
+      let msg: { ready?: boolean; id: number; ok: boolean; result?: unknown; error?: string };
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        process.stderr.write(`[worker] ${line.slice(0, 500)}\n`); // stray output, not a result
+        return;
+      }
       if (msg.ready) return markReady();
       const w = this.waiting.get(msg.id);
       this.waiting.delete(msg.id);
@@ -44,13 +63,8 @@ export class WorkerPool {
       if (msg.ok) w.resolve(msg.result);
       else w.reject(new Error(`job ${msg.id} failed: ${msg.error}`));
     });
-    p.on('exit', (code) => {
-      markReady(); // a worker killed before it was ready must not leave map() waiting forever
-      if (this.closed) return;
-      // a worker must never vanish silently: fail everything in flight
-      for (const [, w] of this.waiting) w.reject(new Error(`worker exited with code ${code}`));
-      this.waiting.clear();
-    });
+    // a worker must never vanish silently: fail everything in flight
+    p.on('exit', (code, signal) => fail(`worker exited with ${signal ? `signal ${signal}` : `code ${code}`}`));
     return slot;
   }
 
@@ -58,6 +72,7 @@ export class WorkerPool {
     const id = this.nextId++;
     slot.busy = true;
     return new Promise<T>((resolve, reject) => {
+      if (slot.dead) return reject(new Error('worker exited'));
       this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
       slot.p.stdin!.write(JSON.stringify({ id, ...job }) + '\n');
     });

@@ -3,6 +3,8 @@
 import { createInterface } from 'node:readline';
 import { init } from './dsim';
 
+// the pool is gone (studio quit or crashed): leave quietly instead of dying on EPIPE
+process.stdout.on('error', () => process.exit(0));
 await init();
 const mods = new Map<string, Record<string, (a: unknown) => unknown>>();
 const rl = createInterface({ input: process.stdin });

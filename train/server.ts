@@ -375,11 +375,14 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       const e = need();
       const b = await body(req);
       const a = b.action;
-      if (a === 'start') e.start();
-      else if (a === 'step') {
-        const n = Number(b.n ?? 1);
-        if (!(Number.isInteger(n) && n >= 1 && n <= 10000)) throw new HttpError(400, 'step 1 to 10000 generations');
-        e.start(n);
+      if (a === 'start' || a === 'step') {
+        const n = a === 'step' ? Number(b.n ?? 1) : -1;
+        if (a === 'step' && !(Number.isInteger(n) && n >= 1 && n <= 10000)) throw new HttpError(400, 'step 1 to 10000 generations');
+        try {
+          e.start(n);
+        } catch (err) {
+          throw bad(err);
+        }
       } else if (a === 'pause') e.pause();
       else if (a === 'resume') e.resume();
       else if (a === 'stop') e.stop();
@@ -505,8 +508,12 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       const e = open(readFileSync(LAST, 'utf8').trim());
       // it was training when the studio closed (quit, crash, the Mac restarting): carry on
       if (e.wasTraining) {
-        e.start();
-        e.event('training resumed by itself — it was running when the studio closed');
+        try {
+          e.start();
+          e.event('training resumed by itself — it was running when the studio closed');
+        } catch (err) {
+          e.event(`training could not resume by itself: ${(err as Error).message}`);
+        }
       }
     } catch {
       /* it was deleted or is an old version: start with none open */

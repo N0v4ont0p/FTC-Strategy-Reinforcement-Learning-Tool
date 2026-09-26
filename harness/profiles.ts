@@ -2,7 +2,7 @@
 // (layer C). A value is a number, or a range {min,max,nominal} that is sampled for envelope runs.
 import { readFileSync } from 'node:fs';
 import { coerce, type RobotSpec } from './dsim';
-import type { Rng } from './rng';
+import { mulberry32, type Rng } from './rng';
 
 type Num = number | { min: number; max: number; nominal: number };
 export interface ProfileFile {
@@ -87,6 +87,25 @@ export function resolve(p: ProfileFile, rng?: Rng): Resolved {
   for (const [k, v] of Object.entries(p.perturb)) perturb[k] = pick(`perturb.${k}`, v);
 
   return { id: p.id, point, spec, limits: limits as unknown as Limits, perturb: perturb as unknown as Perturb, clamped, expectFails: checkExpect(spec, p.expect) };
+}
+
+/** Every way this profile's robot comes out wrong in DSIM, over the whole envelope a run can
+ * draw from: the nominal point, each spec range at its min and max (the rest nominal), all at
+ * min, all at max, and 256 fixed random samples. Empty = every robot a run samples is the one
+ * the file describes. A run must not start otherwise: `robotFor` throws on the first bad draw. */
+export function profileProblems(p: ProfileFile, sample: boolean): string[] {
+  const out = new Set<string>();
+  const add = (r: Resolved, where: string): void => {
+    for (const f of [...r.expectFails, ...r.clamped]) out.add(`${f} (${where})`);
+  };
+  add(resolve(p), 'nominal');
+  if (sample) {
+    const ranges = Object.entries(p.spec).filter(([, v]) => isRange(v)) as [string, { min: number; max: number }][];
+    for (const [k, v] of ranges) for (const end of ['min', 'max'] as const) add(resolve(pinned(p, { [`spec.${k}`]: v[end] })), `${k} at its ${end}`);
+    for (const end of ['min', 'max'] as const) add(resolve(pinned(p, Object.fromEntries(ranges.map(([k, v]) => [`spec.${k}`, v[end]])))), `every range at its ${end}`);
+    for (let s = 1; s <= 256; s++) add(resolve(p, mulberry32(s)), `sample ${s}`);
+  }
+  return [...out];
 }
 
 function checkExpect(spec: RobotSpec, e: Record<string, unknown>): string[] {

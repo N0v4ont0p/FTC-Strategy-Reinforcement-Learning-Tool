@@ -73,6 +73,7 @@
       <aside class="side">
         <div class="tabs" role="tablist" aria-label="Panels">
           <button role="tab" aria-selected="true" data-tab="overview" type="button">Overview</button>
+          <button role="tab" aria-selected="false" data-tab="playbook" type="button">Playbook</button>
           <button role="tab" aria-selected="false" data-tab="race" type="button">Race</button>
           <button role="tab" aria-selected="false" data-tab="report" type="button">Report</button>
           <button role="tab" aria-selected="false" data-tab="runs" type="button">Runs</button>
@@ -127,6 +128,28 @@
             <canvas id="chartScore" height="150" aria-label="DSIM score by generation, with reference lines"></canvas>
             <div class="chartlegend" id="scoreLegend"></div>
             <div id="fitTable" class="table" hidden></div>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="playbook" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>AUTO playbook</h2><span class="hint mono" id="pbStatus"></span></div>
+            <p class="hint">The best 30 s AUTO for our robot beside each kind of partner, from each legal pair of starts, found by search in DSIM. Every plan is scored on the same luck draws; the best few on 64 fresh ones, ranked on the average and the worst tenth. <b>Best response</b>: the partner runs its own AUTO. <b>Joint</b>: both AUTOs planned together. It needs every core: pause training first.</p>
+            <div class="fields">
+              <label>Robot <select id="pbProfile"></select></label>
+              <label>Budget <select id="pbBudget"><option value="full">Full (about 90 s an entry)</option><option value="quick">Quick look (about 15 s)</option></select></label>
+              <label>Our start <select id="pbStart"><option value="">every start</option><option value="F3">F3 (our start)</option><option value="TOP_REAR">top, rear wall</option><option value="BOTTOM_AUD">bottom, audience wall</option><option value="TOP_SIDE">top, side wall</option><option value="BOTTOM_SIDE">bottom, side wall</option></select></label>
+            </div>
+            <div class="row"><button id="pbBuild" type="button">Build playbook</button><button id="pbStop" type="button" class="quiet">Stop</button></div>
+            <div class="livebar" aria-hidden="true"><div id="pbFill"></div></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Entries</h2><label class="hint">Partner <select id="pbFilter"><option value="">every partner</option></select></label></div>
+            <div id="pbList" class="table tall"><p class="hint">Nothing planned yet.</p></div>
+          </div>
+          <div class="card" id="pbDetail" hidden>
+            <div class="cardhead"><h2 id="pbTitle"></h2><button id="pbWatch" type="button">Watch it</button></div>
+            <div id="pbSheet"></div>
           </div>
         </div>
 

@@ -1,6 +1,6 @@
 import { Comb } from './comb';
 import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
-import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type GenFile, type GenSummary, type Inspected, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
+import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
 import type { World } from '../../dsim-main/src/types';
 
@@ -33,7 +33,7 @@ let run: RunState | null = null;
 let hist: GenSummary[] = [];
 let onDisk: number[] = [];
 /** LIVE follows training; the two replays are for analysing at 1× or 2× */
-let mode: 'live' | 'best' | 'champion' = 'live';
+let mode: 'live' | 'best' | 'champion' | 'playbook' = 'live';
 let liveGen = -1;
 let pendingGen = -1;
 let bestGen = -1;
@@ -43,6 +43,10 @@ let inspSearch = false;
 let inspShown = -2;
 let speed = 1;
 let closed = false;
+// the AUTO playbook: what is loaded, and which entry is selected / on the field
+let PB: PlaybookV | null = null;
+let pbWatching: string | null = null;
+let pbSelected: string | null = null;
 try {
   speed = Number(localStorage.getItem('bb.speed')) === 2 ? 2 : 1;
 } catch {
@@ -582,7 +586,8 @@ const newest = (): number => (onDisk.length ? onDisk[onDisk.length - 1] : -1);
 function renderViewInfo(): void {
   const n = newest();
   let html = '';
-  if (!run) html = '';
+  if (mode === 'playbook') html = pbWatching ? `AUTO playbook · ${esc(pbLabel(pbWatching))} · exactly as planned` : 'AUTO playbook';
+  else if (!run) html = '';
   else if (mode === 'live') html = liveGen >= 0 ? `generation ${fmt(liveGen)} · the champion's lesson matches · follows training` : run.running && !run.paused ? `generation ${fmt(run.gen)} is being played — its lesson matches appear here when it finishes` : 'no generations yet — press Start training';
   else if (mode === 'best') html = bestGen >= 0 ? `generation ${fmt(bestGen)} · its best lesson match · exactly as played${n > bestGen ? ` · <button type="button" class="link" id="loadNewest">newest: ${fmt(n)}</button>` : ''}` : 'no generations yet';
   else {
@@ -645,6 +650,89 @@ async function watchChampion(): Promise<void> {
   }
 }
 comb.onPick = (g) => void showBest(g);
+
+// ─────────────────────────────── the AUTO playbook ───────────────────────────────
+const PARTNER_LABEL: Record<string, string> = { none: 'no partner', real: 'a second REAL-v1', sniper: 'Sniper', hauler: 'Hauler', skimmer: 'Skimmer', parker: 'parks only', idle: 'does nothing' };
+const START_SHORT: Record<string, string> = { F3: 'F3', TOP_REAR: 'top rear', BOTTOM_AUD: 'bottom audience', TOP_SIDE: 'top side', BOTTOM_SIDE: 'bottom side' };
+const pbLabel = (key: string): string => {
+  const [partner, start, pstart, m] = key.split('|');
+  return `us at ${START_SHORT[start] ?? start} · ${PARTNER_LABEL[partner] ?? partner}${pstart !== '-' ? ` at ${START_SHORT[pstart] ?? pstart}` : ''}${m === 'joint' ? ' · joint plan' : ''}`;
+};
+function renderPbStatus(st: PlaybookStatusV): void {
+  $('pbStatus').textContent = st.running ? `building ${st.done}/${st.total}${st.current ? ` · ${pbLabel(st.current)}` : ''}` : st.total ? `${st.done}/${st.total} planned in the last build` : '';
+  ($('pbFill') as HTMLElement).style.width = st.total ? `${(100 * st.done) / st.total}%` : '0%';
+  $<HTMLButtonElement>('pbBuild').disabled = st.running;
+  $<HTMLButtonElement>('pbStop').disabled = !st.running;
+}
+function renderPlaybook(): void {
+  if (!PB) return;
+  const sel = $<HTMLSelectElement>('pbProfile');
+  if (sel.options.length !== PB.profiles.length) sel.innerHTML = PB.profiles.map((p) => `<option value="${esc(p)}">${esc(p.replace('profiles/', '').replace('.json', ''))}</option>`).join('');
+  sel.value = PB.profile;
+  const filt = $<HTMLSelectElement>('pbFilter');
+  if (filt.options.length === 1) filt.innerHTML += Object.entries(PARTNER_LABEL).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  renderPbStatus(PB.status);
+  const f = filt.value;
+  const rows = PB.entries.filter((e) => !f || e.problem.partner === f).sort((a, b) => a.key.localeCompare(b.key));
+  $('pbList').innerHTML = rows.length
+    ? `<table><thead><tr><th>entry</th><th title="our nominal robot, 64 fresh luck draws">AUTO points</th><th title="mean of the worst tenth of those draws">worst tenth</th><th title="the same draws with no plan (every robot its own brain)">vs no plan</th><th title="robots drawn from the profile's range">robot range</th></tr></thead><tbody>${rows
+        .map(
+          (e) =>
+            `<tr data-key="${esc(e.key)}" class="pick${e.key === pbSelected ? ' sel' : ''}"><td>${esc(pbLabel(e.key))}</td><td class="mono">${e.nominal.mean.toFixed(1)} ± ${e.nominal.ci95.toFixed(1)}</td><td class="mono">${e.nominal.cvar10.toFixed(1)}</td><td class="mono">${sgn(e.nominal.mean - e.baseline.mean)}</td><td class="mono">${e.sampled.mean.toFixed(1)}</td></tr>`,
+        )
+        .join('')}</tbody></table>`
+    : `<p class="hint">${PB.status.running ? 'The first entry appears when it is planned.' : 'Nothing planned yet — press Build playbook.'}</p>`;
+  for (const tr of $('pbList').querySelectorAll<HTMLTableRowElement>('tr[data-key]')) tr.onclick = () => showPbEntry(tr.dataset.key!);
+  if (pbSelected) showPbEntry(pbSelected, false);
+}
+function showPbEntry(key: string, scroll = true): void {
+  const e = PB?.entries.find((q) => q.key === key);
+  if (!e) return;
+  pbSelected = key;
+  for (const tr of $('pbList').querySelectorAll<HTMLTableRowElement>('tr[data-key]')) tr.classList.toggle('sel', tr.dataset.key === key);
+  $('pbDetail').hidden = false;
+  $('pbTitle').textContent = pbLabel(key);
+  const who = (r: number): string => (r === 0 ? 'our robot' : 'partner');
+  const t = (tick: number): string => `${Math.max(0, (tick - AUTO_START) / 60).toFixed(1)} s`;
+  $('pbSheet').innerHTML = `<p class="hint">${e.nominal.mean.toFixed(1)} ± ${e.nominal.ci95.toFixed(1)} AUTO points (worst tenth ${e.nominal.cvar10.toFixed(1)}); with no plan ${e.baseline.mean.toFixed(1)}; across the robot's range ${e.sampled.mean.toFixed(1)}. ${e.explored} plans scored in ${e.seconds.toFixed(0)} s${e.style ? '; skill settings tuned for it' : ''}.</p>
+    ${e.taken.length ? '' : '<p><b>No plan beats the robots\' own AUTO here</b> — run your usual routine (the replay shows it).</p>'}
+    <table><thead><tr><th>when</th><th>robot</th><th>job</th></tr></thead><tbody>${e.taken
+      .map((q) => `<tr><td class="mono">${t(q.tick)}${q.end ? `–${t(q.end)}` : ''}</td><td>${who(q.robot)}</td><td><i class="dot" style="background:${OPTIONS.find((o) => o.key === q.kind)?.color ?? '#888'}"></i> ${esc(q.label)}${q.matched ? '' : ' <span class="hint">(not there: it chose itself)</span>'}</td></tr>`)
+      .join('')}</tbody></table>
+    <p class="hint">After its planned steps each robot plays on with its own brain until AUTO ends.</p>`;
+  if (scroll) $('pbDetail').scrollIntoView({ block: 'nearest' });
+}
+async function loadPlaybook(profile?: string): Promise<void> {
+  try {
+    PB = await getJSON<PlaybookV>(`/api/playbook${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`);
+    renderPlaybook();
+  } catch (e) {
+    $('pbList').innerHTML = `<p class="hint">${esc((e as Error).message)}</p>`;
+  }
+}
+async function watchPlaybook(key: string): Promise<void> {
+  if (!PB) return;
+  try {
+    const r = await getJSON<{ frames: Frames; events: [number, string][] }>(`/api/playbook/frames?profile=${encodeURIComponent(PB.profile)}&key=${encodeURIComponent(key)}`);
+    view.loadFocus({ gen: 0, fitness: 0, score: 0, death: 'survived', parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, lineage: { id: -1, op: 'champion', parents: [], muts: 0, born: 0 }, frames: r.frames, events: r.events } as FocusFile);
+    pbWatching = key;
+    view.playing = true;
+    $('play').textContent = 'Pause';
+    setMode('playbook');
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+}
+$('pbProfile').onchange = () => void loadPlaybook($<HTMLSelectElement>('pbProfile').value);
+$('pbFilter').onchange = () => renderPlaybook();
+$('pbWatch').onclick = () => pbSelected && void watchPlaybook(pbSelected);
+$('pbBuild').onclick = async () => {
+  if (!PB) return;
+  const start = $<HTMLSelectElement>('pbStart').value;
+  await act(post('/api/playbook/build', { profile: PB.profile, budget: $<HTMLSelectElement>('pbBudget').value, starts: start ? [start] : [] }), 'playbook build started — entries appear as they are planned');
+};
+$('pbStop').onclick = () => void act(post('/api/playbook/stop', {}), 'the playbook build stops after the entry in progress');
+void loadPlaybook();
 $('modeLive').onclick = () => void showLive(newest());
 $('modeBest').onclick = () => void showBest(newest());
 $('modeChamp').onclick = () => void watchChampion();
@@ -729,7 +817,7 @@ view.onFrame = (f: FrameInfo) => {
     const hop = [...(f.hopper ?? '')].map((c) => `<i class="dot ${c}"></i>`).join('') || '<span class="sub">empty</span>';
     const ph = f.phase === 'teleop' ? 'TELEOP' : f.phase === 'auto' ? 'AUTO' : (f.phase ?? '').toUpperCase();
     if (mode === 'champion') renderInspector(f.tick);
-    $('overlay').innerHTML = `<span class="alive">${f.score ?? 0}</span>DSIM points · ${f.tips ?? 0} tips · ${ph} ${Math.max(0, f.phaseLeft ?? 0).toFixed(0)} s<br>hopper ${hop}<br>${opt ? `<i class="optsw" style="background:${opt.color}"></i>${esc(f.option ?? '')}` : '<span class="sub">deciding…</span>'}<br><span class="sub">${mode === 'champion' ? `champion #${champId}` : `best lesson match of generation ${fmt(bestGen)}`} · exactly as played · ${speed}×</span>`;
+    $('overlay').innerHTML = `<span class="alive">${f.score ?? 0}</span>DSIM points · ${f.tips ?? 0} tips · ${ph} ${Math.max(0, f.phaseLeft ?? 0).toFixed(0)} s<br>hopper ${hop}<br>${opt ? `<i class="optsw" style="background:${opt.color}"></i>${esc(f.option ?? '')}` : '<span class="sub">deciding…</span>'}<br><span class="sub">${mode === 'champion' ? `champion #${champId}` : mode === 'playbook' ? 'AUTO playbook, luck draw 1' : `best lesson match of generation ${fmt(bestGen)}`} · exactly as played · ${speed}×</span>`;
   }
 };
 /** the decision the champion was at on this tick: every option it had, what the network scored,
@@ -973,6 +1061,17 @@ function connect(): void {
     renderEvals(run.evals);
     renderHistory();
     toast('evaluation finished');
+  });
+  es.addEventListener('playbook', (e) => {
+    const d = JSON.parse((e as MessageEvent).data) as { profile: string; status: PlaybookStatusV };
+    if (PB && d.profile === PB.profile) {
+      PB.status = d.status;
+      renderPbStatus(d.status);
+    }
+  });
+  es.addEventListener('playbookEntry', (e) => {
+    const d = JSON.parse((e as MessageEvent).data) as { profile: string; key: string };
+    if (PB && d.profile === PB.profile) void loadPlaybook(PB.profile);
   });
   es.addEventListener('quit', () => {
     es.close();

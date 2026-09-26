@@ -371,7 +371,7 @@ export function zOf(a: ArenaEntry): number {
   const { mean, se } = diffStats(a);
   return se > 0 && Number.isFinite(se) ? mean / se : 0;
 }
-const emptyMistakes = (): Mistakes => ({ missedShots: 0, emptyTrips: 0, emptyTripS: 0, blockedShots: 0, blockedShotS: 0, idleS: 0, fouls: 0, regret: 0, regretN: 0 });
+const emptyMistakes = (): Mistakes => ({ missedShots: 0, emptyTrips: 0, emptyTripS: 0, blockedShots: 0, blockedShotS: 0, idleS: 0, fouls: 0, regret: 0, regretN: 0, stalls: 0 });
 function meanMistakes(rs: EpisodeResult[]): Mistakes {
   const m = emptyMistakes();
   for (const r of rs) for (const k of Object.keys(m) as (keyof Mistakes)[]) m[k] += r.mistakes[k] / Math.max(1, rs.length);

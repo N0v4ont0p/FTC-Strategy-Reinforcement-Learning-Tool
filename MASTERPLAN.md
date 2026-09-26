@@ -1,6 +1,8 @@
 # MASTERPLAN — Learning Studio v2
 
-Status: plan, 2026-09-26. Nothing below is built yet. Replaces the generational trainer (TRAINING.md) phase by phase; every phase passes the gate before it ships.
+Status (2026-09-26): phase 0 measured; **phase 1 built** (alliance play, partners, starts, Box Tube,
+per-build envelopes, paths, strike rule, stalls, Store, service). Phases 2–6 next. Replaces the
+generational trainer (TRAINING.md) phase by phase; every phase passes the gate before it ships.
 
 ## 1. Goal
 

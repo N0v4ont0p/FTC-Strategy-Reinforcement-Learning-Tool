@@ -20,15 +20,19 @@ export interface ShotLog {
 
 const APEX_CAP_Z = BB.BB_HIVE_OPEN_Z[0] - 2 - 1;
 
-/** `perAlliance` accuracy; an alliance absent or at 1.0 is untouched. A class, so a running match
- * can be forked (train/fork.ts). */
+/** `perAlliance` accuracy; an alliance absent or at 1.0 is untouched. `perRobot` (by robot id)
+ * overrides it for the robot that launched the element — two robots of one alliance can miss at
+ * different rates. DSIM's flight state names only the alliance, so the launcher is the robot that
+ * HELD the element the tick before. A class, so a running match can be forked (train/fork.ts). */
 export class Perturber {
   private rng: Stream;
   private seen = new Set<number>(); // ball ids currently in a flight already judged
+  private holder = new Map<number, number>(); // ball id → the robot holding it (last seen)
   constructor(
     seed: number,
     private perAlliance: Partial<Record<Alliance, Perturb>>,
     private log?: ShotLog,
+    private perRobot?: Map<number, Perturb>,
   ) {
     this.rng = mulberry32(seedOf(seed, 'perturb'));
   }
@@ -40,6 +44,7 @@ export class Perturber {
     let changed = false;
     for (const b of w.balls) {
       const s = b.state;
+      if (s.kind === 'held') this.holder.set(b.id, (s as { robot: number }).robot);
       if (s.kind !== 'flight') {
         this.seen.delete(b.id);
         continue;
@@ -47,7 +52,9 @@ export class Perturber {
       if (this.seen.has(b.id)) continue;
       this.seen.add(b.id);
       const by = (s as { by?: Alliance }).by;
-      const p = by ? this.perAlliance[by] : undefined;
+      const who = this.holder.get(b.id);
+      this.holder.delete(b.id);
+      const p = (who !== undefined ? this.perRobot?.get(who) : undefined) ?? (by ? this.perAlliance[by] : undefined);
       if (!p) continue;
       if (this.log) this.log.launched++;
       if (p.shotAccuracy >= 1 || this.rng() < p.shotAccuracy) continue;

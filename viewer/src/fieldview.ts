@@ -142,6 +142,9 @@ export class FieldView {
     const r = w.robots[0];
     r.spec = fr.spec as RobotState['spec'];
     r.hopper = [];
+    // a match with an alliance partner: a second robot, its build from the frames
+    w.robots.length = 1;
+    if (fr.spec2) w.robots.push({ ...structuredClone(r), id: 1, spec: fr.spec2 as RobotState['spec'], hopper: [] });
     w.balls = fr.meta.map(([id, color, rad]) => {
       const b = { id, color, pos: { x: 0, y: 0 }, z: 0, vel: { x: 0, y: 0 }, vz: 0, state: { kind: 'ground' } } as unknown as Artifact & { r?: number };
       if (rad !== null) b.r = rad;
@@ -166,6 +169,16 @@ export class FieldView {
       r.bbTurretPitch = q.r[5];
       r.bbTurret2Pitch = q.r[6];
       r.hopper = [...q.h].map((c) => COLOR[c] ?? 'yellow') as RobotState['hopper'];
+      const p2 = w.robots[1];
+      if (p2 && q.p) {
+        p2.pos = { x: q.p[0], y: q.p[1] };
+        p2.heading = q.p[2];
+        p2.turretHeading = q.p[3];
+        p2.bbTurret2Heading = q.p[4];
+        p2.bbTurretPitch = q.p[5];
+        p2.bbTurret2Pitch = q.p[6];
+        p2.hopper = [...(q.ph ?? '')].map((c) => COLOR[c] ?? 'yellow') as RobotState['hopper'];
+      }
       for (let i = 0; i < w.balls.length && 3 * i + 2 < q.b.length; i++) {
         const b = w.balls[i];
         b.pos = { x: q.b[3 * i], y: q.b[3 * i + 1] };
@@ -394,7 +407,7 @@ export class FieldView {
     }
     for (const r of w.robots) {
       const held = w.balls.filter((b) => b.state.kind === 'held' && (b.state as { robot: number }).robot === r.id);
-      drawBiobuzzRobot(ctx, r, q.r[7] === 1, held, UP, w);
+      drawBiobuzzRobot(ctx, r, r.id === 0 ? q.r[7] === 1 : (q.p?.[7] ?? 0) === 1, held, UP, w);
     }
     drawBiobuzzBalls(ctx, w, UP);
     drawHiveCanopy(ctx, w);

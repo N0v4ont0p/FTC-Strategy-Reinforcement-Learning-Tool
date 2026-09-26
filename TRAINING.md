@@ -13,11 +13,61 @@ does not enforce.** Those rules are checked by our guards and counted as if deli
 - G417 (HIVE frame), G407 (controlling 5+ elements), G409 (catching a spill), G426 (human player in
   AUTO): 15 points each (a MAJOR FOUL);
 - G427 C (human player while the drop area is covered): 5 (a MINOR FOUL);
-- striking an element faster than any robot moves (a physics oddity): 5.
+- profiting from a physics oddity: 5 for each element knocked faster than any robot moves that then
+  scores for us (enters a HIVE cell, or lies in our GARDEN 3 s later). A strike alone is only
+  reported: a ball bounces off a moving chassis at up to twice its speed, and fining every strike
+  (v1) taught the robot to stay away from elements — about 23 points a match on REAL-v1.
+
+With a partner, the reward is the ALLIANCE's: its DSIM score minus both robots' guard fouls.
 
 There are no hints and no shaping. The headline number in the studio is the champion's **points per
 match over the no-learning robot on the same exam matches** (± its 95 % range). 0 means as good as the
 no-learning robot; +30 means 30 points a match better.
+
+## The alliance (v2 phase 1)
+
+Every match can have an **alliance partner** (MASTERPLAN §5). Partner types (`train/team.ts`):
+
+| partner | what it is |
+|---|---|
+| A second REAL-v1 | our robot again, its own draw from the profile |
+| Sniper · Hauler · Skimmer | DSIM's own preset builds: swerve single turret · tank rear dumper · x-drive double turret |
+| Parks only | drives off its wall and parks: LEAVE + PARK, nothing else |
+| Does nothing | never moves (it still takes up space and keeps its preloads) |
+
+Partners play with the same skills as ours (the no-learning order unless given a network) and a
+typical robot's limits (our profile's nominal fire rate, speeds and accuracy). Each robot's shots
+miss at its own rate.
+
+**Starts:** our start (side wall, right of FLOWER F3) and DSIM's four anchors, which DSIM seats for
+any build. Two robots of one alliance may not overlap: 16 of the 20 ordered pairs are legal
+(F3 / top side and bottom audience / bottom side overlap).
+
+**Playing together:**
+- each robot posts its job on a shared board, and its partner leaves those elements, that FLOWER and
+  that shooting spot alone;
+- a robot never drives into another: the part of its motion toward the other robot is dropped (it
+  slides past or waits). Another robot counts as a disc as wide as its corners reach, since a dumper
+  aiming spins its whole chassis. A tank, which cannot slide, stops;
+- two robots park at the two ends of the loading zone.
+
+Measured (48 matches each, the no-learning order, sampled REAL-v1): alone 218 · beside a second
+REAL-v1 306 · Sniper 295 · Skimmer 312 · Hauler 235 · a parker 183 · a robot that does nothing 191. A
+weak partner costs points: it holds its own preloads, which would otherwise be in the loading zone.
+
+### What else changed in the skills
+- **The Box Tube.** A robot with a Box Tube (REAL-v1) places a held NECTAR into a FLOWER after the
+  1:00 cue (G410): the top-most NECTAR owns the FLOWER (2 a scoring element) and the bottom-most
+  earns 5 — about 15 points on a staged FLOWER. REAL-v1 owns 3–4 FLOWERs at the end of a match.
+- **Shooting envelopes per build** (`train/envelope.ts`, `outputs/envelopes/`). v1 used REAL-v0's
+  S1 envelope for every robot; REAL-v1's turrets sit at the back corners, and a robot parked on a
+  spot that gave it no shot stalled the match. Each build family is now measured in DSIM (a spot
+  counts only if the shot goes in from all four headings: ~15 s a build).
+- **Paths** keep a turning robot's corners clear (the footprint's half-diagonal + 1.5 in), and a goal
+  near the HIVE frame is reached around the frame instead of through it.
+- **A tank** (the Hauler) steers by turning — DSIM tank takes side drives, not strafe.
+- **A stall** (20 s without progress) no longer ends the match: it is a counted mistake. Ending the
+  match threw away the end-game (PARK, FLOWERs) of a robot that was busy but unlucky.
 
 ## Start and stop everything
 
@@ -36,6 +86,22 @@ no-learning robot; +30 means 30 points a match better.
   usual, so a stopped run is obvious.
 
 Options: `./start.sh --no-dsim` · `--port 4747` · `--dsim-port 5173` · `--no-open`.
+
+**For long training, do not run the studio from the Claude app's preview panel**: the app stops what
+it started after 30 idle minutes (that ended a run on 2026-09-25). Run it as a service instead:
+
+```bash
+./start.sh --install      # a macOS LaunchAgent: starts at login, restarts after a crash, resumes training
+./start.sh --background   # or detached from this terminal (no login start)
+./start.sh --status       # is it running, and how
+./start.sh --stop         # quit it (a run that was training resumes next start)
+./start.sh --uninstall    # remove the LaunchAgent
+```
+
+Both restart the studio after a crash (at most 10 times an hour) but not after Quit. Output goes to
+`runs/studio.log`; a crash's reason to `runs/studio-crash.log`. Only one studio ever runs: a second
+one sees the first on its port and exits. If macOS keeps the LaunchAgent out of this folder (the log
+says "Operation not permitted"), give `node` Full Disk Access or use `--background`.
 
 ## How the robot learns — every generation
 

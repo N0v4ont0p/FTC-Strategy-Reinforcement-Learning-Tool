@@ -35,6 +35,18 @@ const port = Number(arg('port', '4747'));
 const dsimPort = Number(arg('dsim-port', '5173'));
 const bin = (n: string): string => join(ROOT, 'dsim-main', 'node_modules', '.bin', n);
 
+// ONE studio: a second one would fight the first for the port and, worse, train the same run twice
+// (an earlier session once had three trainers running). Exit 0 so a supervisor does not retry.
+try {
+  const r = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(800) });
+  if (r.status < 500) {
+    console.log(`A studio is already running at http://localhost:${port} — not starting a second one.`);
+    process.exit(0);
+  }
+} catch {
+  /* nothing there: start */
+}
+
 // the viewer is rebuilt whenever its sources are newer than the build (DSIM's own Vite, no download)
 function newest(dir: string): number {
   let t = 0;

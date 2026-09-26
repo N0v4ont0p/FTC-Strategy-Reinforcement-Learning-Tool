@@ -22,7 +22,8 @@ export interface Parts {
   hp: number;
   tips: number;
   violations: number;
-  strikes: number;
+  strikes: number; // elements struck faster than any robot moves (an anomaly, reported)
+  strikesScored?: number; // …of which scored for us within the window (fined as an exploit)
 }
 /** seconds of AUTO + TELEOP by what the robot was physically doing */
 export interface Activity {

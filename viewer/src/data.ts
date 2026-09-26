@@ -143,7 +143,56 @@ export const OPTIONS = [
   { key: 'position', label: 'get in position', color: '#8a8176' },
   // the tip cycle (your replays' loop): ≥ 15 OKLab ΔE from every hue above, normal and all three CVD simulations
   { key: 'cycle', label: 'the tip cycle by the HIVE', color: '#4fcdce' },
+  // the Box Tube: a NECTAR into a FLOWER after the 1:00 cue
+  { key: 'place', label: 'place a NECTAR on a FLOWER', color: '#a4c639' },
 ] as const;
+
+/** the AUTO playbook (train/playbook.ts) as the studio gets it */
+export interface PlanStepV {
+  kind: string;
+  label: string;
+  anchor?: number;
+  flower?: number;
+}
+export interface TakenStepV extends PlanStepV {
+  robot: number;
+  tick: number;
+  end?: number;
+  matched: boolean;
+}
+export interface MeanTailV {
+  mean: number;
+  ci95: number;
+  cvar10: number;
+  n: number;
+}
+export interface PlaybookEntryV {
+  key: string;
+  at: string;
+  problem: { profile: string; start: string; partner: string; partnerStart?: string; mode: 'best' | 'joint' };
+  plan: PlanStepV[][];
+  taken: TakenStepV[];
+  nominal: MeanTailV;
+  sampled: MeanTailV;
+  baseline: MeanTailV;
+  style: number[] | null;
+  explored: number;
+  seconds: number;
+}
+export interface PlaybookStatusV {
+  running: boolean;
+  done: number;
+  total: number;
+  current: string | null;
+  log: string[];
+}
+export interface PlaybookV {
+  profile: string;
+  name: string;
+  status: PlaybookStatusV;
+  entries: PlaybookEntryV[];
+  profiles: string[];
+}
 
 /** where a robot came from, in words */
 export const OP_LABEL: Record<string, string> = {

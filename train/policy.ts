@@ -11,7 +11,9 @@ import { Mlp, type NetShape } from './net';
 import { N_OBS, encode } from './obs';
 import type { Sample } from './bc';
 import { share } from './fork';
-import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, type Option, type OptionKind, type Style } from './skills';
+import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, parkGoal, type Option, type OptionKind, type Style } from './skills';
+import { NO_AVOID, type AllianceBoard, type BrainMode } from './team';
+import { matchStep, type PlanStep, type TakenStep } from './plan';
 
 export const HIDDEN = 16;
 export { STYLE };
@@ -49,6 +51,7 @@ export interface Decision {
 function greedyScore(o: Option, hopperFull: boolean): number {
   const est = o.feats[F_EST];
   if (o.kind === 'park') return 100;
+  if (o.kind === 'place') return 60 - est; // a NECTAR into a FLOWER after the 1:00 cue: ~15 points
   if (o.kind === 'hp') return 50;
   if (o.kind === 'position' || o.kind === 'cycle') return -100; // (the tip cycle is for learners to discover: the bar stays as it was)
   if (o.kind === 'shoot') return hopperFull ? 10 : -est - 1;
@@ -108,6 +111,20 @@ export class Brain {
   last: DecisionPoint | null = null;
   /** record the observation at decisions (lessons and search need it) */
   wantObs = false;
+  /** 'play' = the skills in the network's (or the greedy) order; 'park' = drive off the wall and park
+   * (a LEAVE + PARK partner); 'idle' = never moves */
+  readonly mode: BrainMode;
+  /** the alliance's shared board (train/team.ts): partners do not chase the same elements */
+  private board: AllianceBoard | null;
+  private parkSlot: number;
+  /** an AUTO PLAN being followed (train/auto.ts): at each job start the next step is taken — found
+   * by what it is (train/plan.ts) — and run to its end; past the plan the brain chooses itself */
+  private plan: PlanStep[] | null = null;
+  /** the plan's steps as they were taken, and when (the timing sheet) */
+  taken: TakenStep[] = [];
+  /** the planner's look-ahead: at the first job start past the plan, keep the options in `free` */
+  stopAtFree = false;
+  free: { tick: number; opts: Option[]; scores: number[] } | null = null;
 
   constructor(
     params: Float32Array | null,
@@ -115,10 +132,26 @@ export class Brain {
     private robotId = 0,
     public log?: Decision[],
     public samples?: Sample[],
+    o: { mode?: BrainMode; board?: AllianceBoard | null; parkSlot?: number } = {},
   ) {
     this.net = params ? new Mlp(SHAPE, share(params)) : null;
     this.style = decodeStyle(this.net ? this.net.style() : null);
     share(prof);
+    this.mode = o.mode ?? 'play';
+    this.board = o.board ?? null;
+    this.parkSlot = o.parkSlot ?? 0;
+  }
+  /** the robot this brain drives */
+  get id(): number {
+    return this.robotId;
+  }
+  follow(steps: PlanStep[]): void {
+    this.plan = steps;
+  }
+  /** skill settings (genes) instead of the network's own — before the match starts */
+  setStyle(genes: ArrayLike<number>): void {
+    if (this.pilot) throw new Error('skill settings are set before the match starts');
+    this.style = decodeStyle(genes);
   }
 
   current(): Decision | null {
@@ -151,6 +184,7 @@ export class Brain {
     const o = opts[i];
     this.ex = new Executor(o, this.pilot!, w, r, this.banned);
     this.cur = { tick: w.tick, kind: o.kind, label: o.label, x: o.x, y: o.y, of: opts.length };
+    this.board?.set(this.robotId, { kind: o.kind, balls: o.balls ?? [], flower: o.flower ?? null, spot: o.kind === 'shoot' ? { x: o.x, y: o.y } : null });
     this.log?.push(this.cur);
     this.lastThink = w.tick;
   }
@@ -171,8 +205,21 @@ export class Brain {
     const r = w.robots.find((q) => q.id === this.robotId)!;
     if (!this.pilot) {
       this.pilot = new Pilot(r.spec, this.prof.limits, this.style);
+      this.pilot.parkSlot = this.parkSlot;
       this.cap = BB.bbHopperCap(r.spec);
     }
+    if (this.mode === 'idle') return new Map([[this.robotId, cmd()]]);
+    if (this.mode === 'park') {
+      // a LEAVE + PARK partner: off the wall to its park spot at once, and it stays there
+      const ph = w.match.phase;
+      this.pilot.others = w.robots.filter((q) => q.id !== this.robotId).map((q) => ({ pos: { x: q.pos.x, y: q.pos.y }, heading: q.heading, spec: q.spec }));
+      if (ph !== 'auto' && ph !== 'teleop') return new Map([[this.robotId, cmd()]]);
+      const g = parkGoal(r.alliance, this.pilot, this.parkSlot);
+      return new Map([[this.robotId, this.pilot.drive(r, w.tick, g, g.h, { vCap: 18 })]]);
+    }
+    const avoid = this.board ? this.board.avoidFor(this.robotId) : NO_AVOID;
+    this.pilot.avoidSpots = avoid.spots;
+    this.pilot.others = w.robots.length > 1 ? w.robots.filter((q) => q.id !== this.robotId).map((q) => ({ pos: { x: q.pos.x, y: q.pos.y }, heading: q.heading, spec: q.spec })) : [];
     const style = this.style;
     const ph = w.match.phase;
     if (ph !== this.phase) {
@@ -204,7 +251,7 @@ export class Brain {
       if (this.ex && this.cur && this.cur.kind !== 'park' && !this.committed && w.tick - this.lastThink >= THINK_TICKS) {
         this.lastThink = w.tick;
         const held = this.ex;
-        const opts = options(w, r, this.pilot, this.cap, this.banned, (o) => held.holds(o));
+        const opts = options(w, r, this.pilot, this.cap, this.banned, (o) => held.holds(o), avoid);
         const ci = opts.findIndex((o) => o.feats[F_CURRENT] === 1);
         if (ci >= 0 && opts.length > 1) {
           const sc = this.score(w, r, opts);
@@ -239,11 +286,23 @@ export class Brain {
         }
       }
       if (!this.ex) {
-        const opts = options(w, r, this.pilot, this.cap, this.banned);
+        const opts = options(w, r, this.pilot, this.cap, this.banned, () => false, avoid);
         if (opts.length) {
           const sc = this.score(w, r, opts);
-          const commit = !!this.force?.commit;
-          const i = this.force ? this.forced(w, opts) : argmaxWhere(sc, () => true);
+          let commit = !!this.force?.commit;
+          let i: number;
+          if (this.force) i = this.forced(w, opts);
+          else if (this.plan?.length) {
+            // the plan's next step, run to its end; if it is not there any more, the robot chooses
+            const step = this.plan.shift()!;
+            const k = matchStep(opts, step);
+            this.taken.push({ ...step, robot: this.robotId, tick: w.tick, matched: k >= 0 });
+            i = k >= 0 ? k : argmaxWhere(sc, () => true);
+            commit = true;
+          } else {
+            if (this.plan && this.stopAtFree && !this.free) this.free = { tick: w.tick, opts, scores: sc };
+            i = argmaxWhere(sc, () => true);
+          }
           this.note(w, 'begin', opts, sc, i, -1);
           this.begin(w, r, opts, i, sc);
           if (commit && this.ex) this.committed = true;
@@ -280,7 +339,8 @@ export class Brain {
     // like a driver's auto-intake: the roller runs whenever there is room (sweeps up whatever it
     // passes), and fire is held whenever a shot can score
     if ((ph === 'auto' || ph === 'teleop') && r.hopper.length < this.cap && !spillNear) c.intake = true;
-    if (fireGate(w, r)) c.fire = true;
+    // (a dumper holds fire only at its shooting spot: DSIM's aim assist turns its whole chassis)
+    if (fireGate(w, r) && (!this.pilot.dumper || this.ex?.firing)) c.fire = true;
     return new Map([[this.robotId, c]]);
   }
 
@@ -288,7 +348,7 @@ export class Brain {
     const o = this.ex?.opt;
     const banned = this.banned;
     const ban = Math.round(60 * this.style.failBanS);
-    if (o && out === 'failed' && o.flower !== undefined) banned.set(`f${o.flower}`, t + ban);
+    if (o && out === 'failed' && o.flower !== undefined) banned.set(`${o.kind === 'place' ? 'p' : 'f'}${o.flower}`, t + ban);
     if (o && out === 'failed' && o.balls) for (const id of o.balls) banned.set(`b${id}`, t + ban); // a group it could not take: something else first
     if (o?.kind === 'hp') banned.set('hp', t + 90); // the human player needs a moment
     if (o?.kind === 'shoot' && out === 'failed') banned.set('shoot', t + 90); // blocked: do something else first
@@ -296,10 +356,13 @@ export class Brain {
     if (this.cur) {
       this.cur.outcome = out;
       this.cur.endTick = t;
+      const last = this.taken[this.taken.length - 1];
+      if (last && last.end === undefined && last.tick === this.cur.tick) last.end = t;
     }
     this.ex = null;
     this.cur = null;
     this.committed = false;
+    this.board?.set(this.robotId, null);
   }
 }
 

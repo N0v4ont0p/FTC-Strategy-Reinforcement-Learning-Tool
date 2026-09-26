@@ -12,6 +12,7 @@ import { runPool } from '../harness/pool';
 import { STYLE, decodeStyle } from './policy';
 import { fromB64, styleOffset } from './net';
 import { SHAPE } from './policy';
+import { Playbook } from './playbook';
 
 const PUBLIC = join(ROOT, 'train', 'public');
 const LAST = join(RUNS, '.last');
@@ -57,6 +58,21 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     for (const s of streams) s.write(msg);
   };
   const say = (text: string): void => send('log', text);
+
+  // THE AUTO PLAYBOOK (train/playbook.ts): one per robot profile, built on request in the background
+  let playbook: Playbook | null = null;
+  const book = (profile: string): Playbook => {
+    if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(profile) || !existsSync(join(ROOT, profile))) throw new HttpError(400, 'unknown profile');
+    if (playbook?.profile === profile) return playbook;
+    if (playbook?.status.running) throw new HttpError(409, `the ${playbook.name} playbook is being built — stop it first`);
+    playbook?.removeAllListeners();
+    playbook = new Playbook(profile);
+    playbook.on('status', (st) => send('playbook', { profile, status: st }));
+    playbook.on('log', (l: string) => send('log', `playbook: ${l}`));
+    playbook.on('entry', (key: string) => send('playbookEntry', { profile, key }));
+    return playbook;
+  };
+  const pbSummary = (pb: Playbook) => ({ profile: pb.profile, name: pb.name, status: pb.status, entries: pb.entries() });
 
   const wire = (e: Engine): void => {
     e.on('progress', (p) => send('progress', p));
@@ -209,6 +225,31 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       send('quit', {});
       setTimeout(() => opts.onQuit!(), 100);
       return;
+    }
+
+    // the AUTO playbook
+    if (p === '/api/playbook' && !post) {
+      const profile = url.searchParams.get('profile') ?? playbook?.profile ?? 'profiles/real-v1.json';
+      const profiles = readdirSync(join(ROOT, 'profiles')).filter((f) => f.endsWith('.json')).map((f) => `profiles/${f}`);
+      return json(res, 200, { ...pbSummary(book(profile)), profiles });
+    }
+    if (p === '/api/playbook/frames') {
+      const f = book(url.searchParams.get('profile') ?? 'profiles/real-v1.json').framesFile(url.searchParams.get('key') ?? '');
+      if (!f) throw new HttpError(404, 'no replay for that playbook entry');
+      return file(res, f, 'application/json', true);
+    }
+    if (p === '/api/playbook/build' && post) {
+      const b = await body(req);
+      if (engine?.running) throw new HttpError(409, `"${engine.name}" is training — the playbook needs every core; pause training first`);
+      const pb = book(String(b.profile ?? 'profiles/real-v1.json'));
+      if (pb.status.running) throw new HttpError(409, 'the playbook is already being built');
+      const list = <T,>(v: unknown): T[] | undefined => (Array.isArray(v) && v.length ? (v as T[]) : undefined);
+      pb.build({ budget: b.budget === 'quick' ? 'quick' : 'full', redo: !!b.redo, starts: list(b.starts), partners: list(b.partners), modes: list(b.modes) }).catch((err: Error) => say(`playbook build failed: ${err.message}`));
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/playbook/stop' && post) {
+      playbook?.stop();
+      return json(res, 200, { ok: true });
     }
 
     // runs
@@ -524,6 +565,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     engine: () => engine,
     open,
     close: async () => {
+      playbook?.stop();
       await engine?.halt(true, true); // closing the studio is not stopping training: it resumes next start
       await refreshing;
       for (const s of streams) s.end();

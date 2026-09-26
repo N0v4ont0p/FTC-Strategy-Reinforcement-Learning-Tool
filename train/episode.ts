@@ -16,7 +16,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { C, DT, Match, bb, coerce, recordScore, verifyReplay, worldResult, type World } from '../harness/dsim';
+import { C, DT, Match, bb, coerce, recordScore, verifyReplay, worldResult, type RobotCommand, type Seat, type World } from '../harness/dsim';
 import { loadProfile, resolve, type Resolved } from '../harness/profiles';
 import { MatchFilter, HUMAN, ORACLE, RULES_CONSERVATIVE } from '../harness/filters';
 import { Perturber } from '../harness/perturb';
@@ -25,17 +25,22 @@ import { mulberry32, seedOf, type Stream } from '../harness/rng';
 import { Mlp, fromB64 } from './net';
 import { Brain, optKey, type Decision, type DecisionPoint } from './policy';
 import { pack, type Packed, type Sample } from './bc';
-import { OPTION_KINDS, spawnPose } from './skills';
+import { OPTION_KINDS } from './skills';
 import { N_OBS, encode } from './obs';
 import { deepClone, share } from './fork';
 import { VALUE_SHAPE, VALUE_SCALE } from './value';
 import { Tally, type Activity, type Loads, type Parts } from './gap';
+import { AllianceBoard, PARTNERS, defaultPartnerStart, legalPair, partnerProfile, seatStart, type PartnerKind, type StartId } from './team';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export type Stage = 'auto' | 'full';
 export type Death = 'survived' | 'crash' | 'stall';
-export const STALL_S = 20; // no progress for this long ⇒ the robot "dies"
+/** no progress for this long is a STALL: counted as a mistake (the audit's), not the end of the
+ * match — v1 ended the match there, which threw away the end-game (PARK, FLOWERs) of a robot that
+ * was busy but unlucky, and taught nothing the lost time does not already cost. ('stall' deaths
+ * exist only in runs made before.) */
+export const STALL_S = 20;
 export const TRACK_STRIDE = 3; // ticks between swarm samples (20 per second)
 export const FRAME_STRIDE = 2; // ticks between exact frames (30 per second)
 /** a swarm sample: x, y, heading, turret 1, turret 2, hopper count, option kind (-1 = none) */
@@ -64,6 +69,13 @@ export interface EpisodeArgs {
   returns?: number; // every this many ticks, record (observation, points still to come) for the predictor
   inspect?: boolean; // keep every what-if result per decision (the studio's decision inspector)
   verify?: boolean; // with record: re-simulate the replay in DSIM and compare (verified)
+  start?: StartId; // where our robot starts (default: F3, the team's start)
+  partner?: PartnerArgs; // an alliance partner (default: none — the solo game)
+}
+export interface PartnerArgs {
+  kind: PartnerKind;
+  genome?: string | null; // its network (default: the no-learning order)
+  start?: StartId; // default: the first legal anchor beside ours
 }
 export interface LessonSpec {
   thinkRate: number; // share of think decisions that become lessons (every job start does)
@@ -90,6 +102,7 @@ export interface Mistakes {
   fouls: number; // foul points (DSIM's + the guards')
   regret: number; // what-if lessons: points the chosen option lost against the best one, summed
   regretN: number; // …over this many lesson decisions
+  stalls: number; // spells of STALL_S without progress
 }
 export interface Inspected {
   t: number;
@@ -124,12 +137,15 @@ export interface EpisodeResult {
   values?: { n: number; obs: string; y: number[] }; // (observation, points to come) pairs
   inspect?: Inspected[];
   searched?: { n: number; changed: number }; // decisions searched, and how many the search changed
+  partner?: { kind: PartnerKind; start: StartId; parts: Parts }; // the partner's own play (the score is the alliance's)
+  start?: StartId;
 }
 
 /** exact frames — what DSIM's renderers need to redraw this life exactly as it was trained */
 export interface Frames {
   stride: number;
   spec: unknown;
+  spec2?: unknown; // the partner's build (frames with a partner)
   alliance: string;
   meta: [number, string, number | null][]; // ball id, colour, radius (world.balls order)
   f: Frame[];
@@ -143,6 +159,8 @@ export interface Frame {
   g?: unknown; // world.biobuzz when it changed
   m: [string, number, number, number]; // phase, phase time left, own total, fouls against
   o?: [number, string, number, number]; // current option: kind index, label, target x, y
+  p?: number[]; // the partner: x, y, heading, turret, turret2, pitch, pitch2, intake
+  ph?: string; // the partner's hopper
 }
 
 const kindIdx = (k: string | undefined): number => (k ? OPTION_KINDS.indexOf(k as (typeof OPTION_KINDS)[number]) : -1);
@@ -181,6 +199,12 @@ export class Episode {
   readonly prof: Resolved;
   readonly m: Match;
   readonly brain: Brain;
+  /** every seat's brain: ours first (the one that learns), then the partner's */
+  readonly brains: Brain[];
+  readonly partnerProf: Resolved | null = null;
+  readonly start: StartId;
+  readonly partnerStart: StartId | null = null;
+  private partnerTally: Tally | null = null;
   private filter: MatchFilter;
   private perturb: Perturber;
   private guards = new Guards(RULES_CONSERVATIVE);
@@ -193,6 +217,7 @@ export class Episode {
   private prevViol = 0;
   regret = 0;
   regretN = 0;
+  private stalls = 0;
   private out: Outputs | null;
 
   constructor(readonly a: EpisodeArgs) {
@@ -211,11 +236,41 @@ export class Episode {
       inspect: a.inspect ? [] : null,
     };
     this.out = o;
-    this.brain = new Brain(a.genome ? fromB64(a.genome) : null, this.prof, 0, o.decisions, o.samples ?? undefined);
+    this.start = a.start ?? 'F3';
+    const duo = !!a.partner && a.partner.kind !== 'none';
+    const board = duo ? new AllianceBoard() : null;
+    this.brain = new Brain(a.genome ? fromB64(a.genome) : null, this.prof, 0, o.decisions, o.samples ?? undefined, { board, parkSlot: duo ? 1 : 0 });
     this.brain.wantObs = !!(a.lessons || a.search || a.returns);
-    this.m = new Match(a.seed, [{ id: 0, alliance: 'blue', spec: this.prof.spec, startIndex: 0, startPose: spawnPose(this.prof.spec) }], { record: a.record });
-    this.filter = new MatchFilter(a.seed, new Map([[0, this.prof.limits]]), a.driver === 'human' ? HUMAN : ORACLE, RULES_CONSERVATIVE);
-    this.perturb = new Perturber(a.seed, { blue: this.prof.perturb });
+    this.brains = [this.brain];
+    const seats: Seat[] = [{ id: 0, alliance: 'blue', spec: this.prof.spec, ...seatStart(this.prof.spec, this.start) }];
+    const limits = new Map([[0, this.prof.limits]]);
+    const perRobot = new Map([[0, this.prof.perturb]]);
+    if (duo) {
+      const P = a.partner!;
+      if (a.profile.startsWith('replay:')) throw new Error('a partner plays beside a profile robot, not a replay build');
+      const pp = partnerProfile(P.kind, join(root, a.profile), a.seed, a.sampleProfile);
+      share(pp);
+      const ps = P.start ?? defaultPartnerStart(this.prof.spec, this.start, pp.spec);
+      if (!legalPair(this.prof.spec, this.start, pp.spec, ps)) throw new Error(`our robot at ${this.start} and a ${P.kind} partner at ${ps} cannot start together`);
+      seats.push({ id: 1, alliance: 'blue', spec: pp.spec, ...seatStart(pp.spec, ps) });
+      this.brains.push(new Brain(P.genome ? fromB64(P.genome) : null, pp, 1, undefined, undefined, { mode: PARTNERS[P.kind].mode, board, parkSlot: 2 }));
+      limits.set(1, pp.limits);
+      perRobot.set(1, pp.perturb);
+      this.partnerProf = pp;
+      this.partnerStart = ps;
+      this.partnerTally = new Tally();
+    }
+    this.m = new Match(a.seed, seats, { record: a.record });
+    this.filter = new MatchFilter(a.seed, limits, a.driver === 'human' ? HUMAN : ORACLE, RULES_CONSERVATIVE);
+    this.perturb = new Perturber(a.seed, { blue: this.prof.perturb }, undefined, perRobot);
+  }
+
+  /** every seat's command this tick (ours first: it posts its job on the board before the partner looks) */
+  private act(w: World): Map<number, RobotCommand> {
+    if (this.brains.length === 1) return this.brain.act(w);
+    const out = new Map<number, RobotCommand>();
+    for (const b of this.brains) for (const [k, v] of b.act(w)) out.set(k, v);
+    return out;
   }
 
   get w(): World {
@@ -263,7 +318,7 @@ export class Episode {
   /** one tick; false once the life is over. The hooks are made per call, never stored: a stored
    * closure would tie a fork to the match it was copied from */
   step(): boolean {
-    return this.m.step((w) => this.brain.act(w), {
+    return this.m.step((w) => this.act(w), {
       filter: (w, i) => this.filter.apply(w, i),
       perturb: (w) => this.perturb.apply(w),
       after: (w, applied) => {
@@ -282,8 +337,9 @@ export class Episode {
 
   private after(w: World, intake: boolean): void {
     const t = w.tick;
-    const r = w.robots[0];
+    const r = w.robots.find((q) => q.id === 0)!;
     const o = this.out;
+    if (this.partnerTally) this.partnerTally.observe(w, w.robots.find((q) => q.id === 1)!);
     if (o?.path && t % TRACK_STRIDE === 0) o.path.push(r.pos.x, r.pos.y, r.heading, r.turretHeading ?? r.heading, r.bbTurret2Heading ?? r.heading + Math.PI, r.hopper.length, kindIdx(this.brain.current()?.kind));
     if (o?.frames && t % FRAME_STRIDE === 0) this.frame(w, intake);
     if (o?.values && t % this.a.returns! === 0 && (w.match.phase === 'auto' || w.match.phase === 'teleop')) {
@@ -318,23 +374,29 @@ export class Episode {
     }
     parts.violations = viol;
     parts.strikes = rep.anomalies['fast-ground-element'] ?? 0;
-    this.fouls = fouls + FOUL.exploit * parts.strikes;
-    if ((rep.violations['G417-hive-frame-contact'] ?? 0) > 0) {
+    // a strike is fined only when the struck element scored for us (harness/guards.ts STRIKE_PROFIT_S)
+    parts.strikesScored = rep.strikeProfit.blue ?? 0;
+    this.fouls = fouls + FOUL.exploit * parts.strikesScored;
+    // only OUR robot touching the HIVE frame ends its life (a partner's crash is its own foul)
+    if ((rep.byRobot[0]?.['G417-hive-frame-contact'] ?? 0) > 0) {
       this.death = 'crash';
       this.deathTick = t;
     } else if ((t - this.lastProgress) * DT > STALL_S) {
-      this.death = 'stall';
-      this.deathTick = t;
+      this.stalls++;
+      this.lastProgress = t;
+      this.ev(t, 'stall');
     }
   }
 
   private frame(w: World, intake = false): void {
     const o = this.out!;
     const fr = o.frames!;
-    const r = w.robots[0];
+    const r = w.robots.find((q) => q.id === 0)!;
+    const p2 = w.robots.find((q) => q.id === 1);
     if (!fr.spec) {
       fr.spec = r.spec;
       fr.alliance = r.alliance;
+      if (p2) fr.spec2 = p2.spec;
     }
     if (fr.meta.length !== w.balls.length) fr.meta = w.balls.map((b) => [b.id, b.color, (b as { r?: number }).r ?? null]);
     const q = (v: number): number => Math.round(v * 100) / 100;
@@ -363,6 +425,10 @@ export class Episode {
       f.g = JSON.parse(g);
     }
     if (cur) f.o = [kindIdx(cur.kind), cur.label, q(cur.x), q(cur.y)];
+    if (p2) {
+      f.p = [q(p2.pos.x), q(p2.pos.y), p2.heading, p2.turretHeading ?? p2.heading, p2.bbTurret2Heading ?? p2.heading + Math.PI, p2.bbTurretPitch ?? 0, p2.bbTurret2Pitch ?? 0, 0];
+      f.ph = p2.hopper.map((c) => c[0]).join('');
+    }
     fr.f.push(f);
   }
 
@@ -478,7 +544,7 @@ export class Episode {
     const reward = this.reward();
     const score = reward + this.fouls;
     const dec = o.decisions;
-    const mistakes: Mistakes = { missedShots: this.parts.wasted, emptyTrips: 0, emptyTripS: 0, blockedShots: 0, blockedShotS: 0, idleS: this.tally.activity.idle, fouls: this.fouls + w.match.scores.red.foulPoints, regret: this.regret, regretN: this.regretN };
+    const mistakes: Mistakes = { missedShots: this.parts.wasted, emptyTrips: 0, emptyTripS: 0, blockedShots: 0, blockedShotS: 0, idleS: this.tally.activity.idle, fouls: this.fouls + w.match.scores.red.foulPoints, regret: this.regret, regretN: this.regretN, stalls: this.stalls };
     for (const d of dec) {
       if (d.outcome !== 'failed' || d.endTick === undefined) continue;
       const s = (d.endTick - d.tick) * DT;
@@ -490,7 +556,8 @@ export class Episode {
         mistakes.emptyTripS += s;
       }
     }
-    const res: EpisodeResult = { reward, score, parts: this.parts, ticks: w.tick, death: this.death, deathTick: this.deathTick, point: this.prof.point, mistakes, activity: this.tally.activity, loads: this.tally.loads };
+    const res: EpisodeResult = { reward, score, parts: this.parts, ticks: w.tick, death: this.death, deathTick: this.deathTick, point: this.prof.point, mistakes, activity: this.tally.activity, loads: this.tally.loads, start: this.start };
+    if (this.partnerTally && this.a.partner) res.partner = { kind: this.a.partner.kind, start: this.partnerStart!, parts: this.partnerTally.parts };
     if (o.path) {
       res.track = b64(new Float32Array(o.path));
       res.events = o.events!;

@@ -12,7 +12,7 @@ export type GuardRule =
   | 'G426-hp-entry-in-auto'
   | 'G427C-drop-zone-occupied'
   | 'DSIM-foul';
-export type AnomalyKind = 'fast-ground-element' | 'element-embedded-in-robot' | 'invalid-state' | 'element-count';
+export type AnomalyKind = 'fast-ground-element' | 'strike-scored' | 'element-embedded-in-robot' | 'invalid-state' | 'element-count';
 
 export interface GuardEvent {
   tick: number;
@@ -23,6 +23,10 @@ export interface GuardEvent {
 export interface GuardReport {
   violations: Partial<Record<GuardRule, number>>;
   anomalies: Partial<Record<AnomalyKind, number>>;
+  /** struck elements that went on to score (PROFIT from the oddity), by the alliance they scored for */
+  strikeProfit: Partial<Record<Alliance, number>>;
+  /** rule violations by the robot that committed them (the rules that name one) */
+  byRobot: Record<number, Partial<Record<GuardRule, number>>>;
   events: GuardEvent[];
 }
 
@@ -34,6 +38,13 @@ const SPILL_CATCH_S = 0.4; // a 25 in drop takes ~0.36 s (PLAN.md §7.2); DSIM g
 const FAST_MARGIN = 10; // in/s
 const EMBED_DEPTH = 1.0; // in — deeper than DSIM's own ~2.1 in residual is the reported oddity; 1.0 flags early
 const EMBED_HOLD_S = 0.5;
+/** A strike is an ANOMALY, not a foul: a ball knocked faster than the robot that hit it is ordinary
+ * elastic physics (a ball bounces off a moving chassis at up to twice its speed), and fining every
+ * one taught the robot to avoid elements (~23 points a match on REAL-v1). What a policy must not do
+ * is PROFIT from it: a struck element that scores — enters a HIVE cell, or lies in a GARDEN once this
+ * window has passed — is counted in `strikeProfit`, and only that is fined. */
+const STRIKE_PROFIT_S = 3;
+const inRectXY = (p: { x: number; y: number }, z: { x0: number; x1: number; y0: number; y1: number }): boolean => p.x >= z.x0 && p.x <= z.x1 && p.y >= z.y0 && p.y <= z.y1;
 
 function chassisCorners(r: World['robots'][number]): { x: number; y: number }[] {
   const hl = r.spec.length / 2;
@@ -49,7 +60,8 @@ const frameBars = (): number[][] => [
 ];
 
 export class Guards {
-  private rep: GuardReport = { violations: {}, anomalies: {}, events: [] };
+  private rep: GuardReport = { violations: {}, anomalies: {}, strikeProfit: {}, byRobot: {}, events: [] };
+  private struck = new Map<number, number>(); // element id → tick of its latest strike
   private prevKind = new Map<number, string>();
   private prevEl = new Map<number, string>();
   private spillTick = new Map<number, number>();
@@ -66,6 +78,10 @@ export class Guards {
   private add(tick: number, rule: GuardRule | AnomalyKind, detail: string, robot?: number, anomaly = false): void {
     const bucket = anomaly ? this.rep.anomalies : this.rep.violations;
     (bucket as Record<string, number>)[rule] = ((bucket as Record<string, number>)[rule] ?? 0) + 1;
+    if (!anomaly && robot !== undefined) {
+      const mine = (this.rep.byRobot[robot] ??= {}) as Record<string, number>;
+      mine[rule] = (mine[rule] ?? 0) + 1;
+    }
     if (this.rep.events.length < 500) this.rep.events.push({ tick, rule, robot, detail });
   }
 
@@ -133,6 +149,7 @@ export class Guards {
         if (accel > 5 && sp > fastestRobot + FAST_MARGIN && this.spillTick.get(b.id) === undefined && !this.landTick.has(b.id)) {
           if (t - (this.lastFast.get(b.id) ?? -1e9) > 60) this.add(t, 'fast-ground-element', `element ${b.id} at ${sp.toFixed(0)} in/s`, undefined, true);
           this.lastFast.set(b.id, t);
+          this.struck.set(b.id, t);
         }
         for (const r of w.robots) {
           const key = `${b.id}:${r.id}`;
@@ -150,9 +167,27 @@ export class Guards {
           } else this.embedSince.delete(key);
         }
       }
+      // did a struck element PROFIT: into a HIVE cell within the window, or lying in a GARDEN after it
+      const sk = this.struck.get(b.id);
+      if (sk !== undefined) {
+        if (kind === 'element' && pk !== 'element' && el.startsWith('hive:')) {
+          this.profit(t, el.slice(5) as Alliance, `struck element ${b.id} entered ${el}`);
+          this.struck.delete(b.id);
+        } else if ((t - sk) * DT > STRIKE_PROFIT_S) {
+          if (kind === 'ground')
+            for (const a of ['blue', 'red'] as const)
+              if (inRectXY(b.pos, BB.BB_GARDEN[a])) this.profit(t, a, `struck element ${b.id} lies in the ${a} GARDEN`);
+          this.struck.delete(b.id);
+        }
+      }
       this.prevKind.set(b.id, kind);
       this.prevEl.set(b.id, el);
     }
+  }
+
+  private profit(t: number, a: Alliance, detail: string): void {
+    this.rep.strikeProfit[a] = (this.rep.strikeProfit[a] ?? 0) + 1;
+    this.add(t, 'strike-scored', detail, undefined, true);
   }
 
   report(): GuardReport {

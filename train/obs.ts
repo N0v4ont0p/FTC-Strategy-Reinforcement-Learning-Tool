@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BB, C, bb, type RobotState, type World } from '../harness/dsim';
 import type { Resolved } from '../harness/profiles';
+import { envelopeOf, inEnv } from './envelope';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const K_NEAR = 6; // nearest collectable elements seen
@@ -104,11 +105,12 @@ export function encode(w: World, r: RobotState, prof: Resolved, out: Float32Arra
   // where shots should go: the up cell, or the other one once a tip has started (skills.ts targetCell)
   const target = hive.tipping > 0 ? (upBlue === 'north' ? 'south' : 'north') : upBlue;
   put(target === 'north' ? 1 : -1);
-  put(inEnvelope(target, px, py) ? 1 : 0);
+  const env = envelopeOf(r.spec); // this build's own measured envelope
+  put(inEnv(env, target, px, py) ? 1 : 0);
   // nearest measured scoring spot for that cell
   let best: Spot | null = null;
   let bd = Infinity;
-  for (const sp of SPOTS[target]) {
+  for (const sp of env.spots[target]) {
     const d = (sp.x - px) ** 2 + (sp.y - py) ** 2;
     if (d < bd) {
       bd = d;

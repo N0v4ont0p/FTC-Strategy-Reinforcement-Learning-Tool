@@ -69,6 +69,35 @@ weak partner costs points: it holds its own preloads, which would otherwise be i
 - **A stall** (20 s without progress) no longer ends the match: it is a counted mistake. Ending the
   match threw away the end-game (PARK, FLOWERs) of a robot that was busy but unlucky.
 
+## The AUTO playbook (v2 phase 2)
+
+The **Playbook** tab answers "our partner can do X — what do we run in AUTO?": the best 30 s AUTO for
+our robot beside every kind of partner, from every legal pair of starts (165 entries for REAL-v1),
+found by **search in DSIM**, not learned (`train/auto.ts`, `train/playbook.ts`).
+
+- **A plan** is what each robot does at each of its job starts, in order ("shoot the preloads",
+  "FLOWER F3", "the group at element 23", "park"). A step is found again by what it is, so a plan
+  found under one luck draw still applies under another. Each planned job runs to its end; past its
+  plan, a robot plays on with its own brain.
+- **Beam search**: under a reference draw the plan is played until a planned robot starts a job past
+  it; each of that robot's most promising options extends the plan. Every candidate plays the whole
+  AUTO on the same luck draws (common random numbers); the best go on.
+- **Finalists** play 64 fresh draws and are ranked on the average and the worst tenth (one blown AUTO
+  costs more than a small gain). "No plan" — every robot its own AUTO — is a finalist too, so the
+  playbook never recommends a plan that is not better; the entry then says so.
+- **CMA-ES** tunes our robot's skill settings (speeds, margins) for the winning plan.
+- **Modes**: *best response* — the partner runs its own AUTO, only ours is planned (the case at an
+  event); *joint* — both AUTOs planned together, for a partner who will run ours.
+
+Each entry shows its AUTO points ± 95 %, the worst tenth, the gain over no plan, the result on robots
+drawn from the profile's whole range, the **timing sheet** (who does what, when) and an exact replay
+(**Watch it**). A full build is about 90 s an entry (~4 h for all of REAL-v1, resumable: a build only
+plans what is missing); *Quick look* is about 15 s an entry. The playbook needs every core, so it is
+refused while training runs. Stored in `outputs/playbook/<robot>.db` and `outputs/playbook/<robot>/`.
+
+Measured (quick budget, our start F3): alone 51.7 ± 4.4 AUTO points against 31.6 for the robot's own
+AUTO; planned jointly with a second REAL-v1, 72.8 against 53.6.
+
 ## Start and stop everything
 
 ```bash

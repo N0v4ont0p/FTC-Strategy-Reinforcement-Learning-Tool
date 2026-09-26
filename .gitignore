@@ -8,3 +8,4 @@ outputs/**/*.bin
 runs/
 train/public/
 scratch-tmp/
+outputs/playbook/

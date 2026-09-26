@@ -320,13 +320,15 @@ export interface EvalResult {
   time: string;
 }
 
-/** 5 = learning from every decision (what-if lessons, predictor, CMA-ES skills, racing, exam) */
-export const CK_VERSION = 5;
+/** 6 = the alliance skills (partners, the Box Tube's place option: a network sees one more option
+ * kind); 5 = learning from every decision (what-if lessons, predictor, CMA-ES skills, racing, exam) */
+export const CK_VERSION = 6;
 const LEGACY: Record<number, string> = {
   1: 'made by the first training version (a raw joystick policy)',
   2: 'made before the group-intake skills',
   3: 'made before the robots learned to think on the go',
   4: 'made by the evolution trainer (replaced by learning from every decision)',
+  5: 'made before the alliance skills (its network was built for a shorter list of options)',
 };
 
 interface Checkpoint {

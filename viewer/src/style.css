@@ -241,3 +241,9 @@ label.upload:focus-within { outline: 2px solid var(--honey-hi); outline-offset: 
 #genWhen.bad { color: #f08a8a; }
 #gapTable { max-height: none; }
 #gapTable td b { font-weight: 600; color: var(--wax); }
+/* Home: the one button */
+.counters .v.on { color: #6fcf6f; }
+#homeLog { max-height: 220px; text-align: left; }
+#homeLog div { padding: 1px 0; border-bottom: 1px solid #2c241c; }
+#homeProblems:empty { display: none; }
+#homeProblems { color: var(--honey-hi); }

@@ -98,6 +98,49 @@ refused while training runs. Stored in `outputs/playbook/<robot>.db` and `output
 Measured (quick budget, our start F3): alone 51.7 ± 4.4 AUTO points against 31.6 for the robot's own
 AUTO; planned jointly with a second REAL-v1, 72.8 against 53.6.
 
+## One button: continuous training (v2 phases 3–4)
+
+The **Home** tab is the new way to train: pick the robot, press **Train**, and it goes on until
+**Pause** — no generations, no presets (`train/continuous.ts`). Three kinds of work share every core:
+
+- **Actors** play matches with the champion beside every kind of partner and **think ahead** through a
+  30-second stretch of each match (a different stretch each time, late game included: a match reaches
+  any moment in about a second, so the simulation goes where the decisions are). Every searched
+  decision is a lesson, kept in `runs/.v2/<robot>/store.db`.
+- **Thinking ahead v2** (`train/episode.ts` `searchHalving`, MASTERPLAN phase 3): at a job start
+  *every* option is played 10 s ahead on 2 shared luck draws; the better half 20 s ahead on 4; the
+  best two 30 s ahead on 8. The same draws for every option (common random numbers), so the
+  comparison measures the options, not the dice. The network's own choice always reaches the last
+  round and is overruled only by a clear winner there (more than 2 points and one standard error
+  of the paired difference). **Measured** on 24 paired exam matches (REAL-v1, the no-learning order
+  as the network): **259.1** with it, 231.3 with v1's look-ahead (+27.8 ± 12.7), 221.2 without
+  (+37.9 ± 12.6). It costs ~7 s of simulation per decision (v1: ~0.5 s).
+- **The entity network** (`train/entnet.ts`) reads the field as a *set*: every robot and every
+  element in play is one entity, and each option attends over all of them (v1 saw the six nearest
+  elements). It scores each option in points and also predicts the points still to come. ~11 k
+  weights, forward and backward written by hand (the gate checks them against finite differences),
+  0.1 ms a decision, so it trains on the CPU while the other cores play. Genomes start with `ent1:`.
+- **The learner** (`train/entlearn.ts`), every 400 new lessons: fits the network to the searched
+  values — within each round, each option's value relative to the round's average (the rounds
+  differ in length, so only differences within a round mean anything), the deep, well-sampled
+  rounds weighted most. Three learning rates each time; the best on held-out matches wins and the
+  learning rate follows it (population-based training). Held out: how often the network's first
+  choice is the search's, and the points its choice gives away.
+- **The evaluator** plays each new network on the **fixed exam** — 24 seeds × every partner kind
+  (no partner, a second REAL-v1, Skimmer, Sniper, Hauler, one that only parks), the same forever —
+  paired with the champion's own exam matches, and decides by a **sequential test** (SPRT: it stops
+  as soon as the evidence is clear). A network takes over only when clearly better and not worse in
+  its worst tenth. The first champion to beat is the no-learning robot.
+- Every few hours the champion also takes a **thinking-ahead exam** (6 solo exam matches with the
+  search on): the goal of phase 4 is the network alone as good as the network with search.
+
+Home shows the champion's exam score and its trend, how busy the cores are, lessons learned, every
+candidate's verdict, the exam beside each partner kind and what it is doing now. Evaluator work jumps
+the queue, then the learner, then the actors, so nothing waits long and no core idles. It survives a
+crash or a restart (the service carries on where it was); Pause is the only stop. One trainer at a
+time: Train is refused while a generational run trains or the playbook builds, and the other way
+round.
+
 ## Start and stop everything
 
 ```bash
@@ -303,6 +346,7 @@ Keys: `p` pause, `o` open the studio, `q` stop.
 | `Training data/` | your DSIM replays |
 | `outputs/imitation/` | replay data sets, the fitted network, the distilled no-learning network, the starting predictor |
 | `profiles/real-v0.json` | the team robot's ranges |
+| `runs/.v2/<robot>/state.json` · `store.db` · `events.jsonl` | continuous training (Home): its state, every searched decision, the log |
 
 ## Checks
 

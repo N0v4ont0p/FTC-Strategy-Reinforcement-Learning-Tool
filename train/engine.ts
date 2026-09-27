@@ -213,7 +213,7 @@ export interface MeanCi {
   ci95: number;
   n: number;
 }
-const meanCi = (v: number[]): MeanCi => {
+export const meanCi = (v: number[]): MeanCi => {
   const n = v.length;
   const mean = v.reduce((a, b) => a + b, 0) / Math.max(1, n);
   const sd = n > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;

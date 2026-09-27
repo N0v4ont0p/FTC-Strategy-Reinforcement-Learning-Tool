@@ -202,3 +202,38 @@ export const OP_LABEL: Record<string, string> = {
   skills: 'tuned skill settings (CMA-ES)',
   champion: 'the champion',
 };
+
+/** the continuous engine (train/continuous.ts) as the Home page gets it */
+export interface MeanCiV {
+  mean: number;
+  ci95: number;
+  n: number;
+}
+export interface HomeStatusV {
+  name: string;
+  profile: string;
+  running: boolean;
+  champion: { id: number; born: string; learned: boolean; exam: (MeanCiV & { vsBase: MeanCiV; cvar10: number; byPartner: Record<string, number> }) | null };
+  base: number | null;
+  trend: number | null;
+  improving: 'improving' | 'flat' | null;
+  history: { time: string; hours: number; labels: number; champion: number; exam: number; vsBase: number }[];
+  candidates: { time: string; id: number; lr: number; verdict: 'promoted' | 'rejected'; n: number; diff: MeanCiV; learn: { agree: number; regret: number; train: number } }[];
+  learner: { lr: number; runs: number; last: { agree: number; regret: number; train: number; test: number } | null; before: { agree: number; regret: number } | null };
+  totals: { matches: number; labels: number; examMatches: number; hours: number; promotions: number; rejections: number };
+  labelsPerHour: number | null;
+  nextLearnIn: number;
+  cpu: number;
+  activity: { actors: number; learning: boolean; evaluating: { id: number; done: number; total: number } | null };
+  lastPromotion: string | null;
+  searchExam: { time: string; champion: number; n: number; alone: number; search: number; gain: MeanCiV } | null;
+  problems: string[];
+  log: string[];
+}
+export interface HomeV {
+  profile: string;
+  profiles: string[];
+  runs: { name: string; profile: string; running: boolean; champion: number; exam: number | null; updated: string }[];
+  status: HomeStatusV | null;
+  busy: { v1: string | null; playbook: string | null };
+}

@@ -23,7 +23,7 @@ import { Perturber } from '../harness/perturb';
 import { Guards } from '../harness/guards';
 import { mulberry32, seedOf, type Stream } from '../harness/rng';
 import { Mlp, fromB64 } from './net';
-import { Brain, optKey, type Decision, type DecisionPoint } from './policy';
+import { Brain, decodeGenome, optKey, type Decision, type DecisionPoint } from './policy';
 import { pack, type Packed, type Sample } from './bc';
 import { OPTION_KINDS } from './skills';
 import { N_OBS, encode } from './obs';
@@ -66,6 +66,10 @@ export interface EpisodeArgs {
   value?: string | null; // the rest-of-match predictor (train/value.ts), for lessons and search
   lessons?: LessonSpec; // learn from decisions: what-if every option
   search?: SearchSpec; // think ahead during the match: what-if the best few options, take the best
+  search2?: Search2Spec; // think ahead v2: sequential halving over every option (phase 3)
+  keepSearched?: boolean; // return every searched decision (the learner's labels)
+  searchWindow?: [number, number]; // search only decisions on ticks in [from, to) (the continuous engine's actors: sim spent where it teaches)
+  handover?: { tick: number; genome: string | null }; // on this tick our robot's network becomes this one (a drill: a state reached by one network, played on by another)
   returns?: number; // every this many ticks, record (observation, points still to come) for the predictor
   inspect?: boolean; // keep every what-if result per decision (the studio's decision inspector)
   verify?: boolean; // with record: re-simulate the replay in DSIM and compare (verified)
@@ -88,6 +92,48 @@ export interface SearchSpec {
   rounds: number; // luck draws per option
   thinkEvery: number; // search a think decision at most this often (ticks); every job start is searched
   margin: number; // switch away from the network's choice only for more than this many points
+}
+/** THINKING AHEAD v2 (MASTERPLAN §6, phase 3): SEQUENTIAL HALVING over EVERY option at a job start.
+ * Round r plays each surviving option `draws` times `horizon` ticks ahead, all on the same fresh luck
+ * draws (common random numbers — the comparison measures the options, not the dice); the better
+ * half go on to the next, longer, better-sampled round. The network's own choice is always kept to
+ * the end, and it is overruled only by an option that beats it by more than `margin` points AND by
+ * `z` standard errors of their paired difference. A one-step deviation, like v1's: the robot keeps
+ * thinking afterwards exactly as the look-ahead assumed. */
+export interface Search2Spec {
+  rounds: { draws: number; horizon: number }[];
+  margin: number;
+  z: number;
+  thinkEvery?: number; // also search a quarter-second re-think at most this often (ticks); default: job starts only
+}
+/** Measured (phase 3 exam: REAL-v1, the no-learning order as the network, no predictor, 24 paired
+ * exam matches): 259.1 ± 25.6 vs v1's look-ahead 231.3 ± 21.2 (+27.8 ± 12.7) and no search 221.2
+ * (+37.9 ± 12.6); it changes 18% of job starts; ~7 s of simulation per decision (v1: ~0.5 s). Stopping
+ * after the second round agrees with the full search only 72% of the time: the long round matters */
+export const SEARCH2: Search2Spec = { rounds: [{ draws: 2, horizon: 600 }, { draws: 4, horizon: 1200 }, { draws: 8, horizon: 1800 }], margin: 2, z: 1 };
+/** one searched decision, as the learner will take it (phase 4): each option's value at the deepest
+ * round it reached, its standard error, and how many play-outs stand behind it */
+export interface Searched {
+  tick: number;
+  at: 'think' | 'begin';
+  chosen: number; // what the robot did
+  net: number; // what its network alone would have done
+  q: (number | null)[];
+  se: (number | null)[];
+  n: number[];
+  depth: number[]; // the round each option reached (0-based)
+  rq: (number | null)[][]; // per round: each option's mean on that round's shared draws (null: out by then) — the learner centres within a round
+  sofar?: number; // the reward when it was decided (with the match's final reward: the points still to come)
+  x?: LabelInput; // with keepSearched: what the networks saw
+}
+/** a label's inputs, base64 Float32: the v1 observation, the entity rows (n × N_ENT), the options'
+ * entity-network rows (k × N_OPT_IN) and their v1 features (k × N_OPT_FEATS) */
+export interface LabelInput {
+  g: string;
+  e: string;
+  n: number;
+  o: string;
+  f: string;
 }
 
 export type { Parts, Activity, Loads } from './gap';
@@ -137,6 +183,7 @@ export interface EpisodeResult {
   values?: { n: number; obs: string; y: number[] }; // (observation, points to come) pairs
   inspect?: Inspected[];
   searched?: { n: number; changed: number }; // decisions searched, and how many the search changed
+  labels?: Searched[]; // with keepSearched: every searched decision, with its inputs
   partner?: { kind: PartnerKind; start: StartId; parts: Parts }; // the partner's own play (the score is the alliance's)
   start?: StartId;
 }
@@ -239,8 +286,9 @@ export class Episode {
     this.start = a.start ?? 'F3';
     const duo = !!a.partner && a.partner.kind !== 'none';
     const board = duo ? new AllianceBoard() : null;
-    this.brain = new Brain(a.genome ? fromB64(a.genome) : null, this.prof, 0, o.decisions, o.samples ?? undefined, { board, parkSlot: duo ? 1 : 0 });
-    this.brain.wantObs = !!(a.lessons || a.search || a.returns);
+    this.brain = new Brain(decodeGenome(a.genome), this.prof, 0, o.decisions, o.samples ?? undefined, { board, parkSlot: duo ? 1 : 0 });
+    this.brain.wantObs = !!(a.lessons || a.search || a.search2 || a.returns);
+    this.brain.wantEnts = !!a.keepSearched;
     this.brains = [this.brain];
     const seats: Seat[] = [{ id: 0, alliance: 'blue', spec: this.prof.spec, ...seatStart(this.prof.spec, this.start) }];
     const limits = new Map([[0, this.prof.limits]]);
@@ -253,7 +301,7 @@ export class Episode {
       const ps = P.start ?? defaultPartnerStart(this.prof.spec, this.start, pp.spec);
       if (!legalPair(this.prof.spec, this.start, pp.spec, ps)) throw new Error(`our robot at ${this.start} and a ${P.kind} partner at ${ps} cannot start together`);
       seats.push({ id: 1, alliance: 'blue', spec: pp.spec, ...seatStart(pp.spec, ps) });
-      this.brains.push(new Brain(P.genome ? fromB64(P.genome) : null, pp, 1, undefined, undefined, { mode: PARTNERS[P.kind].mode, board, parkSlot: 2 }));
+      this.brains.push(new Brain(decodeGenome(P.genome), pp, 1, undefined, undefined, { mode: PARTNERS[P.kind].mode, board, parkSlot: 2 }));
       limits.set(1, pp.limits);
       perRobot.set(1, pp.perturb);
       this.partnerProf = pp;
@@ -477,18 +525,76 @@ export class Episode {
     return sum.map((s, i) => (n[i] ? s / n[i] : null));
   }
 
+  /** SEQUENTIAL HALVING (Search2Spec) over decision `d` taken on tick d.tick from this state */
+  searchHalving(d: DecisionPoint, S: Search2Spec, value: Mlp | null, luckBase: number): Searched {
+    const m = d.opts.length;
+    const q: (number | null)[] = new Array(m).fill(null);
+    const se: (number | null)[] = new Array(m).fill(null);
+    const n = new Array<number>(m).fill(0);
+    const depth = new Array<number>(m).fill(-1);
+    const rq: (number | null)[][] = [];
+    let alive = d.opts.map((_, i) => i);
+    let last: number[][] = [];
+    for (let r = 0; r < S.rounds.length && alive.length; r++) {
+      const R = S.rounds[r];
+      const vals = alive.map(() => [] as number[]);
+      for (let k = 0; k < R.draws; k++) {
+        const luck = seedOf(luckBase, d.tick, r, k);
+        alive.forEach((i, j) => vals[j].push(this.whatIf(optKey(d.opts[i]), d.tick, luck, R.horizon, value, false)));
+      }
+      rq.push(new Array(m).fill(null));
+      alive.forEach((i, j) => {
+        const v = vals[j];
+        const mean = v.reduce((a, b) => a + b, 0) / v.length;
+        const sd = v.length > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (v.length - 1)) : NaN;
+        q[i] = mean;
+        rq[r][i] = mean;
+        se[i] = Number.isFinite(sd) ? sd / Math.sqrt(v.length) : null;
+        n[i] += v.length;
+        depth[i] = r;
+      });
+      last = vals;
+      if (r === S.rounds.length - 1) break; // the final comparison is on this round's draws
+      if (alive.length <= 2) continue; // two left: both go on to the longer, better-sampled round
+      // the better half go on; the network's own choice always does (it is what gets overruled)
+      const keep = Math.max(2, Math.ceil(alive.length / 2));
+      const order = alive.map((i, j) => [i, j] as const).sort((a, b) => q[b[0]]! - q[a[0]]! || a[0] - b[0]);
+      const next = order.slice(0, keep).map(([i]) => i);
+      if (!next.includes(d.chosen) && alive.includes(d.chosen)) next[next.length - 1] = d.chosen;
+      alive = alive.filter((i) => next.includes(i));
+    }
+    // overrule the network only for a clear winner of the final comparison (paired, same draws)
+    let best = d.chosen;
+    const ci = alive.indexOf(d.chosen);
+    if (ci >= 0) {
+      for (const [j, i] of alive.entries()) {
+        if (i === d.chosen) continue;
+        const diff = last[j].map((v, k) => v - last[ci][k]);
+        const md = diff.reduce((a, b) => a + b, 0) / diff.length;
+        const sdd = diff.length > 1 ? Math.sqrt(diff.reduce((a, b) => a + (b - md) ** 2, 0) / (diff.length - 1)) : 0;
+        const z = sdd > 0 ? md / (sdd / Math.sqrt(diff.length)) : md > 0 ? Infinity : 0;
+        if (md > S.margin && z > S.z && (best === d.chosen || q[i]! > q[best]!)) best = i;
+      }
+    }
+    return { tick: d.tick, at: d.at, chosen: best, net: d.chosen, q, se, n, depth, rq };
+  }
+
   /** the whole life, with lessons / search at the decisions when asked */
   run(): EpisodeResult {
     const a = this.a;
     const value = a.value ? new Mlp(VALUE_SHAPE, share(fromB64(a.value))) : null;
     const pick: Stream = mulberry32(seedOf(a.seed, 'lesson-pick'));
-    const watch = !!(a.lessons || a.search);
+    const watch = !!(a.lessons || a.search || a.search2);
+    const win = a.searchWindow ?? [0, Infinity];
+    const handover = a.handover ? decodeGenome(a.handover.genome) : null;
+    const labels: Searched[] = [];
     let lastSearch = -1e9;
     let searched = 0;
     let changed = 0;
     for (;;) {
       const ph = this.w.match.phase;
-      if (watch && (ph === 'auto' || ph === 'teleop')) {
+      if (a.handover && this.w.tick === a.handover.tick) this.brain.setNet(handover);
+      if (watch && (ph === 'auto' || ph === 'teleop') && this.w.tick >= win[0] && this.w.tick < win[1]) {
         // will the brain decide on this tick? A fork steps once to find out (a job can end at any tick)
         const t = this.w.tick;
         const probe = this.fork();
@@ -506,6 +612,20 @@ export class Episode {
             }
             this.out?.lessons?.push({ obs: d.obs!, feats: Float32Array.from(d.opts.flatMap((o) => o.feats)), k: d.opts.length, y: d.chosen, q: Float32Array.from(q.map((v) => v ?? NaN)) });
             if (a.inspect) this.inspectPush(d, q);
+          } else if (a.search2 && (d.at === 'begin' || t - lastSearch >= (a.search2.thinkEvery ?? Infinity))) {
+            lastSearch = t;
+            const res = this.searchHalving(d, a.search2, value, seedOf(a.seed, 'search2'));
+            searched++;
+            if (res.chosen !== d.chosen) {
+              changed++;
+              this.brain.force = { key: optKey(d.opts[res.chosen]), tick: t, commit: false };
+            }
+            if (a.keepSearched && d.ent) {
+              res.sofar = this.reward();
+              res.x = { g: b64(d.ent.g), e: b64(d.ent.e), n: d.ent.n, o: b64(d.ent.o), f: b64(Float32Array.from(d.opts.flatMap((o) => o.feats))) };
+              labels.push(res);
+            }
+            if (a.inspect) this.inspectPush(d, res.q, res.chosen);
           } else if (a.search && (d.at === 'begin' || t - lastSearch >= a.search.thinkEvery)) {
             const S = a.search;
             lastSearch = t;
@@ -526,7 +646,9 @@ export class Episode {
       }
       if (!this.step()) break;
     }
-    return this.result(searched, changed);
+    const res = this.result(searched, changed);
+    if (a.keepSearched) res.labels = labels;
+    return res;
   }
 
   private inspectPush(d: DecisionPoint, q: (number | null)[], chosen = d.chosen): void {
@@ -574,7 +696,7 @@ export class Episode {
       res.values = { n: o.values.at.length, obs: b64(new Float32Array(o.values.obs)), y: o.values.score.map((s) => final - s) };
     }
     if (o.inspect) res.inspect = o.inspect;
-    if (this.a.search) res.searched = { n: searched, changed };
+    if (this.a.search || this.a.search2) res.searched = { n: searched, changed };
     if (this.a.record && run.replay) {
       res.replay = run.replay;
       res.replayExact = run.replayExact;

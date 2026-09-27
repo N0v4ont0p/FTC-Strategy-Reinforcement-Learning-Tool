@@ -46,3 +46,10 @@ export function randomMatch(a: { seed: number; profile: string; sample: boolean 
     ms: performance.now() - t0,
   };
 }
+
+/** busy for `ms`, then its tag (the gate's pool-scheduling check) */
+export function spin(a: { ms: number; tag: string }): string {
+  const t = Date.now();
+  while (Date.now() - t < a.ms);
+  return a.tag;
+}

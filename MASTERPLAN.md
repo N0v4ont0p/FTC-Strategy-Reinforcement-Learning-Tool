@@ -1,8 +1,11 @@
 # MASTERPLAN — Learning Studio v2
 
-Status (2026-09-26): phase 0 measured; **phase 1 built** (alliance play, partners, starts, Box Tube,
+Status (2026-09-27): phase 0 measured; **phase 1 built** (alliance play, partners, starts, Box Tube,
 per-build envelopes, paths, strike rule, stalls, Store, service); **phase 2 built** (AUTO planner,
-playbook, studio Playbook tab). Phases 3–6 next. Replaces the
+playbook, studio Playbook tab); **phase 3 built and passed** (sequential-halving search on shared luck:
+259.1 vs v1 look-ahead 231.3, +27.8 ± 12.7 on 24 paired exam matches); **phase 4 built** (entity
+network, learner, continuous actor/learner/evaluator engine with SPRT, one-button Home) — its pass
+condition is measured by training, which the team runs. Phases 5–6 next. Replaces the
 generational trainer (TRAINING.md) phase by phase; every phase passes the gate before it ships.
 
 ## 1. Goal
@@ -51,7 +54,7 @@ Training is the phase we are in now. The deliverables are what training produces
 ```
             ┌──────────── Studio (one button, pages below) ────────────┐
             │                                                          │
-  Actors (CPU workers) ──states/decisions──▶ Store ◀──reads── Learner (Apple GPU, MLX)
+  Actors (CPU workers) ──states/decisions──▶ Store ◀──reads── Learner (a CPU worker; MLX not used)
    play + search in DSIM                     (all data, forever)       entity transformer
         ▲                                                             │
         └──────────────── new network every few minutes ──────────────┘

@@ -32,6 +32,13 @@ import { deepClone } from './fork';
 import { cmaAsk, cmaInit, cmaTell } from './cma';
 import { fitLessons, judge } from './learn';
 import { VALUE_SHAPE, fitValue } from './value';
+import { DatabaseSync } from 'node:sqlite';
+import { SEARCH2, type Search2Spec } from './episode';
+import { EntNet, entInit, layout, type EntShape } from './entnet';
+import { ENT_PREFIX, ENT_SHAPE, decodeGenome, genomeStyle } from './policy';
+import { N_ENT, N_OPT_IN } from './obs';
+import { entEval, entFit, entGenome, labelRows, learnJob, toLabels } from './entlearn';
+import { Continuous, V2_DIR, examList, sprt, v2Defaults } from './continuous';
 
 let fails = 0;
 const check = (name: string, ok: boolean, detail = ''): void => {
@@ -588,6 +595,146 @@ for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(RO
   check('11 playbook: …and continues where it stopped', pb.status.total === 0 && pb.entries().length === 4);
   pb.store.close();
   rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---- 12. thinking ahead v2: sequential halving on shared luck (MASTERPLAN phase 3) --------------------------
+const QUICK2: Search2Spec = { rounds: [{ draws: 2, horizon: 300 }, { draws: 3, horizon: 600 }], margin: 2, z: 1 };
+const V1P = 'profiles/real-v1.json';
+const s2args = (genome: string | null, o: Partial<EpisodeArgs> = {}): EpisodeArgs => ({ genome, profile: V1P, sampleProfile: true, seed: 12, stage: 'full', driver: 'oracle', track: false, record: false, search2: QUICK2, keepSearched: true, searchWindow: [1800, 3000], ...o });
+const s2a = runEpisode(s2args(null));
+{
+  const s2b = runEpisode(s2args(null));
+  const L = s2a.labels ?? [];
+  check('12 search v2: deterministic (the same match twice → the same score and the same searched values)', L.length >= 3 && s2a.reward === s2b.reward && JSON.stringify(L) === JSON.stringify(s2b.labels));
+  const shape = L.every((l) => l.rq.length === QUICK2.rounds.length && l.rq[0].every((v) => v !== null) && l.rq.every((row, r) => r === 0 || row.every((v, i) => v === null || l.rq[r - 1][i] !== null)) && l.depth[l.net] === QUICK2.rounds.length - 1);
+  check('12 search v2: round 1 plays every option, each later round a subset, and the network\'s own choice is always played to the last round', shape);
+  check('12 search v2: the network is overruled only by a clear winner of the last round (more than the margin on the same draws)', L.every((l) => l.chosen === l.net || l.q[l.chosen]! - l.q[l.net]! > QUICK2.margin) && s2a.searched!.changed === L.filter((l) => l.chosen !== l.net).length);
+  check('12 search v2: only decisions inside the search window are searched; each keeps what the networks saw', L.every((l) => l.tick >= 1800 && l.tick < 3000 && !!l.x && l.x.n >= 1 && Buffer.from(l.x.o, 'base64').length === 4 * l.q.length * N_OPT_IN && Number.isFinite(l.sofar)));
+  check('12 search v2: the full budget is the measured one (259 vs v1 look-ahead 231 on 24 paired exam matches, TRAINING.md)', SEARCH2.rounds.length === 3 && SEARCH2.rounds[2].draws === 8 && SEARCH2.margin === 2);
+}
+
+// ---- 13. the entity network, the learner and the continuous engine (MASTERPLAN phase 4) ----------------------
+{
+  // the backward pass against finite differences (float64 parameters; float32 inside, hence the tolerance)
+  const sh: EntShape = { G: 7, F: 5, O: 4, D: 6, A: 3, H: 5, style: 2 };
+  const r = mulberry32(3);
+  const gauss = (): number => Math.sqrt(-2 * Math.log(Math.max(1e-12, r()))) * Math.cos(2 * Math.PI * r());
+  const P = new Float64Array(entInit(sh, gauss)).map((v) => v + 0.3 * gauss());
+  const x = { g: Float64Array.from({ length: 7 }, gauss) as unknown as Float32Array, e: Float64Array.from({ length: 20 }, gauss) as unknown as Float32Array, n: 4, o: Float64Array.from({ length: 12 }, gauss) as unknown as Float32Array, k: 3 };
+  const W = [0.7, -1.3, 0.4];
+  const lossAt = (pp: Float64Array): number => {
+    const t = new EntNet(sh, pp as unknown as Float32Array).forward(x);
+    return t.q.reduce((a, q, j) => a + W[j] * q, 0) + 0.9 * t.v;
+  };
+  const net = new EntNet(sh, P as unknown as Float32Array);
+  const g = new Float64Array(P.length) as unknown as Float32Array;
+  net.backward(x, net.forward(x), W, 0.9, g);
+  let worst = 0;
+  for (let i = 0; i < layout(sh).style; i++) {
+    const a = new Float64Array(P);
+    const b = new Float64Array(P);
+    a[i] += 1e-3;
+    b[i] -= 1e-3;
+    const fd = (lossAt(a) - lossAt(b)) / 2e-3;
+    if (Math.abs(fd) < 1e-3 && Math.abs(g[i]) < 1e-3) continue;
+    worst = Math.max(worst, Math.abs(fd - g[i]) / Math.max(1e-6, Math.abs(fd) + Math.abs(g[i])));
+  }
+  check('13 entity network: its hand-written gradients match finite differences (every weight, attention included)', worst < 0.02, `worst relative error ${worst.toExponential(1)}`);
+  // a set: the order of the entities does not matter
+  const L = s2a.labels ?? [];
+  const f32 = (b: string): Float32Array => new Float32Array(new Uint8Array(Buffer.from(b, 'base64')).buffer);
+  const l0 = L[0];
+  const g0 = decodeGenome(entGenome(5)) as { ent: Float32Array };
+  const en = new EntNet(ENT_SHAPE, g0.ent);
+  const xin = { g: f32(l0.x!.g), e: f32(l0.x!.e), n: l0.x!.n, o: f32(l0.x!.o), k: l0.q.length };
+  const rev = new Float32Array(xin.e.length);
+  for (let i = 0; i < xin.n; i++) rev.set(xin.e.subarray(i * N_ENT, (i + 1) * N_ENT), (xin.n - 1 - i) * N_ENT);
+  const q1 = en.forward(xin).q;
+  const q2 = en.forward({ ...xin, e: rev }).q;
+  check('13 entity network: it reads the field as a SET (the entities in any order → the same values); every robot and element in play is one', q1.every((v, i) => Math.abs(v - q2[i]) < 1e-4) && xin.n >= 20 && xin.e[0] === 1);
+  // it drives the robot; a drill's hand-over
+  const gA = entGenome(5);
+  const gB = entGenome(6);
+  const argsE = (genome: string, o: Partial<EpisodeArgs> = {}): EpisodeArgs => ({ genome, profile: V1P, sampleProfile: true, seed: 3, stage: 'full', driver: 'oracle', track: false, record: false, ...o });
+  const eA = runEpisode(argsE(gA));
+  const eA2 = runEpisode(argsE(gA));
+  const eB = runEpisode(argsE(gB));
+  const eAB = runEpisode(argsE(gA, { handover: { tick: 0, genome: gB } }));
+  check('13 entity network: it plays a whole match (deterministic); its skill genes are read like v1\'s', eA.reward === eA2.reward && eA.ticks > 9000 && genomeStyle(gA).length === STYLE.length && genomeStyle(gA).every((v, i) => Math.abs(v - STYLE_DEFAULT_GENES[i]) < 1e-6));
+  check('13 drills: a hand-over switches the network mid-match (on tick 0 it plays exactly as the new one)', eAB.reward === eB.reward && eAB.ticks === eB.ticks);
+  // labels through the Store, an older store upgraded in place
+  const tmpDb = join(ROOT, 'runs', '_check-store.db');
+  rmSync(tmpDb, { force: true });
+  const old = new DatabaseSync(tmpDb);
+  old.exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); INSERT INTO meta VALUES ('version', '1');
+    CREATE TABLE decisions (id INTEGER PRIMARY KEY, match INT, gen INT, tick INT, robot INT, k INT, chosen INT, best INT, obs BLOB, feats BLOB, q BLOB, se BLOB, n BLOB, ents BLOB, source TEXT);`);
+  old.close();
+  const st = new Store(tmpDb);
+  const rows = labelRows(s2a, 7, 0, QUICK2);
+  st.tx(() => st.addDecisions(rows));
+  const back = toLabels(st.decisions({ source: 'search2' }));
+  st.close();
+  check('13 store: searched decisions keep every round\'s values, the draws, the entity view and the points still to come (an older store gains the columns)', back.length === L.length && back.every((b) => b.rq.length === QUICK2.rounds.length * b.x.k && b.rd[1] === 3 && Number.isFinite(b.v) && b.x.o.length === b.x.k * N_OPT_IN) && back.some((b) => b.rq.some(Number.isNaN)));
+  // the learner fits them
+  const before = entEval(g0.ent, back);
+  const fit = entFit(g0.ent, back, back, { epochs: 40, lr: 0.003, batch: 4, seed: 1 });
+  check('13 learner: fitting the searched values lowers the loss on them (and never touches the skill genes)', fit.report.lossTest < before.lossTest * 0.8 && fit.p.subarray(layout(ENT_SHAPE).style).every((v, i) => v === g0.ent[layout(ENT_SHAPE).style + i]), `loss ${before.lossTest.toFixed(3)} → ${fit.report.lossTest.toFixed(3)}`);
+  const lj = learnJob({ store: tmpDb, start: gA, lrs: [0.001, 0.002, 0.004], epochs: 2, window: 1000, seed: 1 });
+  check('13 learner: as a worker job it reads the Store, tries each learning rate and keeps the best on held-out decisions', lj.genome.startsWith(ENT_PREFIX) && lj.tried.length === 3 && lj.tried.some((t) => t.lr === lj.lr));
+  rmSync(tmpDb, { force: true });
+  for (const sfx of ['-wal', '-shm']) rmSync(tmpDb + sfx, { force: true });
+  // the pool's queue: evaluator work jumps the actors
+  const pool = new WorkerPool(1);
+  await pool.map([]); // (the worker up: while it starts, the queue simply orders by priority)
+  const order: string[] = [];
+  const sp = (tag: string, pri: number): Promise<void> => pool.submit<string>({ module: 'jobs.ts', fn: 'spin', args: { ms: 150, tag } }, pri).then((t) => void order.push(t));
+  await Promise.all([sp('a', 0), sp('b', 0), sp('c', 2)]);
+  pool.close();
+  check('13 pool: a higher-priority job takes the next free worker (the evaluator before queued actors)', order.join('') === 'acb', order.join(''));
+  // promotion by SPRT
+  const rr = mulberry32(11);
+  const nrm = (m: number): number => m + 20 * Math.sqrt(-2 * Math.log(Math.max(1e-12, rr()))) * Math.cos(2 * Math.PI * rr());
+  const S = v2Defaults(V1P).sprt;
+  const up = Array.from({ length: 400 }, () => nrm(12));
+  const dn = Array.from({ length: 400 }, () => nrm(-6));
+  const firstDecision = (d: number[]): [string | null, number] => {
+    for (let n = S.minN; n <= d.length; n += 12) {
+      const v = sprt(d.slice(0, n), S);
+      if (v) return [v, n];
+    }
+    return [null, d.length];
+  };
+  const [vu, nu] = firstDecision(up);
+  const [vd, nd] = firstDecision(dn);
+  check('13 promotion: the sequential test promotes a clearly better network and rejects a worse one, stopping early', vu === 'H1' && vd === 'H0' && sprt(up.slice(0, S.minN - 1), S) === null, `better: ${vu} after ${nu}, worse: ${vd} after ${nd}`);
+  check('13 exam: fixed forever, every partner kind in every stretch of it', JSON.stringify(examList(v2Defaults(V1P))) === JSON.stringify(examList(v2Defaults(V1P))) && examList(v2Defaults(V1P)).slice(0, 6).map((e) => e.partner).join() === v2Defaults(V1P).partners.join());
+  // the whole engine, small: baseline exam → actors → learner → a candidate on the exam → a verdict; pause; reopen
+  const name = '_check-v2';
+  rmSync(join(V2_DIR, name), { recursive: true, force: true });
+  const cfg = { ...v2Defaults(V1P), workers: 6, search: QUICK2, window: 600, learnEvery: 12, learnWindow: 5000, epochs: 3, examSeeds: 1, partners: ['none', 'parker'] as ('none' | 'parker')[], sprt: { ...S, minN: 2, chunk: 2 } };
+  const c = new Continuous(name, cfg);
+  const t0 = Date.now();
+  let peak = 0;
+  c.start();
+  while (!c.st.candidates.length && Date.now() - t0 < 400_000) {
+    await new Promise((res) => setTimeout(res, 1000));
+    peak = Math.max(peak, c.status().activity.actors);
+  }
+  const sNow = c.status();
+  c.stop('paused');
+  const c2 = new Continuous(name);
+  check('13 continuous: the no-learning robot takes the exam first, actors store searched decisions, the learner makes a candidate, the evaluator gives a verdict', !!c.st.base && c.st.base.length === 2 && c.st.totals.labels >= 12 && c.st.candidates.length >= 1 && c.st.candidates[0].n >= 2 && c.problems.length === 0, `${((Date.now() - t0) / 1000).toFixed(0)} s, ${c.st.totals.labels} labels, verdict ${c.st.candidates[0]?.verdict}${c.problems.length ? `, problems: ${c.problems.join(' | ')}` : ''}`);
+  check('13 continuous: every worker kept busy with actors between exams; paused, it reopens where it was (not training)', peak === cfg.workers && !c2.st.running && c2.st.candidates.length === c.st.candidates.length && c2.st.totals.labels === c.st.totals.labels && sNow.champion.exam !== null);
+  c.store.close();
+  c2.store.close();
+  rmSync(join(V2_DIR, name), { recursive: true, force: true });
+  // the studio's Home page
+  const srv = startServer(4797, undefined, { noResume: true });
+  const h = await fetch('http://127.0.0.1:4797/api/home');
+  const hj = (await h.json()) as { profiles: string[]; runs: unknown[] };
+  const pz = await fetch('http://127.0.0.1:4797/api/home/pause', { method: 'POST', body: '{}' });
+  await srv.close();
+  check('13 studio: the Home page lists the robots and runs; Pause with nothing training is harmless', h.status === 200 && hj.profiles.includes(V1P) && Array.isArray(hj.runs) && pz.status === 200);
 }
 
 console.log(fails === 0 ? '\nTRAINING PLATFORM GATE: ALL PASS' : `\nTRAINING PLATFORM GATE: ${fails} FAIL`);

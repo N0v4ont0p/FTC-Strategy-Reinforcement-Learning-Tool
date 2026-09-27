@@ -72,7 +72,8 @@
 
       <aside class="side">
         <div class="tabs" role="tablist" aria-label="Panels">
-          <button role="tab" aria-selected="true" data-tab="overview" type="button">Overview</button>
+          <button role="tab" aria-selected="true" data-tab="home" type="button">Home</button>
+          <button role="tab" aria-selected="false" data-tab="overview" type="button">Overview</button>
           <button role="tab" aria-selected="false" data-tab="playbook" type="button">Playbook</button>
           <button role="tab" aria-selected="false" data-tab="race" type="button">Race</button>
           <button role="tab" aria-selected="false" data-tab="report" type="button">Report</button>
@@ -84,7 +85,47 @@
           <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
         </div>
 
-        <div class="panel" data-panel="overview">
+        <div class="panel" data-panel="home">
+          <div class="counters">
+            <div class="big"><span class="k">exam — our robot alone, every partner kind</span><span class="v mono" id="homeExam">—</span><span class="sub" id="homeExamSub">press Train: nothing has been learned yet</span></div>
+            <div class="pair">
+              <div><span class="k">state</span><span class="v" id="homeState">idle</span><span class="sub" id="homeDoing"></span></div>
+              <div><span class="k">cores busy</span><span class="v mono" id="homeCpu">—</span><span class="sub" id="homeHours"></span></div>
+            </div>
+            <div class="pair">
+              <div><span class="k">decisions learned from</span><span class="v mono" id="homeLabels">0</span><span class="sub" id="homeRate"></span></div>
+              <div><span class="k">champion</span><span class="v mono" id="homeChamp">—</span><span class="sub" id="homeChampWhen"></span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="row">
+              <label class="hint">Robot <select id="homeProfile" aria-label="Robot to train"></select></label>
+              <button id="homeTrain" type="button">Train</button>
+              <button id="homePause" type="button" class="quiet">Pause</button>
+            </div>
+            <div id="homeProblems" class="sub" role="alert"></div>
+            <p class="hint">One button. The robot plays matches beside every kind of partner and thinks ahead at its decisions (each option played out on shared luck draws, the close ones again and longer); every such decision is a lesson for its network. A new network is exam-checked on the same fixed matches every time and takes over only when it is clearly better, never worse in its bad matches. It keeps going until you pause, carries on after a crash or a restart, and every number here is a DSIM score.</p>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Exam by hours of training</h2><span class="sub" id="homeTrend"></span></div>
+            <canvas id="homeChart" height="160" aria-label="The champion's exam score by hours of training, with the no-learning robot as a reference line"></canvas>
+            <div class="chartlegend" id="homeLegend"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Beside each partner</h2><span class="sub">exam points, champion vs no-learning</span></div>
+            <div id="homePartners" class="table"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Candidates</h2><span class="sub" id="homeLearner"></span></div>
+            <div id="homeCands" class="table"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>What it is doing</h2></div>
+            <div id="homeLog" class="table mono"></div>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="overview" hidden>
           <div class="counters">
             <div class="pair">
               <div><span class="k">generation</span><span class="v mono" id="gen">0</span><span class="sub" id="genWhen"></span></div>

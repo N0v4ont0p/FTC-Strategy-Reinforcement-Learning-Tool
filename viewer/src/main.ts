@@ -1,6 +1,6 @@
 import { Comb } from './comb';
 import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
-import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
+import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type HomeStatusV, type HomeV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
 import type { World } from '../../dsim-main/src/types';
 
@@ -733,6 +733,90 @@ $('pbBuild').onclick = async () => {
 };
 $('pbStop').onclick = () => void act(post('/api/playbook/stop', {}), 'the playbook build stops after the entry in progress');
 void loadPlaybook();
+// ─────────────────────────────── Home: the one button (the continuous engine) ───────────────────────────────
+let HOME: HomeV | null = null;
+const homeChart = new LineChart<HomeStatusV['history'][number]>($<HTMLCanvasElement>('homeChart'), $('homeLegend'), [{ label: 'champion, alone', color: '--s-best', get: (x) => x.exam }], {
+  unit: ' pts',
+  zeroBase: false,
+  xLabel: (x) => `${x.hours.toFixed(1)} h`,
+  tip: (x) => `<b>champion #${x.champion}</b> after ${x.hours.toFixed(1)} h<br>exam ${x.exam.toFixed(1)} · vs no-learning ${sgn(x.vsBase)}<br>${fmt(x.labels)} decisions learned from`,
+  empty: 'the first point appears after the no-learning robot\'s exam',
+});
+function renderHome(): void {
+  if (!HOME) return;
+  const sel = $<HTMLSelectElement>('homeProfile');
+  if (sel.options.length !== HOME.profiles.length) sel.innerHTML = HOME.profiles.map((p) => `<option value="${esc(p)}">${esc(p.replace('profiles/', '').replace('.json', ''))}</option>`).join('');
+  sel.value = HOME.profile;
+  const s = HOME.status;
+  const busy = HOME.busy.v1 ? `the generational run "${HOME.busy.v1}" is training (Overview) — one trainer at a time` : HOME.busy.playbook ? `the ${HOME.busy.playbook} AUTO playbook is being built — it needs every core` : '';
+  $<HTMLButtonElement>('homeTrain').disabled = !!s?.running || !!busy;
+  $<HTMLButtonElement>('homePause').disabled = !s?.running;
+  sel.disabled = !!s?.running;
+  const ex = s?.champion.exam;
+  $('homeExam').textContent = ex ? ex.mean.toFixed(1) : '—';
+  $('homeExamSub').textContent = !s
+    ? 'press Train: nothing has been learned yet'
+    : ex
+      ? `± ${ex.ci95.toFixed(1)} on ${ex.n} fixed matches · ${s.champion.learned ? `${sgn(ex.vsBase.mean)} ± ${ex.vsBase.ci95.toFixed(1)} over the no-learning robot` : 'the no-learning robot (the first network has to beat it)'} · worst tenth ${ex.cvar10.toFixed(0)}`
+      : 'the no-learning robot takes the exam first';
+  $('homeState').textContent = !s ? 'idle' : s.running ? (s.improving === 'flat' ? 'training · flat' : 'training') : 'paused';
+  $('homeState').className = `v${s?.running ? ' on' : ''}`;
+  const a = s?.activity;
+  $('homeDoing').textContent = !s?.running ? '' : a?.evaluating ? `exam of candidate #${a.evaluating.id}: ${a.evaluating.done}/${a.evaluating.total} matches` : a?.learning ? 'learning a new candidate' : `playing and thinking ahead · next lesson in ${fmt(s.nextLearnIn)} decisions`;
+  $('homeCpu').textContent = s?.running ? pct(s.cpu) : '—';
+  $('homeHours').textContent = s ? `${s.totals.hours.toFixed(1)} h trained · ${fmt(s.totals.matches)} matches` : '';
+  $('homeLabels').textContent = s ? fmt(s.totals.labels) : '0';
+  $('homeRate').textContent = s?.labelsPerHour ? `${fmt(s.labelsPerHour)} an hour` : '';
+  $('homeChamp').textContent = s ? (s.champion.learned ? `#${s.champion.id}` : 'no-learning') : '—';
+  $('homeChampWhen').textContent = s ? `${s.totals.promotions} promoted, ${s.totals.rejections} not${s.lastPromotion ? ` · last ${ago(s.lastPromotion)}` : ''}` : '';
+  $('homeTrend').textContent = s?.trend !== null && s?.trend !== undefined ? `${sgn(s.trend)} over the last champions` : '';
+  $('homeProblems').textContent = [busy, ...(s?.problems ?? [])].filter(Boolean).join(' · ');
+  homeChart.set(s?.history ?? [], s?.base !== null && s?.base !== undefined ? [{ value: s.base, label: `no-learning robot ${s.base.toFixed(0)}` }] : []);
+  const PL: Record<string, string> = { none: 'no partner', real: 'a second REAL-v1', sniper: 'Sniper', hauler: 'Hauler', skimmer: 'Skimmer', parker: 'parks only', idle: 'does nothing' };
+  $('homePartners').innerHTML = ex
+    ? `<table><thead><tr><th class="l">partner</th><th>champion</th></tr></thead><tbody>${Object.entries(ex.byPartner)
+        .map(([k, v]) => `<tr><td class="l">${esc(PL[k] ?? k)}</td><td>${v.toFixed(1)}</td></tr>`)
+        .join('')}</tbody></table>${s?.searchExam ? `<p class="hint">Thinking ahead (champion #${s.searchExam.champion}, ${s.searchExam.n} solo matches): alone ${s.searchExam.alone.toFixed(1)}, with search ${s.searchExam.search.toFixed(1)} (${sgn(s.searchExam.gain.mean)} ± ${s.searchExam.gain.ci95.toFixed(1)}). The goal: the network alone as good as with search.</p>` : ''}`
+    : '<p class="hint">After the first exam.</p>';
+  const L = s?.learner;
+  $('homeLearner').textContent = L?.last ? `last lesson: agrees with the search ${pct(L.last.agree)} of held-out decisions, gives away ${L.last.regret.toFixed(1)} pts each · learning rate ${L.lr.toPrecision(2)}` : '';
+  $('homeCands').innerHTML = s?.candidates.length
+    ? `<table><thead><tr><th>#</th><th class="l">verdict</th><th title="paired with the champion on the same exam matches">vs champion</th><th>matches</th><th title="held-out decisions where its first choice is the search's">agrees</th></tr></thead><tbody>${[...s.candidates]
+        .reverse()
+        .map((c) => `<tr><td>${c.id}</td><td class="l">${c.verdict === 'promoted' ? '★ promoted' : 'not better'}</td><td>${sgn(c.diff.mean)} ± ${c.diff.ci95.toFixed(1)}</td><td>${c.n}</td><td>${pct(c.learn.agree)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : `<p class="hint">${s?.running ? `The first candidate is learned after ${fmt(s.nextLearnIn)} more decisions.` : 'None yet.'}</p>`;
+  $('homeLog').innerHTML = (s?.log ?? []).slice().reverse().map((l) => `<div>${esc(l)}</div>`).join('');
+}
+async function loadHome(profile?: string): Promise<void> {
+  try {
+    HOME = await getJSON<HomeV>(`/api/home${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`);
+    renderHome();
+  } catch (e) {
+    $('homeProblems').textContent = (e as Error).message;
+  }
+}
+$('homeProfile').onchange = () => void loadHome($<HTMLSelectElement>('homeProfile').value);
+$('homeTrain').onclick = async () => {
+  try {
+    HOME = await post<HomeV>('/api/home/train', { profile: $<HTMLSelectElement>('homeProfile').value });
+    renderHome();
+    toast('training — it keeps going until you pause');
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+};
+$('homePause').onclick = async () => {
+  try {
+    HOME = await post<HomeV>('/api/home/pause', {});
+    renderHome();
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+};
+void loadHome();
+window.setInterval(() => HOME && renderHome(), 60_000); // "… min ago"
+
 $('modeLive').onclick = () => void showLive(newest());
 $('modeBest').onclick = () => void showBest(newest());
 $('modeChamp').onclick = () => void watchChampion();
@@ -1072,6 +1156,14 @@ function connect(): void {
   es.addEventListener('playbookEntry', (e) => {
     const d = JSON.parse((e as MessageEvent).data) as { profile: string; key: string };
     if (PB && d.profile === PB.profile) void loadPlaybook(PB.profile);
+  });
+  es.addEventListener('home', (e) => {
+    const st = JSON.parse((e as MessageEvent).data) as HomeStatusV;
+    if (HOME && (!HOME.status || HOME.status.name === st.name)) {
+      HOME.status = st;
+      HOME.profile = st.profile;
+      renderHome();
+    } else void loadHome();
   });
   es.addEventListener('quit', () => {
     es.close();

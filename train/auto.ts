@@ -16,8 +16,7 @@
 import type { WorkerPool } from '../harness/pool';
 import { seedOf } from '../harness/rng';
 import { Episode, type EpisodeArgs } from './episode';
-import { SHAPE, STYLE, STYLE_DEFAULT_GENES } from './policy';
-import { fromB64, styleOffset } from './net';
+import { STYLE, genomeStyle } from './policy';
 import { planId, stepOf, type PlanStep, type TakenStep } from './plan';
 import { PARTNERS, type PartnerKind, type StartId } from './team';
 import { cmaAsk, cmaInit, cmaTell } from './cma';
@@ -219,7 +218,7 @@ export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = 
   let style: number[] | null = null;
   if (cfg.cma && !stop()) {
     const cd = Array.from({ length: cfg.cma.draws }, (_, k) => autoArgs(P, 3000 + k));
-    const own = P.genome ? Array.from(fromB64(P.genome).subarray(styleOffset(SHAPE), styleOffset(SHAPE) + STYLE.length)) : [...STYLE_DEFAULT_GENES];
+    const own = genomeStyle(P.genome);
     let S = cmaInit(own, 0.4, seedOf(P.seed, 'auto-cma'));
     let bestX: number[] | null = null;
     let bestF = mt(await score(best.plans, cd)).mean;

@@ -13,6 +13,7 @@ import { STYLE, decodeStyle } from './policy';
 import { fromB64, styleOffset } from './net';
 import { SHAPE } from './policy';
 import { Playbook } from './playbook';
+import { Continuous, listV2, v2Defaults } from './continuous';
 
 const PUBLIC = join(ROOT, 'train', 'public');
 const LAST = join(RUNS, '.last');
@@ -49,7 +50,7 @@ const champ = (c: Champ) => {
   return { id: c.id, op: c.lineage.op, born: c.born, race: c.conf?.n ? confStats(c.conf) : null, exam: c.exam, parts: c.parts, style: STYLE.map((d) => ({ key: d.key, label: d.label, value: st[d.key], def: d.def })) };
 };
 
-export function startServer(port: number, first?: Engine, opts: { onQuit?: () => void } = {}): Studio {
+export function startServer(port: number, first?: Engine, opts: { onQuit?: () => void; noResume?: boolean } = {}): Studio {
   let engine: Engine | null = first ?? null;
   let refreshing: Promise<unknown> | null = null;
   const streams = new Set<ServerResponse>();
@@ -73,6 +74,37 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     return playbook;
   };
   const pbSummary = (pb: Playbook) => ({ profile: pb.profile, name: pb.name, status: pb.status, entries: pb.entries() });
+
+  // THE CONTINUOUS ENGINE (train/continuous.ts, phase 4): the Home page's one button — one run per robot
+  let coach: Continuous | null = null;
+  const coachFor = (profile: string): Continuous => {
+    if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(profile) || !existsSync(join(ROOT, profile))) throw new HttpError(400, 'unknown profile');
+    const name = profile.replace('profiles/', '').replace('.json', '').replace(/[^A-Za-z0-9_-]/g, '_');
+    if (coach?.name === name) return coach;
+    if (coach?.running) throw new HttpError(409, `${coach.name} is training — pause it first`);
+    coach?.removeAllListeners();
+    coach?.store.close();
+    const exists = listV2().some((r) => r.name === name);
+    try {
+      coach = exists ? new Continuous(name) : new Continuous(name, v2Defaults(profile));
+    } catch (err) {
+      throw bad(err);
+    }
+    const c = coach;
+    const push = (): void => send('home', c.status());
+    c.on('status', push);
+    c.on('state', push);
+    c.on('champion', push);
+    c.on('log', (l: string) => send('log', `training: ${l}`));
+    return c;
+  };
+  const home = (profile?: string) => {
+    const profiles = readdirSync(join(ROOT, 'profiles')).filter((f) => f.endsWith('.json')).map((f) => `profiles/${f}`);
+    const runs = listV2();
+    const pick = profile ?? coach?.st.config.profile ?? runs[0]?.profile ?? 'profiles/real-v1.json';
+    const exists = runs.some((r) => r.profile === pick);
+    return { profile: pick, profiles, runs, status: coach && coach.st.config.profile === pick ? coach.status() : exists && !coach?.running ? coachFor(pick).status() : null, busy: { v1: engine?.running ? engine.name : null, playbook: playbook?.status.running ? playbook.name : null } };
+  };
 
   const wire = (e: Engine): void => {
     e.on('progress', (p) => send('progress', p));
@@ -241,6 +273,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     if (p === '/api/playbook/build' && post) {
       const b = await body(req);
       if (engine?.running) throw new HttpError(409, `"${engine.name}" is training — the playbook needs every core; pause training first`);
+      if (coach?.running) throw new HttpError(409, `${coach.name} is training — the playbook needs every core; pause training first`);
       const pb = book(String(b.profile ?? 'profiles/real-v1.json'));
       if (pb.status.running) throw new HttpError(409, 'the playbook is already being built');
       const list = <T,>(v: unknown): T[] | undefined => (Array.isArray(v) && v.length ? (v as T[]) : undefined);
@@ -250,6 +283,20 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     if (p === '/api/playbook/stop' && post) {
       playbook?.stop();
       return json(res, 200, { ok: true });
+    }
+
+    // the Home page: Train / Pause (the continuous engine)
+    if (p === '/api/home' && !post) return json(res, 200, home(url.searchParams.get('profile') ?? undefined));
+    if (p === '/api/home/train' && post) {
+      const b = await body(req);
+      if (engine?.running) throw new HttpError(409, `the generational run "${engine.name}" is training — stop it first (one trainer at a time)`);
+      if (playbook?.status.running) throw new HttpError(409, 'the AUTO playbook is being built — stop it first (it needs every core)');
+      coachFor(String(b.profile ?? 'profiles/real-v1.json')).start();
+      return json(res, 200, home());
+    }
+    if (p === '/api/home/pause' && post) {
+      coach?.stop('paused');
+      return json(res, 200, home());
     }
 
     // runs
@@ -417,6 +464,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       const b = await body(req);
       const a = b.action;
       if (a === 'start' || a === 'step') {
+        if (coach?.running) throw new HttpError(409, `${coach.name} is training on the Home page — pause it first (one trainer at a time)`);
         const n = a === 'step' ? Number(b.n ?? 1) : -1;
         if (a === 'step' && !(Number.isInteger(n) && n >= 1 && n <= 10000)) throw new HttpError(400, 'step 1 to 10000 generations');
         try {
@@ -560,11 +608,25 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       /* it was deleted or is an old version: start with none open */
     }
   }
+  // the continuous engine was training when the studio closed (a crash, the Mac restarting): carry on
+  if (!first && !opts.noResume && !engine?.running) {
+    const was = listV2().find((r) => r.running);
+    if (was) {
+      try {
+        const c = coachFor(was.profile);
+        c.start();
+        say(`training ${c.name} resumed by itself — it was running when the studio closed`);
+      } catch (err) {
+        say(`training could not resume by itself: ${(err as Error).message}`);
+      }
+    }
+  }
   return {
     url: `http://localhost:${port}`,
     engine: () => engine,
     open,
     close: async () => {
+      coach?.close();
       playbook?.stop();
       await engine?.halt(true, true); // closing the studio is not stopping training: it resumes next start
       await refreshing;

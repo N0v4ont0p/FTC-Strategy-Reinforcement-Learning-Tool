@@ -18,13 +18,22 @@ interface Slot {
   p: ChildProcess;
   ready: Promise<void>;
   busy: boolean;
+  up: boolean; // ready for jobs
   /** exited or failed to start: never handed another job */
   dead: boolean;
+}
+interface Queued {
+  job: Job;
+  pri: number;
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
 }
 
 export class WorkerPool {
   private slots: Slot[] = [];
   private waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  /** jobs waiting for a free worker: highest priority first, then first come */
+  private queue: Queued[] = [];
   private nextId = 0;
   private closed = false;
 
@@ -35,7 +44,7 @@ export class WorkerPool {
   private start(): Slot {
     const p = spawn(TSX, [join(here, 'worker.ts')], { stdio: ['pipe', 'pipe', 'inherit'] });
     let markReady!: () => void;
-    const slot: Slot = { p, ready: new Promise<void>((r) => (markReady = r)), busy: false, dead: false };
+    const slot: Slot = { p, ready: new Promise<void>((r) => (markReady = r)), busy: false, up: false, dead: false };
     // A worker's failure must end the batch, never the process that owns the pool: every event
     // below is one that, unhandled, would throw out of a stream callback and kill the studio.
     const fail = (why: string): void => {
@@ -44,6 +53,7 @@ export class WorkerPool {
       if (this.closed) return;
       for (const [, w] of this.waiting) w.reject(new Error(why));
       this.waiting.clear();
+      for (const q of this.queue.splice(0)) q.reject(new Error(why));
     };
     p.on('error', (e) => fail(`worker could not run: ${e.message}`));
     p.stdin!.on('error', (e) => fail(`worker stopped taking jobs: ${e.message}`)); // EPIPE: it died
@@ -55,7 +65,11 @@ export class WorkerPool {
         process.stderr.write(`[worker] ${line.slice(0, 500)}\n`); // stray output, not a result
         return;
       }
-      if (msg.ready) return markReady();
+      if (msg.ready) {
+        slot.up = true;
+        markReady();
+        return this.pump();
+      }
       const w = this.waiting.get(msg.id);
       this.waiting.delete(msg.id);
       slot.busy = false;
@@ -78,23 +92,43 @@ export class WorkerPool {
     });
   }
 
+  /** one job, run by the next free worker; higher `priority` jumps the queue (the continuous engine's
+   * evaluator and learner ahead of its actors). Several callers can share the pool at once */
+  submit<T>(job: Job, priority = 0): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('aborted'));
+    return new Promise<T>((resolve, reject) => {
+      let i = this.queue.length;
+      while (i > 0 && this.queue[i - 1].pri < priority) i--;
+      this.queue.splice(i, 0, { job, pri: priority, resolve: resolve as (v: unknown) => void, reject });
+      this.pump();
+    });
+  }
+  private pump(): void {
+    for (const slot of this.slots) {
+      if (!this.queue.length || this.closed) return;
+      if (slot.busy || slot.dead || !slot.up) continue;
+      const q = this.queue.shift()!;
+      this.run(slot, q.job).then(q.resolve, q.reject).finally(() => this.pump());
+    }
+  }
+  /** jobs running and waiting (the continuous engine's CPU gauge) */
+  get load(): { busy: number; queued: number; size: number } {
+    return { busy: this.slots.filter((s) => s.busy && !s.dead).length, queued: this.queue.length, size: this.slots.filter((s) => !s.dead).length };
+  }
+
   /** run every job; results in job order. `onDone` fires per finished job (progress bars). */
   async map<T>(jobs: Job[], onDone?: (done: number, total: number, result: T, index: number) => void): Promise<T[]> {
     await Promise.all(this.slots.map((s) => s.ready));
     if (this.closed) throw new Error('aborted');
-    const out = new Array<T>(jobs.length);
-    let next = 0;
     let done = 0;
-    await Promise.all(
-      this.slots.map(async (slot) => {
-        while (next < jobs.length && !this.closed) {
-          const i = next++;
-          out[i] = await this.run<T>(slot, jobs[i]);
-          onDone?.(++done, jobs.length, out[i], i);
-        }
-      }),
+    return Promise.all(
+      jobs.map((j, i) =>
+        this.submit<T>(j).then((r) => {
+          onDone?.(++done, jobs.length, r, i);
+          return r;
+        }),
+      ),
     );
-    return out;
   }
 
   /** kill every worker; anything still running is rejected with 'aborted' (never left hanging) */
@@ -103,6 +137,7 @@ export class WorkerPool {
     for (const s of this.slots) s.p.kill();
     for (const [, w] of this.waiting) w.reject(new Error('aborted'));
     this.waiting.clear();
+    for (const q of this.queue.splice(0)) q.reject(new Error('aborted'));
   }
 }
 

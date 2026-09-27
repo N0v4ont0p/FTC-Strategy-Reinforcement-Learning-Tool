@@ -38,7 +38,15 @@ export interface DecisionRow {
   n: Float32Array; // play-outs behind each value
   ents?: Float32Array; // the entity encoding (phase 4), when recorded
   source: string; // 'search' | 'lesson' | 'demo' | …
+  // the entity network's labels (phase 4, train/entlearn.ts)
+  opt?: Float32Array; // the options as the entity network reads them (k × N_OPT_IN)
+  rq?: Float32Array; // per sequential-halving round, each option's mean (rounds × k, NaN = out by then)
+  rd?: Float32Array; // luck draws per round
+  v?: number; // points still to come from here (the state value's target)
+  net?: number; // the network's own choice
 }
+/** columns added after version 1 (added in place: an older store keeps its rows) */
+const ADDED: [string, string][] = [['opt', 'BLOB'], ['rq', 'BLOB'], ['rd', 'BLOB'], ['v', 'REAL'], ['net', 'INT']];
 export interface StateRow {
   gen: number;
   tag: string; // why it is interesting: 'late-game', 'near-mistake', 'drill:<kind>', …
@@ -72,6 +80,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS plans (id INTEGER PRIMARY KEY, kind TEXT, key TEXT, score REAL, json TEXT, at TEXT);
       CREATE INDEX IF NOT EXISTS plans_key ON plans(kind, key);
     `);
+    const cols = new Set((this.db.prepare('PRAGMA table_info(decisions)').all() as { name: string }[]).map((c) => c.name));
+    for (const [c, t] of ADDED) if (!cols.has(c)) this.db.exec(`ALTER TABLE decisions ADD COLUMN ${c} ${t}`);
     const v = this.meta('version');
     if (v === null) this.setMeta('version', String(STORE_VERSION));
     else if (Number(v) !== STORE_VERSION) throw new Error(`store ${path} is version ${v}, this code reads ${STORE_VERSION}`);
@@ -108,8 +118,9 @@ export class Store {
     return Number(r.lastInsertRowid);
   }
   addDecisions(rows: DecisionRow[]): void {
-    const st = this.s('INSERT INTO decisions(match, gen, tick, robot, k, chosen, best, obs, feats, q, se, n, ents, source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-    for (const d of rows) st.run(d.match, d.gen, d.tick, d.robot, d.q.length, d.chosen, d.best, blob(d.obs), blob(d.feats), blob(d.q), blob(d.se), blob(d.n), blob(d.ents), d.source);
+    const st = this.s('INSERT INTO decisions(match, gen, tick, robot, k, chosen, best, obs, feats, q, se, n, ents, source, opt, rq, rd, v, net) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const d of rows)
+      st.run(d.match, d.gen, d.tick, d.robot, d.q.length, d.chosen, d.best, blob(d.obs), blob(d.feats), blob(d.q), blob(d.se), blob(d.n), blob(d.ents), d.source, blob(d.opt), blob(d.rq), blob(d.rd), d.v ?? null, d.net ?? null);
   }
   count(table: 'matches' | 'decisions' | 'states' | 'plans'): number {
     return Number((this.s(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number | bigint }).n);
@@ -123,6 +134,8 @@ export class Store {
       match: Number(r.match), gen: Number(r.gen), tick: Number(r.tick), robot: Number(r.robot), chosen: Number(r.chosen), best: Number(r.best),
       obs: f32(r.obs as Uint8Array), feats: f32(r.feats as Uint8Array), q: f32(r.q as Uint8Array), se: f32(r.se as Uint8Array), n: f32(r.n as Uint8Array),
       ents: r.ents ? f32(r.ents as Uint8Array) : undefined, source: String(r.source),
+      ...(r.opt ? { opt: f32(r.opt as Uint8Array) } : {}), ...(r.rq ? { rq: f32(r.rq as Uint8Array) } : {}), ...(r.rd ? { rd: f32(r.rd as Uint8Array) } : {}),
+      ...(r.v !== null && r.v !== undefined ? { v: Number(r.v) } : {}), ...(r.net !== null && r.net !== undefined ? { net: Number(r.net) } : {}),
     }));
   }
   /** keep at most `keep` decisions (the newest): the store must not grow without bound */

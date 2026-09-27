@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { BB, C, bb, type RobotState, type World } from '../harness/dsim';
 import type { Resolved } from '../harness/profiles';
 import { envelopeOf, inEnv } from './envelope';
+import { N_OPT_FEATS, type Option } from './skills';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const K_NEAR = 6; // nearest collectable elements seen
@@ -165,5 +166,84 @@ export function encode(w: World, r: RobotState, prof: Resolved, out: Float32Arra
   put(prof.spec.driveRpm / 600);
   put(prof.spec.massLb / 42);
   if (i !== N_OBS) throw new Error(`obs length ${i} ≠ ${N_OBS}`);
+  return out;
+}
+
+// ─────────────────────── the entity view (phase 4, train/entnet.ts) ───────────────────────
+/** every robot and every element in play (on the ground, in the air, in a FLOWER) as one row each —
+ * a SET the entity network attends over, robot-relative and alliance-mirrored like `encode`.
+ * Elements in a hopper or a HIVE cell are counted in the global observation instead */
+export const ENT_FEATS = ['self', 'partner', 'opponent', 'pollen', 'ownNectar', 'otherNectar', 'ground', 'inFlower', 'flight', 'fwd', 'left', 'dist', 'x', 'y', 'vFwd', 'vLeft', 'cosH', 'sinH', 'hopper', 'z'] as const;
+export const N_ENT = ENT_FEATS.length;
+/** at most this many entities (the nearest): the field never holds more in play, it only bounds the cost */
+export const ENT_MAX = 96;
+/** an option as the entity network reads it: its features and where it goes, robot-relative */
+export const N_OPT_IN = N_OPT_FEATS + 3;
+
+export function encodeEnts(w: World, r: RobotState): { e: Float32Array; n: number } {
+  const m = r.alliance === 'blue' ? 1 : -1;
+  const px = m * r.pos.x;
+  const py = m * r.pos.y;
+  const h = r.heading + (m > 0 ? 0 : Math.PI);
+  const c = Math.cos(h);
+  const s = Math.sin(h);
+  const rows: { d: number; v: number[] }[] = [];
+  const clip = (v: number): number => (Number.isFinite(v) ? Math.max(-4, Math.min(4, v)) : 0);
+  const row = (who: number, colour: number, where: number, x: number, y: number, vx: number, vy: number, heading: number | null, hopper: number, z: number): void => {
+    const dx = m * x - px;
+    const dy = m * y - py;
+    const d = Math.hypot(dx, dy);
+    const v = new Array<number>(N_ENT).fill(0);
+    if (who >= 0) v[who] = 1;
+    if (colour >= 0) v[3 + colour] = 1;
+    if (where >= 0) v[6 + where] = 1;
+    v[9] = (dx * c + dy * s) / 72;
+    v[10] = (-dx * s + dy * c) / 72;
+    v[11] = d / 144;
+    v[12] = (m * x) / 72;
+    v[13] = (m * y) / 72;
+    v[14] = (m * vx * c + m * vy * s) / 100;
+    v[15] = (-m * vx * s + m * vy * c) / 100;
+    if (heading !== null) {
+      v[16] = Math.cos(heading - r.heading);
+      v[17] = Math.sin(heading - r.heading);
+    }
+    v[18] = hopper / 4;
+    v[19] = z / 10;
+    rows.push({ d, v: v.map(clip) });
+  };
+  for (const q of w.robots) row(q.id === r.id ? 0 : q.alliance === r.alliance ? 1 : 2, -1, -1, q.pos.x, q.pos.y, q.vel.x, q.vel.y, q.heading, q.hopper.length, 0);
+  for (const b of w.balls) {
+    const k = b.state.kind;
+    const where = k === 'ground' ? 0 : k === 'flight' ? 2 : k === 'element' && String((b.state as { el?: string }).el ?? '').startsWith('flower:') ? 1 : -1;
+    if (where < 0) continue;
+    const colour = b.color === 'yellow' ? 0 : b.color === r.alliance ? 1 : 2;
+    row(-1, colour, where, b.pos.x, b.pos.y, b.vel.x, b.vel.y, null, 0, b.z ?? 0);
+  }
+  // the robots first, then the nearest elements (a set: the order means nothing to the network)
+  const robots = rows.slice(0, w.robots.length);
+  const els = rows.slice(w.robots.length).sort((a, b) => a.d - b.d).slice(0, ENT_MAX - robots.length);
+  const all = [...robots, ...els];
+  const e = new Float32Array(all.length * N_ENT);
+  all.forEach((x, i) => e.set(x.v, i * N_ENT));
+  return { e, n: all.length };
+}
+
+/** every option's input row: its features, then its first target relative to the robot */
+export function optInput(r: RobotState, opts: Option[]): Float32Array {
+  const m = r.alliance === 'blue' ? 1 : -1;
+  const h = r.heading + (m > 0 ? 0 : Math.PI);
+  const c = Math.cos(h);
+  const s = Math.sin(h);
+  const out = new Float32Array(opts.length * N_OPT_IN);
+  opts.forEach((o, j) => {
+    const dx = m * (o.x - r.pos.x);
+    const dy = m * (o.y - r.pos.y);
+    out.set(o.feats, j * N_OPT_IN);
+    const b = j * N_OPT_IN + N_OPT_FEATS;
+    out[b] = Math.max(-4, Math.min(4, (dx * c + dy * s) / 72));
+    out[b + 1] = Math.max(-4, Math.min(4, (-dx * s + dy * c) / 72));
+    out[b + 2] = Math.min(4, Math.hypot(dx, dy) / 144);
+  });
   return out;
 }

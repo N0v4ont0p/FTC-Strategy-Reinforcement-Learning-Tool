@@ -7,8 +7,9 @@
 // The genome also carries three STYLE genes the skills read (how they execute, not what).
 import { BB, cmd, type Controller, type RobotCommand, type World } from '../harness/dsim';
 import type { Resolved } from '../harness/profiles';
-import { Mlp, type NetShape } from './net';
-import { N_OBS, encode } from './obs';
+import { Mlp, fromB64, styleOffset, type NetShape } from './net';
+import { N_ENT, N_OBS, N_OPT_IN, encode, encodeEnts, optInput } from './obs';
+import { EntNet, layout, type EntInput, type EntShape } from './entnet';
 import type { Sample } from './bc';
 import { share } from './fork';
 import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, parkGoal, type Option, type OptionKind, type Style } from './skills';
@@ -29,6 +30,24 @@ const SPILL_GUARD_TICKS = 27;
 const SPILL_REACH = 30;
 export const SHAPE: NetShape = { sizes: [N_OBS + N_OPT_FEATS, HIDDEN, 1], skip: true, style: STYLE.length };
 export type PolicyKind = 'net' | 'greedy';
+/** THE ENTITY NETWORK (phase 4, train/entnet.ts): the v1 observation as its global input, every
+ * robot and element as a set, each option with where it goes. A genome is "ent1:" + base64 */
+export const ENT_SHAPE: EntShape = { G: N_OBS, F: N_ENT, O: N_OPT_IN, D: 32, A: 16, H: 32, style: STYLE.length };
+export const ENT_PREFIX = 'ent1:';
+export type NetParams = Float32Array | { ent: Float32Array };
+export const isEnt = (g: string | null | undefined): boolean => !!g && g.startsWith(ENT_PREFIX);
+/** a genome string (v1 MLP or entity network) → what a Brain takes */
+export function decodeGenome(g: string | null | undefined): NetParams | null {
+  if (!g) return null;
+  return isEnt(g) ? { ent: fromB64(g.slice(ENT_PREFIX.length)) } : fromB64(g);
+}
+/** a genome's skill-setting genes (raw), or the defaults for none */
+export function genomeStyle(g: string | null | undefined): number[] {
+  const p = decodeGenome(g);
+  if (!p) return [...STYLE_DEFAULT_GENES];
+  const [arr, at] = p instanceof Float32Array ? [p, styleOffset(SHAPE)] : [p.ent, layout(ENT_SHAPE).style];
+  return Array.from(arr.subarray(at, at + STYLE.length));
+}
 
 export function decodeStyle(g: ArrayLike<number> | null): Style {
   return Object.fromEntries(STYLE.map((s, i) => [s.key, g ? s.lo + (s.hi - s.lo) / (1 + Math.exp(-g[i])) : s.def])) as Style;
@@ -70,6 +89,7 @@ export interface DecisionPoint {
   chosen: number; // the option it went for (hp: pressed alongside)
   current: number; // index of the job it was doing (think), -1 at a begin
   obs: Float32Array | null; // the observation, when asked for (lessons, search)
+  ent: EntInput | null; // the entity view, when asked for (the entity network's labels)
 }
 
 /**
@@ -80,6 +100,8 @@ export interface DecisionPoint {
  */
 export class Brain {
   private net: Mlp | null;
+  private ent: EntNet | null = null;
+  private entIn: EntInput | null = null;
   private style: Style;
   private obs = new Float32Array(N_OBS);
   private x = new Float32Array(N_OBS + N_OPT_FEATS);
@@ -111,6 +133,8 @@ export class Brain {
   last: DecisionPoint | null = null;
   /** record the observation at decisions (lessons and search need it) */
   wantObs = false;
+  /** …and the entity view (labels for the entity network) */
+  wantEnts = false;
   /** 'play' = the skills in the network's (or the greedy) order; 'park' = drive off the wall and park
    * (a LEAVE + PARK partner); 'idle' = never moves */
   readonly mode: BrainMode;
@@ -127,15 +151,16 @@ export class Brain {
   free: { tick: number; opts: Option[]; scores: number[] } | null = null;
 
   constructor(
-    params: Float32Array | null,
+    params: NetParams | null,
     private prof: Resolved,
     private robotId = 0,
     public log?: Decision[],
     public samples?: Sample[],
     o: { mode?: BrainMode; board?: AllianceBoard | null; parkSlot?: number } = {},
   ) {
-    this.net = params ? new Mlp(SHAPE, share(params)) : null;
-    this.style = decodeStyle(this.net ? this.net.style() : null);
+    this.net = params instanceof Float32Array ? new Mlp(SHAPE, share(params)) : null;
+    if (params && !(params instanceof Float32Array)) this.ent = share(new EntNet(ENT_SHAPE, share(params.ent)));
+    this.style = decodeStyle(this.net ? this.net.style() : this.ent ? this.ent.style() : null);
     share(prof);
     this.mode = o.mode ?? 'play';
     this.board = o.board ?? null;
@@ -144,6 +169,11 @@ export class Brain {
   /** the robot this brain drives */
   get id(): number {
     return this.robotId;
+  }
+  /** a different network from now on (a drill's hand-over); the skill settings stay */
+  setNet(params: NetParams | null): void {
+    this.net = params instanceof Float32Array ? new Mlp(SHAPE, share(params)) : null;
+    this.ent = params && !(params instanceof Float32Array) ? share(new EntNet(ENT_SHAPE, share(params.ent))) : null;
   }
   follow(steps: PlanStep[]): void {
     this.plan = steps;
@@ -159,7 +189,13 @@ export class Brain {
   }
 
   private score(w: World, r: World['robots'][number], opts: Option[]): number[] {
-    if (this.net || this.samples || this.wantObs) encode(w, r, this.prof, this.obs);
+    if (this.net || this.ent || this.samples || this.wantObs) encode(w, r, this.prof, this.obs);
+    this.entIn = null;
+    if (this.ent || this.wantEnts) {
+      const { e, n } = encodeEnts(w, r);
+      this.entIn = { g: this.obs, e, n, o: optInput(r, opts), k: opts.length };
+    }
+    if (this.ent) return Array.from(this.ent.forward(this.entIn!).q);
     return opts.map((o) => {
       if (!this.net) return greedyScore(o, r.hopper.length >= this.cap);
       this.x.set(this.obs, 0);
@@ -198,7 +234,8 @@ export class Brain {
     return i;
   }
   private note(w: World, at: 'think' | 'begin', opts: Option[], sc: number[], chosen: number, current: number): void {
-    if (opts.length > 1) this.last = { tick: w.tick, at, opts, scores: sc, chosen, current, obs: this.wantObs ? new Float32Array(this.obs) : null };
+    if (opts.length > 1) this.last = { tick: w.tick, at, opts, scores: sc, chosen, current, obs: this.wantObs ? new Float32Array(this.obs) : null, ent: this.wantEnts && this.entIn ? { ...this.entIn, g: new Float32Array(this.obs) } : null };
+    this.entIn = null;
   }
 
   act(w: World): Map<number, RobotCommand> {
@@ -369,7 +406,7 @@ export class Brain {
 const argmaxWhere = (v: number[], ok: (i: number) => boolean): number => v.reduce((b, s, i) => (ok(i) && (b < 0 || s > v[b]) ? i : b), -1);
 
 /** the brain as a plain controller function (callers that never fork) */
-export function policyController(params: Float32Array | null, prof: Resolved, robotId = 0, log?: Decision[], samples?: Sample[]): Controller & { current: () => Decision | null } {
+export function policyController(params: NetParams | null, prof: Resolved, robotId = 0, log?: Decision[], samples?: Sample[]): Controller & { current: () => Decision | null } {
   const b = new Brain(params, prof, robotId, log, samples);
   const ctl = ((w: World) => b.act(w)) as Controller & { current: () => Decision | null };
   ctl.current = () => b.current();

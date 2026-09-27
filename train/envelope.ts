@@ -62,6 +62,13 @@ export function envelopeOf(spec: RobotSpec): Envelope & { set: Record<Side, Set<
   return e;
 }
 
+/** how good this build's envelope is: measured for it, measured for the same launcher family at
+ * another size, or REAL-v0's S1 envelope (nobody measured this family: measure it) */
+export function envelopeQuality(spec: RobotSpec): 'measured' | 'nearest' | 'fallback' {
+  if (existsSync(join(ENV_DIR, `${familyKey(spec)}.json`))) return 'measured';
+  return nearest(spec) ? 'nearest' : 'fallback';
+}
+
 /** a measured envelope of the same launcher family at another size (sampled robots vary 1–2 in) */
 function nearest(spec: RobotSpec): (Envelope & { set: Record<Side, Set<string>> }) | null {
   const f = join(ENV_DIR, 'index.json');

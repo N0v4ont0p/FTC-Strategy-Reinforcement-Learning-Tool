@@ -14,6 +14,12 @@ import { fromB64, styleOffset } from './net';
 import { SHAPE } from './policy';
 import { Playbook } from './playbook';
 import { Continuous, listV2, v2Defaults } from './continuous';
+import { notify, notifySettings, recent as recentNotices, setNotifySettings } from './notify';
+import { draftFrom, fileFor, inspectRobot, listRobots, replayRobots, saveRobot, specsIn } from './robots';
+import { loadProfile, resolve as resolveProfile, type ProfileFile } from '../harness/profiles';
+import { ensureEnvelopes } from './envelope';
+import { LABEL as SERVICE_LABEL } from './service';
+import { homedir } from 'node:os';
 
 const PUBLIC = join(ROOT, 'train', 'public');
 const LAST = join(RUNS, '.last');
@@ -71,6 +77,11 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     playbook.on('status', (st) => send('playbook', { profile, status: st }));
     playbook.on('log', (l: string) => send('log', `playbook: ${l}`));
     playbook.on('entry', (key: string) => send('playbookEntry', { profile, key }));
+    let was = false;
+    playbook.on('status', (st: { running: boolean; done: number; total: number }) => {
+      if (was && !st.running && st.done > 0) notify('playbook', `${playbook!.name} playbook`, `${st.done} of ${st.total} entries planned${st.done < st.total ? ' (stopped)' : ' — ready to print'}`);
+      was = st.running;
+    });
     return playbook;
   };
   const pbSummary = (pb: Playbook) => ({ profile: pb.profile, name: pb.name, status: pb.status, entries: pb.entries() });
@@ -95,6 +106,11 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     c.on('status', push);
     c.on('state', push);
     c.on('champion', push);
+    c.on('champion', () => {
+      const ex = c.status().champion.exam;
+      notify('champion', `New champion #${c.st.champion.id} (${c.name})`, ex ? `exam ${ex.mean.toFixed(1)} pts, ${ex.vsBase.mean >= 0 ? '+' : ''}${ex.vsBase.mean.toFixed(1)} over the no-learning robot` : 'exam done');
+    });
+    c.on('problem', (text: string) => notify('problems', `Training ${c.name}: a problem`, text.slice(0, 180)));
     c.on('routes', () => send('routes', { profile: c.st.config.profile }));
     c.on('audit', () => send('mistakes', { profile: c.st.config.profile }));
     c.on('log', (l: string) => send('log', `training: ${l}`));
@@ -237,6 +253,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     });
   const bad = (err: unknown): HttpError => (err instanceof HttpError ? err : new HttpError(400, (err as Error).message));
   let field: unknown = null;
+  let measuring = false;
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -299,6 +316,124 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     if (p === '/api/home/pause' && post) {
       coach?.stop('paused');
       return json(res, 200, home());
+    }
+
+    // the Home page: the exam match by match, watching the champion play one, its network
+    if (p === '/api/home/exam' && !post) {
+      const prof = url.searchParams.get('profile') ?? coach?.st.config.profile ?? listV2()[0]?.profile;
+      const has = !!prof && (coach?.st.config.profile === prof || (!coach?.running && listV2().some((r) => r.profile === prof)));
+      return json(res, 200, has ? coachFor(prof!).examSheet() : []);
+    }
+    if (p === '/api/home/watch' && post) {
+      const b = await body(req);
+      const c = coachFor(String(b.profile ?? coach?.st.config.profile ?? 'profiles/real-v1.json'));
+      let args;
+      try {
+        args = c.watchArgs(Number(b.match));
+      } catch (err) {
+        throw bad(err);
+      }
+      const [r] = await runPool<{ frames: unknown; events: unknown; reward: number }>([{ module: '../train/episode.ts', fn: 'runEpisode', args }], 1);
+      return json(res, 200, { frames: r.frames, events: r.events, reward: r.reward });
+    }
+    if (p === '/api/export/v2-champion.json') {
+      const c = coachFor(url.searchParams.get('profile') ?? coach?.st.config.profile ?? 'profiles/real-v1.json');
+      res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${c.name}-champion-${c.st.champion.id}.json"` });
+      return void res.end(JSON.stringify({ robot: c.st.config.profile, champion: c.st.champion.id, born: c.st.champion.born, genome: c.st.champion.genome, exam: c.status().champion.exam }));
+    }
+
+    // notifications
+    if (p === '/api/notify' && !post) return json(res, 200, { settings: notifySettings(), recent: recentNotices, mac: process.platform === 'darwin' });
+    if (p === '/api/notify' && post) {
+      const b = await body(req);
+      return json(res, 200, { settings: setNotifySettings(b as Record<string, boolean>), recent: recentNotices });
+    }
+    if (p === '/api/notify/test' && post) {
+      notify('test', 'Notifications are on', 'You will hear from the studio when something happens.');
+      return json(res, 200, { ok: true });
+    }
+
+    // the setup checklist on Home
+    if (p === '/api/setup' && !post) {
+      const profile = url.searchParams.get('profile') ?? coach?.st.config.profile ?? 'profiles/real-v1.json';
+      const robot = listRobots().find((r) => r.file === profile) ?? null;
+      let envelope: string | null = null;
+      try {
+        envelope = inspectRobot(loadProfile(join(ROOT, profile))).envelope.quality;
+      } catch {
+        envelope = null;
+      }
+      const pb = playbook?.profile === profile ? playbook : !playbook?.status.running ? book(profile) : null;
+      const run = listV2().find((r) => r.profile === profile) ?? null;
+      return json(res, 200, {
+        profile,
+        robot: robot ? { ok: robot.ok, problems: robot.problems, build: robot.build } : null,
+        envelope,
+        service: existsSync(join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`)),
+        notify: notifySettings().enabled,
+        run: run ? { champion: run.champion, exam: run.exam } : null,
+        playbook: pb ? { entries: pb.entries().length } : null,
+      });
+    }
+
+    // the Robot page
+    if (p === '/api/robots' && !post) return json(res, 200, { robots: listRobots(), replays: replayRobots() });
+    if (p === '/api/robots/profile' && !post) {
+      const f = url.searchParams.get('file') ?? '';
+      if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(f) || !existsSync(join(ROOT, f))) throw new HttpError(404, 'no such robot');
+      return json(res, 200, loadProfile(join(ROOT, f)));
+    }
+    if (p === '/api/robots/inspect' && post) {
+      const b = await body(req);
+      try {
+        return json(res, 200, inspectRobot(b.profile as ProfileFile));
+      } catch (err) {
+        throw bad(err);
+      }
+    }
+    if (p === '/api/robots/import' && post) {
+      const b = await body(req);
+      try {
+        const cands = typeof b.text === 'string' ? specsIn(b.text) : replayRobots();
+        const pick = Number(b.pick ?? -1);
+        if (pick < 0) return json(res, 200, { candidates: cands.map((c) => c.label) });
+        const c = cands[pick];
+        if (!c) throw new Error('no such robot in it');
+        const tpl = loadProfile(join(ROOT, typeof b.template === 'string' && /^profiles\/[A-Za-z0-9_.-]+\.json$/.test(b.template) ? b.template : 'profiles/real-v1.json'));
+        return json(res, 200, { profile: draftFrom(c.spec, tpl) });
+      } catch (err) {
+        throw bad(err);
+      }
+    }
+    if (p === '/api/robots/save' && post) {
+      const b = await body(req);
+      const prof = b.profile as ProfileFile;
+      const training = [coach?.running ? coach.st.config.profile : null, engine?.running ? engine.config.profile : null].filter(Boolean);
+      try {
+        if (training.includes(fileFor(String(prof?.id ?? '')))) throw new Error('that robot is training — pause it before changing its profile');
+        const f = saveRobot(prof, !!b.overwrite);
+        send('robots', {});
+        return json(res, 200, { file: f });
+      } catch (err) {
+        throw bad(err);
+      }
+    }
+    if (p === '/api/robots/measure' && post) {
+      const b = await body(req);
+      if (coach?.running || engine?.running || playbook?.status.running) throw new HttpError(409, 'measuring needs every core — pause training and the playbook first');
+      if (measuring) throw new HttpError(409, 'already measuring an envelope');
+      let spec;
+      try {
+        spec = resolveProfile(b.profile as ProfileFile).spec;
+      } catch (err) {
+        throw bad(err);
+      }
+      measuring = true;
+      ensureEnvelopes([spec], (l) => say(`envelope: ${l}`))
+        .then(() => send('robots', { measured: true }))
+        .catch((err: Error) => say(`envelope measurement failed: ${err.message}`))
+        .finally(() => (measuring = false));
+      return json(res, 200, { ok: true });
     }
 
     // the route library (the champion's exam matches, cycle by cycle)

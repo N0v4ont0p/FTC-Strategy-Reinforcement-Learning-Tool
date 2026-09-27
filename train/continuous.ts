@@ -272,6 +272,7 @@ export class Continuous extends EventEmitter {
   private problem(text: string): void {
     this.problems = [...this.problems.slice(-9), `${new Date().toLocaleString()}: ${text}`];
     this.say(`⚠ ${text}`);
+    this.emit('problem', text);
   }
 
   // ─────────────────────────────── jobs ───────────────────────────────
@@ -655,6 +656,10 @@ export class Continuous extends EventEmitter {
   routes(): RouteLibrary | null {
     const f = join(this.dir, 'routes.json');
     return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as RouteLibrary) : null;
+  }
+  /** the exam, match by match: who it was beside and against, and the champion's points in it */
+  examSheet(): { i: number; partner: string; opponents: string; champion: number | null; base: number | null }[] {
+    return examList(this.st.config).map((e, i) => ({ i, partner: e.partner, opponents: e.opponents, champion: this.st.champion.exam[i] ?? null, base: this.st.base?.[i] ?? null }));
   }
   /** the champion's exam match `i`, with exact frames (the Routes page's "watch it") */
   watchArgs(i: number): EpisodeArgs {

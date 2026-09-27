@@ -9,6 +9,8 @@
   <body>
     <header class="bar">
       <div class="brand"><span class="mark" aria-hidden="true"></span><span class="title">BIOBUZZ Learning</span></div>
+      <button id="v2Pill" class="v2pill" type="button" title="Training (Home)"><i class="dot" aria-hidden="true"></i><span id="v2PillText">nothing training</span></button>
+      <div id="v1Head" class="v1head" hidden>
       <div class="runpick">
         <label for="runSel" class="k">Run</label>
         <select id="runSel" aria-label="Open run"></select>
@@ -23,6 +25,9 @@
         <button id="btnStop" type="button" class="quiet" title="Finish this generation, save, stop">Stop</button>
         <button id="btnAbort" type="button" class="quiet danger" title="Throw away the generation in progress and stop">Abort generation</button>
       </div>
+      </div>
+      <span class="grow"></span>
+      <button id="btnV1" type="button" class="quiet small" aria-pressed="false" title="The older generational trainer: its runs, controls and tabs">Generational trainer</button>
       <button id="btnQuit" type="button" class="quiet danger quit" title="Stop training, DSIM and the studio, and close this tab">Quit studio</button>
     </header>
     <div class="topprog" aria-label="Progress"><div id="progFill"></div><span id="progText" class="mono"></span></div>
@@ -40,6 +45,11 @@
         <div class="canvaswrap">
           <canvas id="field" aria-label="Robots on the BIOBUZZ field"></canvas>
           <div class="overlay" id="overlay"></div>
+          <div class="empty v2empty" id="emptyV2" hidden>
+            <p class="emptyhead">The field</p>
+            <p>Watch the champion play any exam match, a playbook plan, a route or a mistake — exactly as DSIM played it.</p>
+            <button id="btnWatchChamp" type="button">Watch the champion</button>
+          </div>
           <div class="empty" id="empty" hidden>
             <p class="emptyhead">No generational run open</p>
             <p>Training is one button on the <b>Home</b> tab. A generational run (the older trainer) is one line of learning: its champion, lessons, checkpoints and history.</p>
@@ -73,10 +83,15 @@
       <aside class="side">
         <div class="tabs" role="tablist" aria-label="Panels">
           <button role="tab" aria-selected="true" data-tab="home" type="button">Home</button>
-          <button role="tab" aria-selected="false" data-tab="overview" type="button">Overview</button>
+          <button role="tab" aria-selected="false" data-tab="robot" type="button">Robot</button>
           <button role="tab" aria-selected="false" data-tab="playbook" type="button">Playbook</button>
           <button role="tab" aria-selected="false" data-tab="routes" type="button">Routes</button>
           <button role="tab" aria-selected="false" data-tab="mistakes" type="button">Mistakes</button>
+          <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
+        </div>
+        <div class="tabs v1tabs" role="tablist" aria-label="Generational trainer panels" id="v1Tabs" hidden>
+          <span class="tabk">generational</span>
+          <button role="tab" aria-selected="false" data-tab="overview" type="button">Overview</button>
           <button role="tab" aria-selected="false" data-tab="race" type="button">Race</button>
           <button role="tab" aria-selected="false" data-tab="report" type="button">Report</button>
           <button role="tab" aria-selected="false" data-tab="runs" type="button">Runs</button>
@@ -84,7 +99,6 @@
           <button role="tab" aria-selected="false" data-tab="settings" type="button">Settings</button>
           <button role="tab" aria-selected="false" data-tab="data" type="button">Training data</button>
           <button role="tab" aria-selected="false" data-tab="evaluate" type="button">Evaluate</button>
-          <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
         </div>
 
         <div class="panel" data-panel="home">
@@ -98,6 +112,10 @@
               <div><span class="k">decisions learned from</span><span class="v mono" id="homeLabels">0</span><span class="sub" id="homeRate"></span></div>
               <div><span class="k">champion</span><span class="v mono" id="homeChamp">—</span><span class="sub" id="homeChampWhen"></span></div>
             </div>
+          </div>
+          <div class="card setup" id="setupCard">
+            <div class="cardhead"><h2>Ready to train</h2><span class="sub" id="setupScore"></span></div>
+            <ol class="checklist" id="setupList"></ol>
           </div>
           <div class="card">
             <div class="row">
@@ -122,12 +140,22 @@
             <div id="homeOpponents" class="table"></div>
           </div>
           <div class="card">
+            <div class="cardhead"><h2>Watch the champion</h2><a id="dlChampV2" class="btnlink small" href="#" download>Download network</a></div>
+            <div class="row"><select id="watchSel" aria-label="Exam match to watch" class="grow"></select><button id="watchGo" type="button">Watch</button></div>
+            <p class="hint">Any of its exam matches, replayed exactly on the field — beside each kind of partner, against each kind of opponent.</p>
+          </div>
+          <div class="card">
             <div class="cardhead"><h2>Candidates</h2><span class="sub" id="homeLearner"></span></div>
             <div id="homeCands" class="table"></div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>What it is doing</h2></div>
             <div id="homeLog" class="table mono"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Notifications</h2><button id="ntTest" type="button" class="quiet small">Send a test</button></div>
+            <div class="toggles" id="ntToggles"></div>
+            <div id="ntRecent" class="sub"></div>
           </div>
         </div>
 
@@ -187,7 +215,7 @@
               <label>Budget <select id="pbBudget"><option value="full">Full (about 90 s an entry)</option><option value="quick">Quick look (about 15 s)</option></select></label>
               <label>Our start <select id="pbStart"><option value="">every start</option><option value="F3">F3 (our start)</option><option value="TOP_REAR">top, rear wall</option><option value="BOTTOM_AUD">bottom, audience wall</option><option value="TOP_SIDE">top, side wall</option><option value="BOTTOM_SIDE">bottom, side wall</option></select></label>
             </div>
-            <div class="row"><button id="pbBuild" type="button">Build playbook</button><button id="pbStop" type="button" class="quiet">Stop</button></div>
+            <div class="row"><button id="pbBuild" type="button">Build playbook</button><button id="pbStop" type="button" class="quiet">Stop</button><span class="grow"></span><a id="pbPrint" class="btnlink" href="./print.html" target="_blank">Print / PDF</a></div>
             <div class="livebar" aria-hidden="true"><div id="pbFill"></div></div>
           </div>
           <div class="card">
@@ -196,7 +224,44 @@
           </div>
           <div class="card" id="pbDetail" hidden>
             <div class="cardhead"><h2 id="pbTitle"></h2><button id="pbWatch" type="button">Watch it</button></div>
+            <canvas id="pbDiagram" class="diagram" aria-label="The plan on the field: both robots' paths and numbered steps"></canvas>
             <div id="pbSheet"></div>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="robot" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>Your robots</h2><button id="rbImportBtn" type="button" class="quiet small">Import from DSIM</button></div>
+            <div id="rbList" class="rblist"></div>
+            <p class="hint">A robot is its DSIM build plus a <b>range</b> for everything not measured yet. Training draws a robot from those ranges every match: the narrower and truer they are, the truer everything it learns. Measure something on the real robot → narrow its range here.</p>
+          </div>
+          <div class="card" id="rbImport" hidden>
+            <div class="cardhead"><h2>Import from DSIM</h2><button id="rbImportClose" type="button" class="link">close</button></div>
+            <ol class="steps">
+              <li>In DSIM (<a href="http://localhost:5173" target="_blank">localhost:5173</a>) build the robot, then open the console (Safari: Develop → Show JavaScript Console).</li>
+              <li>Paste <code id="rbSnippet">copy(localStorage['decodesim.settings.v1'])</code> <button id="rbCopy" type="button" class="link">copy this</button> and press Return — DSIM's robot is now on your clipboard.</li>
+              <li>Paste it below. A replay file works too.</li>
+            </ol>
+            <textarea id="rbPaste" rows="4" placeholder="paste here" spellcheck="false"></textarea>
+            <div class="row"><label class="hint">…or a robot from your replays <select id="rbReplay"><option value="">—</option></select></label></div>
+            <div class="row"><label class="hint">Starting ranges from <select id="rbTemplate"></select></label><button id="rbFind" type="button">Find robots</button></div>
+            <div id="rbCands" class="rblist"></div>
+          </div>
+          <div class="card" id="rbEditor" hidden>
+            <div class="cardhead"><h2 id="rbTitle">Robot</h2><span id="rbBadge" class="badge"></span></div>
+            <div class="fields one">
+              <label>Name <input id="rbId" type="text" maxlength="40" /></label>
+              <label>Notes <textarea id="rbLabel" rows="2"></textarea></label>
+            </div>
+            <div class="sub" id="rbBuild"></div>
+            <div class="previews">
+              <figure><canvas id="rbPreview"></canvas><figcaption>the build — dashed: the range's largest and smallest</figcaption></figure>
+              <figure><canvas id="rbEnvelope"></canvas><figcaption id="rbEnvCap">where it can score from</figcaption></figure>
+            </div>
+            <div class="row"><span id="rbEnvQ" class="sub grow"></span><button id="rbMeasure" type="button" class="quiet small">Measure its envelope</button></div>
+            <div id="rbProblems" class="problems"></div>
+            <div id="rbRanges" class="ranges"></div>
+            <div class="row end"><button id="rbSaveAs" type="button" class="quiet">Save as new</button><button id="rbSave" type="button">Save</button></div>
           </div>
         </div>
 

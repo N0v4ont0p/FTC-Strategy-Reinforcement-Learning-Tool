@@ -149,6 +149,50 @@ newest 40 000). One trainer at a
 time: Train is refused while a generational run trains or the playbook builds, and the other way
 round.
 
+## The studio at a glance
+
+- **Header**: a pill with what is training (robot · training/paused · exam · champion) — click it for
+  Home. The older generational trainer's controls and tabs hide behind **Generational trainer**
+  (they show by themselves while one of its runs trains).
+- **Home** opens with **Ready to train**, a checklist: the robot is valid, its shooting envelope is
+  measured, the studio runs by itself (the LaunchAgent), notifications are on, training has started,
+  the AUTO playbook is built — each with the button that fixes it. **Watch the champion** replays
+  any of its exam matches on the field (and **Download network** saves it). The field stays in view
+  while the side panel scrolls.
+- **Notifications** (Home, macOS Notification Center): a new champion, a finished playbook, a
+  problem in training, a studio crash. Each can be switched off; **Send a test** shows one now.
+  Settings in `runs/.notify.json`.
+
+## Robot (the robot lab)
+
+The **Robot** tab is where a robot is made and kept true (`train/robots.ts`). A robot is its DSIM
+build plus a **range** for everything not measured yet; training draws a robot from those ranges
+every match, so **the narrower and truer they are, the truer everything it learns** — measure
+something on the real robot, narrow its range here.
+
+- **Import from DSIM**: in DSIM's console paste `copy(localStorage['decodesim.settings.v1'])`, then
+  paste the clipboard into the box (a replay file works too, or pick a robot from your replays). The
+  draft keeps the build exactly, puts mass and motor speed in a range inside DSIM's floors, and takes
+  the rest from a robot you choose.
+- **Edit** every range (lowest · nominal · highest). Under each build number a bar shows **what DSIM
+  will actually build** (its floor and ceiling for that build — REAL-v1 cannot weigh under 23.3 lb);
+  a range outside it turns red.
+- **Check**: every edit is validated over the whole range (the nominal robot, each end, all-min,
+  all-max and 256 draws) — the same check that makes training refuse a bad robot.
+- **See it**: the build drawn by DSIM with the range's smallest and largest footprint, and its
+  **shooting envelope** on the field (every 2-in spot a shot goes in from). **Measure its envelope**
+  when it says *not measured* (about a minute on every core; not while training).
+- **Save** writes `profiles/<name>.json` (never over another robot by accident; not while it trains).
+
+## The printed playbook
+
+**Playbook → Print / PDF** opens the playbook as a document for the drive team: a cover with the
+best plan beside each kind of partner, then every plan with its **diagram** — DSIM's field, both
+robots' paths (the planned stretch bold, what they do by themselves afterwards faint), numbered steps
+— its numbers and its timing sheet. Filter by our start, the partner, the kind of plan; **Print /
+Save as PDF** (in the print dialog, *PDF → Save as PDF*). The Playbook tab shows the same diagram for
+the selected plan.
+
 ## Routes (v2 phase 5)
 
 The **Routes** tab is the champion's **route library** (`train/routes.ts`), mined from its exam
@@ -384,6 +428,7 @@ Keys: `p` pause, `o` open the studio, `q` stop.
 | `profiles/real-v0.json` | the team robot's ranges |
 | `runs/.v2/<robot>/state.json` · `store.db` · `events.jsonl` | continuous training (Home): its state, every searched decision, the log |
 | `runs/.v2/<robot>/routes.json` · `audit.json` | the champion's route library and mistake audit |
+| `runs/.notify.json` | notification settings |
 
 ## Checks
 

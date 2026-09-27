@@ -2,6 +2,8 @@ import { Comb } from './comb';
 import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
 import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type HomeStatusV, type HomeV, type RouteLibraryV, type AuditV, type AuditPointV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
+import { drawBuild, drawEnvelope, drawPlan } from './plandiagram';
+import type { ProfileFile } from '../../harness/profiles';
 import type { World } from '../../dsim-main/src/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -29,6 +31,15 @@ const choiceChart = new StackChart($<HTMLCanvasElement>('chartChoice'), $('choic
 const comb = new Comb($<HTMLCanvasElement>('comb'));
 
 let S: State | null = null;
+/** the field as DSIM builds it (diagrams, previews) */
+let FIELD: World | null = null;
+/** the older generational trainer's header and tabs: shown on demand (or while one of its runs trains) */
+let v1On = false;
+try {
+  v1On = localStorage.getItem('bb.v1') === '1';
+} catch {
+  /* private window */
+}
 let run: RunState | null = null;
 let hist: GenSummary[] = [];
 let onDisk: number[] = [];
@@ -117,6 +128,8 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('.tabs [data-tab]')
     for (const o of document.querySelectorAll<HTMLButtonElement>('.tabs [data-tab]')) o.setAttribute('aria-selected', String(o === b));
     for (const p of document.querySelectorAll<HTMLElement>('[data-panel]')) p.hidden = p.dataset.panel !== b.dataset.tab;
     if (b.dataset.tab === 'overview') renderHistory();
+    if (b.dataset.tab === 'robot') void loadRobots();
+    if (b.dataset.tab === 'home') void loadSetup();
   };
 }
 
@@ -135,7 +148,7 @@ function renderRuns(): void {
     ? runs.map((r) => `<option value="${esc(r.name)}" ${run?.name === r.name ? 'selected' : ''}>${esc(r.name)} · gen ${r.gen}${r.legacy ? ' · old version' : r.exam !== null ? ` · exam ${Math.round(r.exam)} pts` : ''}</option>`).join('')
     : '<option value="">no runs yet</option>';
   if (!run) sel.insertAdjacentHTML('afterbegin', '<option value="" selected>— choose —</option>');
-  $('empty').hidden = !!run || mode === 'playbook' || mode === 'replay';
+  renderEmpty();
   $('runsList').innerHTML = runs.length
     ? runs
         .map((r) => {
@@ -166,7 +179,27 @@ $('runsList').onclick = async (e) => {
   }
 };
 
+function renderEmpty(): void {
+  const replaying = mode === 'playbook' || mode === 'replay';
+  $('empty').hidden = !v1On || !!run || replaying;
+  $('emptyV2').hidden = v1On || replaying;
+}
+function setV1(on: boolean): void {
+  v1On = on;
+  $('v1Head').hidden = !on;
+  $('v1Tabs').hidden = !on;
+  $('btnV1').setAttribute('aria-pressed', String(on));
+  try {
+    localStorage.setItem('bb.v1', on ? '1' : '0');
+  } catch {
+    /* private window */
+  }
+  const cur = document.querySelector<HTMLButtonElement>('.tabs [data-tab][aria-selected="true"]');
+  if (!on && cur?.closest('#v1Tabs')) document.querySelector<HTMLButtonElement>('[data-tab="home"]')!.click();
+  renderEmpty();
+}
 function renderStatus(): void {
+  if (run?.running && !v1On) setV1(true);
   const st = $('status');
   const on = !!run;
   const running = !!run?.running;
@@ -576,7 +609,7 @@ function setMode(m: typeof mode): void {
   $('transportLive').hidden = m !== 'live';
   $('transportReplay').hidden = m === 'live';
   $('inspector').hidden = m !== 'champion';
-  $('empty').hidden = !!run || m === 'playbook' || m === 'replay';
+  renderEmpty();
   view.loop = m === 'live';
   if (m !== 'live') view.speed = speed;
   renderViewInfo();
@@ -673,6 +706,7 @@ function renderPlaybook(): void {
   const sel = $<HTMLSelectElement>('pbProfile');
   if (sel.options.length !== PB.profiles.length) sel.innerHTML = PB.profiles.map((p) => `<option value="${esc(p)}">${esc(p.replace('profiles/', '').replace('.json', ''))}</option>`).join('');
   sel.value = PB.profile;
+  $<HTMLAnchorElement>('pbPrint').href = `./print.html?profile=${encodeURIComponent(PB.profile)}${$<HTMLSelectElement>('pbFilter').value ? `&partner=${$<HTMLSelectElement>('pbFilter').value}` : ''}`;
   const filt = $<HTMLSelectElement>('pbFilter');
   if (filt.options.length === 1) filt.innerHTML += Object.entries(PARTNER_LABEL).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
   renderPbStatus(PB.status);
@@ -689,6 +723,20 @@ function renderPlaybook(): void {
   for (const tr of $('pbList').querySelectorAll<HTMLTableRowElement>('tr[data-key]')) tr.onclick = () => showPbEntry(tr.dataset.key!);
   if (pbSelected) showPbEntry(pbSelected, false);
 }
+let pbDiagramKey = '';
+async function pbDiagram(e: NonNullable<PlaybookV['entries'][number]>): Promise<void> {
+  const cv = $<HTMLCanvasElement>('pbDiagram');
+  if (!PB || !FIELD || pbDiagramKey === e.key) return;
+  pbDiagramKey = e.key;
+  try {
+    const r = await getJSON<{ frames: Frames }>(`/api/playbook/frames?profile=${encodeURIComponent(PB.profile)}&key=${encodeURIComponent(e.key)}`);
+    if (pbDiagramKey !== e.key) return;
+    cv.hidden = false;
+    drawPlan(cv, FIELD, r.frames, e.taken, { css: Math.min(420, cv.parentElement!.clientWidth - 28) });
+  } catch {
+    cv.hidden = true;
+  }
+}
 function showPbEntry(key: string, scroll = true): void {
   const e = PB?.entries.find((q) => q.key === key);
   if (!e) return;
@@ -696,6 +744,7 @@ function showPbEntry(key: string, scroll = true): void {
   for (const tr of $('pbList').querySelectorAll<HTMLTableRowElement>('tr[data-key]')) tr.classList.toggle('sel', tr.dataset.key === key);
   $('pbDetail').hidden = false;
   $('pbTitle').textContent = pbLabel(key);
+  void pbDiagram(e);
   const who = (r: number): string => (r === 0 ? 'our robot' : 'partner');
   const t = (tick: number): string => `${Math.max(0, (tick - AUTO_START) / 60).toFixed(1)} s`;
   $('pbSheet').innerHTML = `<p class="hint">${e.nominal.mean.toFixed(1)} ± ${e.nominal.ci95.toFixed(1)} AUTO points (worst tenth ${e.nominal.cvar10.toFixed(1)}); with no plan ${e.baseline.mean.toFixed(1)}; across the robot's range ${e.sampled.mean.toFixed(1)}. ${e.explored} plans scored in ${e.seconds.toFixed(0)} s${e.style ? '; skill settings tuned for it' : ''}.</p>
@@ -782,6 +831,10 @@ function renderHome(): void {
         .map(([k, v]) => `<tr><td class="l">${esc(PL[k] ?? k)}</td><td>${v.toFixed(1)}</td></tr>`)
         .join('')}</tbody></table>${s?.searchExam ? `<p class="hint">Thinking ahead (champion #${s.searchExam.champion}, ${s.searchExam.n} solo matches): alone ${s.searchExam.alone.toFixed(1)}, with search ${s.searchExam.search.toFixed(1)} (${sgn(s.searchExam.gain.mean)} ± ${s.searchExam.gain.ci95.toFixed(1)}). The goal: the network alone as good as with search.</p>` : ''}`
     : '<p class="hint">After the first exam.</p>';
+  renderPill();
+  const dl = $<HTMLAnchorElement>('dlChampV2');
+  dl.hidden = !s?.champion.learned;
+  dl.href = `/api/export/v2-champion.json?profile=${encodeURIComponent(HOME.profile)}`;
   const OL: Record<string, string> = { none: 'no opponents', presets: 'Skimmer + Sniper', mirror: 'two REAL-v1s', defense: 'a defender + Skimmer' };
   $('homeOpponents').innerHTML = ex?.byOpponents
     ? `<table><thead><tr><th class="l">red alliance</th><th>champion</th></tr></thead><tbody>${Object.entries(ex.byOpponents)
@@ -810,6 +863,8 @@ $('homeProfile').onchange = () =>
   void loadHome($<HTMLSelectElement>('homeProfile').value).then(() => {
     void loadRoutes();
     void loadMistakes();
+    void loadExamSheet();
+    void loadSetup(true);
   });
 $('homeTrain').onclick = async () => {
   try {
@@ -972,6 +1027,363 @@ async function watchMistake(i: number): Promise<void> {
 }
 $('mkFilter').onchange = () => renderMistakes();
 void loadMistakes();
+
+// ─────────────────────────────── the header pill: training at a glance ───────────────────────────────
+function renderPill(): void {
+  const s = HOME?.status;
+  const ex = s?.champion.exam;
+  const t = !s ? 'nothing training' : `${s.name} · ${s.running ? 'training' : 'paused'}${ex ? ` · exam ${ex.mean.toFixed(1)}` : ''}${s.champion.learned ? ` · champion #${s.champion.id}` : ''}`;
+  $('v2PillText').textContent = t;
+  $('v2Pill').className = `v2pill${s?.running ? ' on' : ''}`;
+}
+$('v2Pill').onclick = () => document.querySelector<HTMLButtonElement>('[data-tab="home"]')!.click();
+$('btnV1').onclick = () => setV1(!v1On);
+
+// ─────────────────────────────── Home: ready to train ───────────────────────────────
+interface SetupV {
+  profile: string;
+  robot: { ok: boolean; problems: string[]; build: string } | null;
+  envelope: 'measured' | 'nearest' | 'fallback' | null;
+  service: boolean;
+  notify: boolean;
+  run: { champion: number; exam: number | null } | null;
+  playbook: { entries: number } | null;
+}
+let setupAt = 0;
+async function loadSetup(force = false): Promise<void> {
+  if (!force && Date.now() - setupAt < 20_000) return;
+  setupAt = Date.now();
+  try {
+    const u = await getJSON<SetupV>(`/api/setup${HOME?.profile ? `?profile=${encodeURIComponent(HOME.profile)}` : ''}`);
+    const name = u.profile.replace('profiles/', '').replace('.json', '');
+    const items: { ok: boolean | null; title: string; detail: string; go?: [string, string] }[] = [
+      { ok: !!u.robot?.ok, title: `Robot ${name} is valid`, detail: u.robot ? (u.robot.ok ? u.robot.build : u.robot.problems[0] ?? 'problems') : 'no such profile', go: u.robot?.ok ? undefined : ['robot', 'Fix it'] },
+      { ok: u.envelope === 'measured', title: 'Its shooting envelope is measured', detail: u.envelope === 'measured' ? 'measured in DSIM for this build' : u.envelope === 'nearest' ? 'measured at another size of this build — close' : 'not measured: training uses REAL-v0’s', go: u.envelope === 'measured' ? undefined : ['robot', 'Measure'] },
+      { ok: u.service, title: 'The studio runs by itself', detail: u.service ? 'installed: starts at login, restarts after a crash' : 'in Terminal: ./start.sh --install', go: u.service ? undefined : ['copy:./start.sh --install', 'Copy'] },
+      { ok: u.notify, title: 'Notifications are on', detail: u.notify ? 'new champions, a finished playbook, problems' : 'switched off below', go: undefined },
+      { ok: !!u.run, title: 'Training has started', detail: u.run ? `champion ${u.run.champion ? `#${u.run.champion}` : '(no-learning)'}${u.run.exam !== null ? ` · exam ${u.run.exam.toFixed(1)}` : ''}` : 'press Train below' },
+      { ok: (u.playbook?.entries ?? 0) >= 20, title: 'The AUTO playbook is built', detail: u.playbook ? `${u.playbook.entries} plans` : 'while training is paused', go: (u.playbook?.entries ?? 0) >= 20 ? undefined : ['playbook', 'Open'] },
+    ];
+    $('setupScore').textContent = `${items.filter((i) => i.ok).length} of ${items.length}`;
+    $('setupList').innerHTML = items
+      .map((i, k) => `<li class="${i.ok ? 'ok' : 'todo'}"><span class="tick" aria-hidden="true">${i.ok ? '✓' : k + 1}</span><span class="what"><b>${esc(i.title)}</b><span class="sub">${esc(i.detail)}</span></span>${i.go ? `<button type="button" class="quiet small" data-go="${esc(i.go[0])}">${esc(i.go[1])}</button>` : ''}</li>`)
+      .join('');
+    $('setupCard').classList.toggle('done', items.every((i) => i.ok));
+    for (const b of $('setupList').querySelectorAll<HTMLButtonElement>('button[data-go]'))
+      b.onclick = async () => {
+        const g = b.dataset.go!;
+        if (g.startsWith('copy:')) {
+          await navigator.clipboard.writeText(g.slice(5)).catch(() => undefined);
+          toast('copied — paste it in Terminal, in the studio folder');
+        } else document.querySelector<HTMLButtonElement>(`[data-tab="${g}"]`)!.click();
+      };
+  } catch (e) {
+    $('setupList').innerHTML = `<li class="todo">${esc((e as Error).message)}</li>`;
+  }
+}
+void loadSetup(true);
+
+// ─────────────────────────────── Home: watch the champion ───────────────────────────────
+const PNAME: Record<string, string> = { none: 'no partner', real: 'a second REAL-v1', sniper: 'Sniper', hauler: 'Hauler', skimmer: 'Skimmer', parker: 'parks only', idle: 'does nothing' };
+const ONAME: Record<string, string> = { none: 'no opponents', presets: 'vs Skimmer + Sniper', mirror: 'vs two REAL-v1s', defense: 'vs a defender' };
+async function loadExamSheet(): Promise<void> {
+  try {
+    const rows = await getJSON<{ i: number; partner: string; opponents: string; champion: number | null; base: number | null }[]>(`/api/home/exam${HOME?.profile ? `?profile=${encodeURIComponent(HOME.profile)}` : ''}`);
+    const sel = $<HTMLSelectElement>('watchSel');
+    const keep = sel.value;
+    sel.innerHTML = rows.length ? rows.map((r) => `<option value="${r.i}">Match ${r.i + 1} · ${esc(PNAME[r.partner] ?? r.partner)} · ${esc(ONAME[r.opponents] ?? r.opponents)}${r.champion !== null ? ` · ${r.champion.toFixed(0)} pts` : ''}</option>`).join('') : '<option value="">after the first exam</option>';
+    if (keep) sel.value = keep;
+    $<HTMLButtonElement>('watchGo').disabled = !rows.length || rows[0].champion === null;
+  } catch {
+    /* no run yet */
+  }
+}
+async function watchChampion2(match: number): Promise<void> {
+  try {
+    toast('playing that exam match in DSIM…');
+    const f = await post<{ frames: Frames; events: [number, string][]; reward: number }>('/api/home/watch', { profile: HOME?.profile, match });
+    view.loadFocus({ gen: 0, fitness: 0, score: 0, death: 'survived', parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, lineage: { id: -1, op: 'champion', parents: [], muts: 0, born: 0 }, frames: f.frames, events: f.events } as FocusFile);
+    view.seek(view.startTick);
+    view.playing = true;
+    $('play').textContent = 'Pause';
+    const c = HOME?.status?.champion;
+    replayLabel = `${c?.learned ? `champion #${c.id}` : 'the no-learning robot'} · exam match ${match + 1} · ${f.reward} points`;
+    setMode('replay');
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+}
+$('watchGo').onclick = () => $<HTMLSelectElement>('watchSel').value && void watchChampion2(Number($<HTMLSelectElement>('watchSel').value));
+$('btnWatchChamp').onclick = () => void watchChampion2(Number($<HTMLSelectElement>('watchSel').value || 0));
+void loadExamSheet();
+
+// ─────────────────────────────── Home: notifications ───────────────────────────────
+interface NotifyV {
+  settings: Record<string, boolean>;
+  recent: { time: string; title: string; body: string }[];
+  mac?: boolean;
+}
+const NT_LABEL: [string, string][] = [['enabled', 'On'], ['champion', 'New champion'], ['playbook', 'Playbook finished'], ['problems', 'Problems and crashes'], ['sound', 'Sound']];
+function renderNotify(n: NotifyV): void {
+  $('ntToggles').innerHTML = NT_LABEL.map(([k, l]) => `<label class="switch${k !== 'enabled' && !n.settings.enabled ? ' off' : ''}"><input type="checkbox" data-nt="${k}" ${n.settings[k] ? 'checked' : ''} ${k !== 'enabled' && !n.settings.enabled ? 'disabled' : ''}/><span></span>${l}</label>`).join('');
+  $('ntRecent').innerHTML = n.recent.length ? n.recent.slice(0, 4).map((r) => `<div>${new Date(r.time).toLocaleTimeString()} · <b>${esc(r.title)}</b> — ${esc(r.body)}</div>`).join('') : n.mac === false ? 'macOS only' : 'Nothing sent yet.';
+  for (const i of $('ntToggles').querySelectorAll<HTMLInputElement>('input[data-nt]'))
+    i.onchange = async () => renderNotify(await post<NotifyV>('/api/notify', { [i.dataset.nt!]: i.checked }));
+}
+async function loadNotify(): Promise<void> {
+  try {
+    renderNotify(await getJSON<NotifyV>('/api/notify'));
+  } catch {
+    /* older server */
+  }
+}
+$('ntTest').onclick = async () => {
+  await act(post('/api/notify/test', {}), 'sent — look at the top right of the screen');
+  void loadNotify();
+};
+void loadNotify();
+
+// ─────────────────────────────── Robot: the robot lab ───────────────────────────────
+type Rng = { min: number; max: number; nominal: number; unit?: string };
+interface RobotRow {
+  file: string;
+  id: string;
+  label: string;
+  status: string;
+  build: string;
+  ok: boolean;
+  problems: string[];
+}
+interface Inspection {
+  problems: string[];
+  build: string;
+  nominal: { length: number; width: number };
+  small: { length: number; width: number };
+  big: { length: number; width: number };
+  floors: Record<string, { min: number; max: number }>;
+  envelope: { key: string; quality: 'measured' | 'nearest' | 'fallback'; spots: { north: { x: number; y: number }[]; south: { x: number; y: number }[] } };
+  start: { x: number; y: number; h: number };
+  info: Record<string, { label: string; unit: string; help: string }>;
+}
+let RB: { robots: RobotRow[]; replays: { label: string; file: string }[] } | null = null;
+let RE: { file: string | null; p: ProfileFile; insp: Inspection | null; err: string | null } | null = null;
+const isRng = (v: unknown): v is Rng => typeof v === 'object' && v !== null && 'min' in v && 'max' in v && 'nominal' in v;
+async function loadRobots(): Promise<void> {
+  try {
+    RB = await getJSON('/api/robots');
+    const tpl = $<HTMLSelectElement>('rbTemplate');
+    const keep = tpl.value;
+    tpl.innerHTML = RB!.robots.map((r) => `<option value="${esc(r.file)}">${esc(r.id)}</option>`).join('');
+    tpl.value = keep || 'profiles/real-v1.json';
+    $<HTMLSelectElement>('rbReplay').innerHTML = '<option value="">—</option>' + RB!.replays.map((r, i) => `<option value="${i}">${esc(r.label)}</option>`).join('');
+    renderRobotList();
+    if (!RE && RB!.robots.length) void openRobot(HOME?.profile && RB!.robots.some((r) => r.file === HOME!.profile) ? HOME.profile : RB!.robots[0].file);
+  } catch (e) {
+    $('rbList').innerHTML = `<p class="hint">${esc((e as Error).message)}</p>`;
+  }
+}
+function renderRobotList(): void {
+  if (!RB) return;
+  const training = HOME?.status?.running ? HOME.status.profile : null;
+  $('rbList').innerHTML = RB.robots
+    .map(
+      (r) => `<button type="button" class="rbcard${RE?.file === r.file ? ' sel' : ''}" data-file="${esc(r.file)}">
+        <span class="rbname">${esc(r.id)}${training === r.file ? ' <span class="badge on">training</span>' : ''}</span>
+        <span class="badge ${r.ok ? 'ok' : 'warn'}">${r.ok ? 'valid' : `${r.problems.length} problem${r.problems.length === 1 ? '' : 's'}`}</span>
+        <span class="rbbuild">${esc(r.build)}</span></button>`,
+    )
+    .join('');
+  for (const b of $('rbList').querySelectorAll<HTMLButtonElement>('.rbcard')) b.onclick = () => void openRobot(b.dataset.file!);
+}
+async function openRobot(file: string): Promise<void> {
+  try {
+    RE = { file, p: await getJSON<ProfileFile>(`/api/robots/profile?file=${encodeURIComponent(file)}`), insp: null, err: null };
+    renderRobotList();
+    renderEditor();
+    void inspectNow();
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+}
+let inspTimer = 0;
+function inspectSoon(): void {
+  clearTimeout(inspTimer);
+  inspTimer = window.setTimeout(() => void inspectNow(), 350);
+}
+async function inspectNow(): Promise<void> {
+  if (!RE) return;
+  const mine = RE;
+  try {
+    const r = await post<Inspection>('/api/robots/inspect', { profile: RE.p });
+    if (RE !== mine) return;
+    const first = !RE.insp;
+    RE.insp = r;
+    RE.err = null;
+    if (first) return renderEditor(); // (the labels come with the first check)
+  } catch (e) {
+    if (RE !== mine) return;
+    RE.err = (e as Error).message;
+  }
+  renderInspection();
+}
+const GROUPS: [string, 'spec' | 'limits' | 'perturb', string][] = [
+  ['The build', 'spec', 'what DSIM builds — its floors and ceilings shown under each'],
+  ['How it performs', 'limits', 'what the real robot will do (measure → narrow)'],
+  ['How it misses', 'perturb', ''],
+];
+const SPEC_NUMS = ['driveRpm', 'massLb', 'length', 'width'];
+function renderEditor(): void {
+  const E = RE;
+  $('rbEditor').hidden = !E;
+  if (!E) return;
+  $('rbTitle').textContent = E.file ? E.file.replace('profiles/', '') : 'new robot (not saved)';
+  $<HTMLInputElement>('rbId').value = String(E.p.id ?? '');
+  $<HTMLTextAreaElement>('rbLabel').value = String(E.p.label ?? '');
+  const info = E.insp?.info ?? {};
+  const rows = GROUPS.map(([title, g, help]) => {
+    const keys = Object.keys(E.p[g] as Record<string, unknown>).filter((k) => (g !== 'spec' || SPEC_NUMS.includes(k)) && (isRng((E.p[g] as Record<string, unknown>)[k]) || typeof (E.p[g] as Record<string, unknown>)[k] === 'number'));
+    return `<div class="rgroup"><h3>${title}</h3>${help ? `<p class="hint">${help}</p>` : ''}${keys
+      .map((k) => {
+        const v = (E.p[g] as Record<string, unknown>)[k];
+        const id = `${g}.${k}`;
+        const inf = info[id];
+        const r: Rng = isRng(v) ? v : { min: v as number, max: v as number, nominal: v as number };
+        const exact = !isRng(v);
+        return `<div class="rrow" data-id="${id}">
+          <div class="rlabel"><b>${esc(inf?.label ?? k)}</b><span class="sub">${esc(inf?.help ?? (r.unit ?? ''))}</span></div>
+          <div class="rin">${exact ? `<input type="number" step="any" data-f="nominal" value="${r.nominal}" aria-label="${esc(inf?.label ?? k)}"/><button type="button" class="link" data-mk="range">make a range</button>` : `<input type="number" step="any" data-f="min" value="${r.min}" aria-label="lowest"/><input type="number" step="any" class="nom" data-f="nominal" value="${r.nominal}" aria-label="nominal"/><input type="number" step="any" data-f="max" value="${r.max}" aria-label="highest"/>`}<span class="unit">${esc(inf?.unit ?? '')}</span></div>
+          <div class="rbar" data-bar="${id}"></div>
+        </div>`;
+      })
+      .join('')}</div>`;
+  });
+  $('rbRanges').innerHTML = `<div class="rhead"><span></span><span>lowest · nominal · highest</span></div>` + rows.join('');
+  for (const row of $('rbRanges').querySelectorAll<HTMLElement>('.rrow')) {
+    const [g, k] = row.dataset.id!.split('.') as ['spec' | 'limits' | 'perturb', string];
+    const grp = E.p[g] as Record<string, unknown>;
+    for (const inp of row.querySelectorAll<HTMLInputElement>('input[data-f]'))
+      inp.oninput = () => {
+        const x = Number(inp.value);
+        if (!Number.isFinite(x)) return;
+        const cur = grp[k];
+        if (isRng(cur)) cur[inp.dataset.f as 'min' | 'max' | 'nominal'] = x;
+        else grp[k] = x;
+        drawBar(row.dataset.id!);
+        inspectSoon();
+      };
+    const mk = row.querySelector<HTMLButtonElement>('button[data-mk]');
+    if (mk)
+      mk.onclick = () => {
+        const x = grp[k] as number;
+        grp[k] = { min: x, max: x, nominal: x };
+        renderEditor();
+        inspectSoon();
+      };
+  }
+  renderInspection();
+}
+function drawBar(id: string): void {
+  const E = RE;
+  const el = document.querySelector<HTMLElement>(`[data-bar="${id}"]`);
+  if (!E || !el) return;
+  const [g, k] = id.split('.') as ['spec' | 'limits' | 'perturb', string];
+  const v = (E.p[g] as Record<string, unknown>)[k];
+  const fl = E.insp?.floors[id];
+  const r: Rng = isRng(v) ? v : { min: v as number, max: v as number, nominal: v as number };
+  if (!fl) {
+    el.innerHTML = '';
+    return;
+  }
+  const lo = Math.min(fl.min, r.min);
+  const hi = Math.max(fl.max, r.max);
+  const x = (t: number): number => (hi > lo ? ((t - lo) / (hi - lo)) * 100 : 50);
+  const out = r.min < fl.min || r.max > fl.max;
+  el.innerHTML = `<div class="track"><div class="dsim" style="left:${x(fl.min)}%;width:${x(fl.max) - x(fl.min)}%"></div><div class="span${out ? ' out' : ''}" style="left:${x(r.min)}%;width:${Math.max(0.8, x(r.max) - x(r.min))}%"></div><div class="nomk" style="left:${x(r.nominal)}%"></div></div><div class="barlabels"><span>DSIM builds ${fl.min} – ${fl.max}</span>${out ? '<span class="warnt">outside what DSIM builds</span>' : ''}</div>`;
+}
+function renderInspection(): void {
+  const E = RE;
+  if (!E) return;
+  const I = E.insp;
+  const probs = E.err ? [E.err] : (I?.problems ?? []);
+  $('rbBadge').className = `badge ${probs.length ? 'warn' : 'ok'}`;
+  $('rbBadge').textContent = !I && !E.err ? 'checking…' : probs.length ? `${probs.length} problem${probs.length === 1 ? '' : 's'}` : 'valid over its whole range';
+  $('rbProblems').innerHTML = probs.length ? `<b>Training will refuse it until these are fixed:</b><ul>${probs.slice(0, 8).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '';
+  $('rbBuild').textContent = I?.build ?? '';
+  for (const id of ['spec.driveRpm', 'spec.massLb', 'spec.length', 'spec.width']) drawBar(id);
+  if (I && FIELD) {
+    const w = Math.max(150, Math.floor(($('rbEditor').clientWidth - 40) / 2));
+    drawBuild($<HTMLCanvasElement>('rbPreview'), FIELD, I.nominal, I.small, I.big, w);
+    drawEnvelope($<HTMLCanvasElement>('rbEnvelope'), FIELD, I.nominal, I.envelope.spots, I.start, w);
+    const q = I.envelope.quality;
+    $('rbEnvQ').innerHTML = q === 'measured' ? '<span class="badge ok">measured</span> for this build in DSIM' : q === 'nearest' ? '<span class="badge">close</span> measured for this build at another size' : '<span class="badge warn">not measured</span> training would use REAL-v0’s envelope';
+    $('rbEnvCap').textContent = `where it can score from — blue: aiming at the north cell, amber: the south (${I.envelope.spots.north.length + I.envelope.spots.south.length} spots)`;
+    $<HTMLButtonElement>('rbMeasure').hidden = q === 'measured';
+  }
+}
+$<HTMLInputElement>('rbId').oninput = () => {
+  if (!RE) return;
+  RE.p.id = $<HTMLInputElement>('rbId').value;
+  inspectSoon();
+};
+$<HTMLTextAreaElement>('rbLabel').oninput = () => RE && (RE.p.label = $<HTMLTextAreaElement>('rbLabel').value);
+async function saveRobotAs(asNew: boolean): Promise<void> {
+  if (!RE) return;
+  if (asNew) {
+    const name = await dialog('Save as a new robot', 'Its name (the file is named after it).', 'Save', { input: { label: 'Name', value: `${RE.p.id} copy` } });
+    if (!name) return;
+    RE.p.id = name;
+    $<HTMLInputElement>('rbId').value = name;
+  }
+  const cur = RE.file;
+  const same = !!cur && cur === `profiles/${String(RE.p.id).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}.json`;
+  try {
+    const r = await post<{ file: string }>('/api/robots/save', { profile: RE.p, overwrite: same && !asNew });
+    RE.file = r.file;
+    toast(`saved ${r.file}`);
+    await loadRobots();
+    renderEditor();
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+}
+$('rbSave').onclick = () => void saveRobotAs(false);
+$('rbSaveAs').onclick = () => void saveRobotAs(true);
+$('rbMeasure').onclick = () => RE && void act(post('/api/robots/measure', { profile: RE.p }), 'measuring its envelope in DSIM (about a minute on every core)…');
+$('rbImportBtn').onclick = () => ($('rbImport').hidden = !$('rbImport').hidden);
+$('rbImportClose').onclick = () => ($('rbImport').hidden = true);
+$('rbCopy').onclick = async () => {
+  await navigator.clipboard.writeText($('rbSnippet').textContent ?? '').catch(() => undefined);
+  toast('copied — paste it in DSIM’s console');
+};
+async function importPick(body: Record<string, unknown>): Promise<void> {
+  try {
+    const r = await post<{ profile: ProfileFile }>('/api/robots/import', { ...body, template: $<HTMLSelectElement>('rbTemplate').value });
+    RE = { file: null, p: r.profile, insp: null, err: null };
+    $('rbImport').hidden = true;
+    renderRobotList();
+    renderEditor();
+    void inspectNow();
+    toast('a draft — check the ranges, then Save');
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+}
+$('rbFind').onclick = async () => {
+  const text = $<HTMLTextAreaElement>('rbPaste').value.trim();
+  if (!text) return toast('paste what DSIM copied first', true);
+  try {
+    const r = await post<{ candidates: string[] }>('/api/robots/import', { text, pick: -1 });
+    if (r.candidates.length === 1) return void importPick({ text, pick: 0 });
+    $('rbCands').innerHTML = r.candidates.map((c, i) => `<button type="button" class="rbcard" data-i="${i}"><span class="rbname">${esc(c)}</span></button>`).join('');
+    for (const b of $('rbCands').querySelectorAll<HTMLButtonElement>('button[data-i]')) b.onclick = () => void importPick({ text, pick: Number(b.dataset.i) });
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+};
+$<HTMLSelectElement>('rbReplay').onchange = () => {
+  const v = $<HTMLSelectElement>('rbReplay').value;
+  if (v !== '') void importPick({ pick: Number(v) });
+};
 
 $('modeLive').onclick = () => void showLive(newest());
 $('modeBest').onclick = () => void showBest(newest());
@@ -1315,6 +1727,10 @@ function connect(): void {
   });
   es.addEventListener('home', (e) => {
     const st = JSON.parse((e as MessageEvent).data) as HomeStatusV;
+    if (HOME?.status && HOME.status.champion.id !== st.champion.id) {
+      void loadExamSheet();
+      void loadSetup(true);
+    }
     if (HOME && (!HOME.status || HOME.status.name === st.name)) {
       HOME.status = st;
       HOME.profile = st.profile;
@@ -1323,6 +1739,11 @@ function connect(): void {
   });
   es.addEventListener('routes', () => void loadRoutes());
   es.addEventListener('mistakes', () => void loadMistakes());
+  es.addEventListener('robots', () => {
+    void loadRobots();
+    void inspectNow();
+    void loadSetup(true);
+  });
   es.addEventListener('quit', () => {
     es.close();
     showClosed();
@@ -1336,7 +1757,9 @@ function connect(): void {
 }
 
 async function boot(): Promise<void> {
-  view.setField(await getJSON<World>('/api/field'));
+  FIELD = await getJSON<World>('/api/field');
+  view.setField(FIELD);
+  setV1(v1On);
   setMode('live');
   connect();
   requestAnimationFrame(frame);

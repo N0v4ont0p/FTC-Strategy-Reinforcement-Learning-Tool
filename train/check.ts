@@ -41,7 +41,10 @@ import { entEval, entFit, entGenome, labelRows, learnJob, toLabels } from './ent
 import { Continuous, V2_DIR, examList, sameMistake, sprt, v2Defaults, type AuditEntry } from './continuous';
 import { mineRoutes } from './routes';
 import { OPPONENT_KINDS } from './team';
+import { describeBuild, draftFrom, floorsOf, inspectRobot, listRobots, replayRobots, saveRobot, shapeProblems, specsIn } from './robots';
+import { notify } from './notify';
 
+process.env.BIOBUZZ_NO_NOTIFY = '1'; // the gate never posts macOS notifications
 let fails = 0;
 const check = (name: string, ok: boolean, detail = ''): void => {
   if (!ok) fails++;
@@ -823,6 +826,53 @@ const s2a = runEpisode(s2args(null));
   const mk = await fetch('http://127.0.0.1:4795/api/mistakes');
   await srv.close();
   check('15 studio: the Mistakes page is served', mk.status === 200 && 'audit' in ((await mk.json()) as object));
+}
+
+// ---- 16. the robot lab, notifications, the printable playbook ----------------------------------------------------
+{
+  const robots = listRobots();
+  check('16 robots: every profile is listed with its build in words and validated over its whole range', robots.length >= 3 && robots.every((r) => r.ok && r.build.includes('·')), robots.map((r) => `${r.id}: ${r.build}`).join(' | '));
+  const v1 = loadProfile(join(ROOT, 'profiles/real-v1.json'));
+  const ins = inspectRobot(v1);
+  check('16 robots: DSIM\'s own floors and ceilings (REAL-v1: mass ≥ 23.3 lb), its smallest and largest robot, its measured envelope and start', ins.floors['spec.massLb'].min === 23.3 && ins.small.length === 13.5 && ins.big.width === 17 && ins.envelope.quality === 'measured' && ins.envelope.spots.north.length > 100 && ins.start.x > 55);
+  const bad = JSON.parse(JSON.stringify(v1));
+  bad.limits.fireRate.min = 20;
+  bad.spec.massLb.min = 10;
+  check('16 robots: a range DSIM cannot build or that is upside down is caught before anything is saved', shapeProblems(bad).some((x) => x.includes('Fire rate')) && profileProblems({ ...bad, limits: v1.limits }, true).some((x) => x.startsWith('massLb')));
+  const reps = replayRobots();
+  const settings = JSON.stringify({ game: 'biobuzz', spec: reps[0]?.spec ?? v1.spec, savedRobots: [{ name: 'x', spec: reps[0]?.spec ?? v1.spec }] });
+  const cands = specsIn(settings);
+  let notJson = false;
+  try {
+    specsIn('not json');
+  } catch {
+    notJson = true;
+  }
+  check('16 import: DSIM\'s settings (its robot and saved robots) and replays are read; anything else is refused with a reason', cands.length === 2 && notJson && reps.length > 0);
+  const draft = draftFrom(cands[0].spec, v1);
+  const dp = inspectRobot(draft).problems;
+  check('16 import: a draft keeps the build exactly, puts mass and motor speed in a range inside DSIM\'s floors, takes the rest from a template — and validates', dp.length === 0 && typeof draft.spec.massLb === 'object' && describeBuild(resolve(draft).spec) === describeBuild(coerce(cands[0].spec as Parameters<typeof coerce>[0])) && JSON.stringify(draft.limits) === JSON.stringify(v1.limits), dp.join('; '));
+  const tmpId = 'zz check robot';
+  const f = saveRobot({ ...draft, id: tmpId }, false);
+  let dup = false;
+  try {
+    saveRobot({ ...draft, id: tmpId }, false);
+  } catch {
+    dup = true;
+  }
+  const back = loadProfile(join(ROOT, f));
+  rmSync(join(ROOT, f), { force: true });
+  check('16 save: a robot is saved as profiles/<name>.json, never over another by accident', f === 'profiles/zz-check-robot.json' && dup && back.id === tmpId && floorsOf(resolve(back).spec)['spec.width'].min > 0);
+  check('16 notifications: none are posted while switched off (the gate runs with them off)', notify('champion', 'x', 'y') === false);
+  const srv = startServer(4794, undefined, { noResume: true });
+  const get = async (p: string): Promise<{ status: number; text: string }> => {
+    const r = await fetch(`http://127.0.0.1:4794${p}`);
+    return { status: r.status, text: await r.text() };
+  };
+  const [rb, su, nt, pr, ins2] = [await get('/api/robots'), await get('/api/setup?profile=profiles/real-v1.json'), await get('/api/notify'), await get('/print.html'), await fetch('http://127.0.0.1:4794/api/robots/inspect', { method: 'POST', body: JSON.stringify({ profile: bad }) })];
+  await srv.close();
+  const suj = JSON.parse(su.text) as { robot: { ok: boolean }; envelope: string };
+  check('16 studio: the Robot page, the setup checklist, notification settings and the printable playbook are served; a bad robot is explained, not crashed on', rb.status === 200 && JSON.parse(rb.text).robots.length >= 3 && su.status === 200 && suj.robot.ok && suj.envelope === 'measured' && nt.status === 200 && 'settings' in JSON.parse(nt.text) && pr.status === 200 && pr.text.includes('Print') && ins2.status === 400);
 }
 
 console.log(fails === 0 ? '\nTRAINING PLATFORM GATE: ALL PASS' : `\nTRAINING PLATFORM GATE: ${fails} FAIL`);

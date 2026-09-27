@@ -9,6 +9,7 @@ import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_pro
 import { init } from '../harness/dsim';
 import { ROOT } from './engine';
 import { startServer } from './server';
+import { notifyNow } from './notify';
 
 // A crash must leave its reason behind: the terminal it printed to may be long closed.
 // Appended to runs/studio-crash.log, then the studio exits as Node would have.
@@ -22,6 +23,7 @@ for (const ev of ['uncaughtException', 'unhandledRejection'] as const)
       /* nowhere to write: the terminal still gets it */
     }
     process.stderr.write(`\n  studio crashed — reason saved in runs/studio-crash.log\n${text}`);
+    notifyNow('The studio crashed', `${e instanceof Error ? e.message : String(e)}`.slice(0, 160));
     process.exit(1);
   });
 

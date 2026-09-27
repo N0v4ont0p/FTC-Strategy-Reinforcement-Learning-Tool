@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AUTO Playbook</title>
+    <link rel="stylesheet" href="./src/print.css" />
+  </head>
+  <body>
+    <header class="toolbar" aria-label="Playbook print settings">
+      <a class="back" href="./">← Studio</a>
+      <label>Robot <select id="fRobot"></select></label>
+      <label>Our start <select id="fStart"><option value="">every start</option><option value="F3">F3 (ours)</option><option value="TOP_REAR">top, rear wall</option><option value="BOTTOM_AUD">bottom, audience wall</option><option value="TOP_SIDE">top, side wall</option><option value="BOTTOM_SIDE">bottom, side wall</option></select></label>
+      <label>Partner <select id="fPartner"><option value="">every partner</option></select></label>
+      <label>Plans <select id="fMode"><option value="">both kinds</option><option value="best">partner runs its own AUTO</option><option value="joint">planned together</option></select></label>
+      <span id="status" class="status" role="status"></span>
+      <button id="print" type="button">Print / Save as PDF</button>
+    </header>
+    <main id="doc"></main>
+    <script type="module" src="./src/print.ts"></script>
+  </body>
+</html>

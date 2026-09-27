@@ -108,9 +108,10 @@ export function profileProblems(p: ProfileFile, sample: boolean): string[] {
   return [...out];
 }
 
-function checkExpect(spec: RobotSpec, e: Record<string, unknown>): string[] {
+/** what a built robot IS, in the terms a profile's `expect` checks */
+export function buildOf(spec: RobotSpec): Record<string, unknown> {
   const m = (spec as unknown as { bbMech?: { launcher: { kind: string; mount: string; mount2?: string }; lift: { kind: string; mount: string } | null } }).bbMech;
-  const got: Record<string, unknown> = {
+  return {
     drivetrain: spec.drivetrain,
     launcher: m?.launcher.kind,
     launcherMount: m?.launcher.mount,
@@ -119,6 +120,9 @@ function checkExpect(spec: RobotSpec, e: Record<string, unknown>): string[] {
     intakeMount: spec.intakeMount,
     ballStorage: spec.ballStorage,
   };
+}
+function checkExpect(spec: RobotSpec, e: Record<string, unknown>): string[] {
+  const got = buildOf(spec);
   return Object.entries(e)
     .filter(([k, v]) => got[k] !== v)
     .map(([k, v]) => `${k}: expected ${JSON.stringify(v)}, DSIM built ${JSON.stringify(got[k])}`);

@@ -14,12 +14,15 @@ import { fromB64, styleOffset } from './net';
 import { SHAPE } from './policy';
 import { Playbook } from './playbook';
 import { Continuous, listV2, v2Defaults } from './continuous';
+import { TeamPlaybook } from './teamplaybook';
+import { PLAYS, SOLO_PLAYS, playWords, type Play } from './teamplay';
 import { notify, notifySettings, recent as recentNotices, setNotifySettings } from './notify';
 import { draftFrom, fileFor, inspectRobot, listRobots, replayRobots, saveRobot, specsIn } from './robots';
 import { loadProfile, resolve as resolveProfile, type ProfileFile } from '../harness/profiles';
 import { ensureEnvelopes } from './envelope';
 import { LABEL as SERVICE_LABEL } from './service';
 import { homedir } from 'node:os';
+import type { PartnerKind as PartnerKindT } from './team';
 
 const PUBLIC = join(ROOT, 'train', 'public');
 const LAST = join(RUNS, '.last');
@@ -85,6 +88,29 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     return playbook;
   };
   const pbSummary = (pb: Playbook) => ({ profile: pb.profile, name: pb.name, status: pb.status, entries: pb.entries() });
+
+  // THE TEAM-PLAY BOOK (train/teamplaybook.ts): the plays that win beside each partner, searched on request
+  let team: TeamPlaybook | null = null;
+  const teamFor = (profile: string): TeamPlaybook => {
+    if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(profile) || !existsSync(join(ROOT, profile))) throw new HttpError(400, 'unknown profile');
+    if (team?.profile === profile) return team;
+    if (team?.status.running) throw new HttpError(409, `the ${team.name} team plays are being searched — stop it first`);
+    team?.removeAllListeners();
+    team?.store.close();
+    team = new TeamPlaybook(profile);
+    const t = team;
+    t.on('status', (st) => send('teamplays', { profile, status: st }));
+    t.on('log', (l: string) => send('log', `team plays: ${l}`));
+    t.on('entry', () => send('teamplays', { profile, status: t.status, entry: true }));
+    let was = false;
+    t.on('status', (st: { running: boolean; done: number; total: number }) => {
+      if (was && !st.running && st.done > 0) notify('playbook', `${t.name} team plays`, `${st.done} of ${st.total} partner kinds searched`);
+      was = st.running;
+    });
+    return t;
+  };
+  /** the network the robots play with: the continuous run's champion for this robot (else the no-learning order) */
+  const championOf = (profile: string): string | null => listV2().some((r) => r.profile === profile) ? (coach?.st.config.profile === profile ? coach.st.champion.genome : coachFor(profile).st.champion.genome) : null;
 
   // THE CONTINUOUS ENGINE (train/continuous.ts, phase 4): the Home page's one button — one run per robot
   let coach: Continuous | null = null;
@@ -291,6 +317,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     }
     if (p === '/api/playbook/build' && post) {
       const b = await body(req);
+      if (team?.status.running) throw new HttpError(409, 'the team plays are being searched — one search at a time');
       if (engine?.running) throw new HttpError(409, `"${engine.name}" is training — the playbook needs every core; pause training first`);
       if (coach?.running) throw new HttpError(409, `${coach.name} is training — the playbook needs every core; pause training first`);
       const pb = book(String(b.profile ?? 'profiles/real-v1.json'));
@@ -310,6 +337,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       const b = await body(req);
       if (engine?.running) throw new HttpError(409, `the generational run "${engine.name}" is training — stop it first (one trainer at a time)`);
       if (playbook?.status.running) throw new HttpError(409, 'the AUTO playbook is being built — stop it first (it needs every core)');
+      if (team?.status.running) throw new HttpError(409, 'the team plays are being searched — stop it first (it needs every core)');
       coachFor(String(b.profile ?? 'profiles/real-v1.json')).start();
       return json(res, 200, home());
     }
@@ -373,6 +401,13 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
         notify: notifySettings().enabled,
         run: run ? { champion: run.champion, exam: run.exam } : null,
         playbook: pb ? { entries: pb.entries().length } : null,
+        teamplays: (() => {
+          try {
+            return team?.profile === profile || !team?.status.running ? teamFor(profile).entries().length : null;
+          } catch {
+            return null;
+          }
+        })(),
       });
     }
 
@@ -434,6 +469,40 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
         .catch((err: Error) => say(`envelope measurement failed: ${err.message}`))
         .finally(() => (measuring = false));
       return json(res, 200, { ok: true });
+    }
+
+    // team plays: the book, a search, watching a play
+    if (p === '/api/teamplays' && !post) {
+      const profile = url.searchParams.get('profile') ?? coach?.st.config.profile ?? 'profiles/real-v1.json';
+      const t = teamFor(profile);
+      const library = PLAYS.map((q) => ({ id: q.id, label: q.label, blurb: q.blurb, solo: SOLO_PLAYS.includes(q.id), words: playWords(q) }));
+      return json(res, 200, { profile, status: t.status, entries: t.entries(), library });
+    }
+    if (p === '/api/teamplays/build' && post) {
+      const b = await body(req);
+      if (engine?.running || coach?.running) throw new HttpError(409, 'training is running — the play search needs every core; pause it first');
+      if (playbook?.status.running) throw new HttpError(409, 'the AUTO playbook is being built — one search at a time');
+      const t = teamFor(String(b.profile ?? 'profiles/real-v1.json'));
+      if (t.status.running) throw new HttpError(409, 'already searching');
+      const partners = Array.isArray(b.partners) && b.partners.length ? (b.partners as (PartnerKindT | 'none')[]) : undefined;
+      t.build({ partners, budget: b.budget === 'quick' ? 'quick' : 'full', redo: !!b.redo, genome: championOf(t.profile) }).catch((err: Error) => say(`team-play search failed: ${err.message}`));
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/teamplays/stop' && post) {
+      team?.stop();
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/teamplays/watch' && post) {
+      const b = await body(req);
+      const profile = String(b.profile ?? 'profiles/real-v1.json');
+      const partner = String(b.partner ?? 'real');
+      const play = (typeof b.play === 'string' ? PLAYS.find((q) => q.id === b.play) : (b.play as Play)) ?? null;
+      if (!play || !Array.isArray(play.roles)) throw new HttpError(400, 'no such play');
+      if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(profile) || !existsSync(join(ROOT, profile))) throw new HttpError(400, 'unknown profile');
+      const genome = championOf(profile);
+      const args = { genome, profile, sampleProfile: false, seed: Number(b.seed ?? 4242) >>> 0, stage: 'full', driver: 'oracle', track: false, record: false, frames: true, routes: true, play, ...(partner !== 'none' ? { partner: { kind: partner, genome: partner === 'real' ? genome : null } } : {}) };
+      const [r] = await runPool<{ frames: unknown; events: unknown; reward: number; parts: unknown; partner?: { parts: unknown } }>([{ module: '../train/episode.ts', fn: 'runEpisode', args }], 1);
+      return json(res, 200, { frames: r.frames, events: r.events, reward: r.reward });
     }
 
     // the route library (the champion's exam matches, cycle by cycle)
@@ -804,6 +873,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     open,
     close: async () => {
       coach?.close();
+      team?.stop();
       playbook?.stop();
       await engine?.halt(true, true); // closing the studio is not stopping training: it resumes next start
       await refreshing;

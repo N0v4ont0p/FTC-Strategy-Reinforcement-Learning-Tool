@@ -85,6 +85,7 @@
           <button role="tab" aria-selected="true" data-tab="home" type="button">Home</button>
           <button role="tab" aria-selected="false" data-tab="robot" type="button">Robot</button>
           <button role="tab" aria-selected="false" data-tab="playbook" type="button">Playbook</button>
+          <button role="tab" aria-selected="false" data-tab="plays" type="button">Team plays</button>
           <button role="tab" aria-selected="false" data-tab="routes" type="button">Routes</button>
           <button role="tab" aria-selected="false" data-tab="mistakes" type="button">Mistakes</button>
           <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
@@ -263,6 +264,29 @@
             <div id="rbRanges" class="ranges"></div>
             <div class="row end"><button id="rbSaveAs" type="button" class="quiet">Save as new</button><button id="rbSave" type="button">Save</button></div>
           </div>
+        </div>
+
+        <div class="panel" data-panel="plays" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>Team plays</h2><span class="hint mono" id="tpStatus"></span></div>
+            <p class="hint">The alliance plays <b>together</b>: a play gives each robot a role for AUTO, TELEOP and the last 30 s — FLOWERs · ground, each robot one side of the HIVE, both on the target side, tip cycle · support, joint volleys, who parks early… The search scores every play beside each kind of partner in DSIM on shared luck, then <b>mutates and crosses</b> the best (a zone line moves, the robots swap, a preference grows, a phase takes another's role) to discover plays nobody drew up. Finalists are re-scored on fresh luck. Training plays inside the winners.</p>
+            <div class="row"><label class="hint">Budget <select id="tpBudget"><option value="full">Full (a few minutes per partner)</option><option value="quick">Quick look</option></select></label><button id="tpBuild" type="button">Search plays</button><button id="tpStop" type="button" class="quiet">Stop</button></div>
+            <div class="livebar" aria-hidden="true"><div id="tpFill"></div></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Beside</h2><span class="sub">best play · gain over free play</span></div>
+            <div class="chips" id="tpPartners" role="tablist" aria-label="Partner kind"></div>
+            <div id="tpList" class="table tall"><p class="hint">Nothing searched yet — press Search plays.</p></div>
+          </div>
+          <div class="card" id="tpDetail" hidden>
+            <div class="cardhead"><h2 id="tpTitle"></h2><button id="tpWatch" type="button">Watch it</button></div>
+            <p class="sub" id="tpBlurb"></p>
+            <div id="tpRoles" class="roles"></div>
+          </div>
+          <details class="card">
+            <summary><h2>The library</h2></summary>
+            <div id="tpLib" class="liblist"></div>
+          </details>
         </div>
 
         <div class="panel" data-panel="routes" hidden>

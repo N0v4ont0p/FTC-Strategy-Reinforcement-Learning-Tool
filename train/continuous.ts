@@ -12,6 +12,10 @@
 //     robot draws forever — paired against the champion's own exam matches, and promotes it by a
 //     sequential probability ratio test (SPRT: it stops as soon as the evidence is clear), never with
 //     a worse worst tenth. The actors pick a new champion up at their next match.
+//   · TEAM PLAYS (train/teamplay.ts): an actor's alliance plays a play — most often one of the best
+//     the team-play book found beside that partner, sometimes any play of the library (exploring),
+//     sometimes free play — and a second REAL-v1 carries the champion's network and THINKS AHEAD at
+//     its own job starts too: both robots plan, both robots' decisions are lessons.
 //   · OPPONENTS (phase 5): matches bring a red alliance too — DSIM's presets, two copies of our robot
 //     (carrying the champion's network in the actors' matches: self-play), a defender — in the exam
 //     every partner kind meets every opponent kind. Each champion's exam matches also give the
@@ -39,12 +43,14 @@ import { loadProfile, profileProblems } from '../harness/profiles';
 import { RUNS, ROOT, meanCi, type MeanCi } from './engine';
 import { JUDGE_PTS, SEARCH2, type AuditItem, type EpisodeArgs, type EpisodeResult, type MistakeKind, type Search2Spec } from './episode';
 import { mineRoutes, type RouteLibrary } from './routes';
+import { PLAYS, SOLO_PLAYS, type Play } from './teamplay';
+import { TeamPlaybook } from './teamplaybook';
 import { Store } from './store';
 import { entGenome, labelRows, type EntFitReport, type LearnArgs, type LearnResult } from './entlearn';
 import type { OpponentKind, PartnerKind } from './team';
 
 export const V2_DIR = join(RUNS, '.v2');
-export const V2_VERSION = 2; // 2: the exam brings opponents
+export const V2_VERSION = 3; // 2: the exam brings opponents; 3: team plays (the entity network reads each option's role)
 const EXAM_SEED = 525_252;
 const PRE = Math.round(C.PRE_COUNTDOWN / DT);
 const PLAY_END = Math.round((C.PRE_COUNTDOWN + C.AUTO_DURATION + C.TRANSITION_DURATION + C.TELEOP_DURATION) / DT);
@@ -219,6 +225,9 @@ export class Continuous extends EventEmitter {
   private busy = 0; // busy worker share, smoothed
   private failures = 0;
   private searchExamRunning = false;
+  private teamBook: TeamPlaybook | null = null;
+  private teamAt = 0;
+  private teamBest = new Map<string, Play[]>();
   private recent: string[] = [];
   private awake: ChildProcess | null = null; // caffeinate: the Mac stays awake while it trains
   problems: string[] = [];
@@ -351,6 +360,7 @@ export class Continuous extends EventEmitter {
   /** the studio is closing (a signal, a reboot): keep `running` so it carries on next time */
   close(): void {
     this.stop('interrupted');
+    this.teamBook?.store.close();
     this.store.close();
   }
   private tick(): void {
@@ -426,6 +436,7 @@ export class Continuous extends EventEmitter {
       const partner = c.partners[n % c.partners.length];
       const opponents = c.opponents[Math.floor(n / c.partners.length) % c.opponents.length];
       const seed = seed7(this.st.name, 'actor', n);
+      const play = this.pickPlay(partner, seed);
       const from = PRE + (seedOf(seed, 'window') % Math.max(1, PLAY_END - PRE - c.window));
       const genome = this.st.champion.genome;
       const champ = this.st.champion.id;
@@ -434,13 +445,21 @@ export class Continuous extends EventEmitter {
       const args: EpisodeArgs = drill
         ? { ...(drill.args as EpisodeArgs), forces: drill.forces, handover: { tick: drill.tick, genome }, search2: c.search, keepSearched: true, searchWindow: [drill.tick, drill.tick + c.window] }
         : // copies of our robot on red carry the champion too: self-play
-          this.args(genome, seed, partner, { search2: c.search, keepSearched: true, searchWindow: [from, from + c.window], ...(opponents !== 'none' ? { opponents, opponentGenome: genome } : {}) });
+          this.args(genome, seed, partner, {
+            search2: c.search,
+            keepSearched: true,
+            searchWindow: [from, from + c.window],
+            play,
+            // a second REAL-v1 is our robot too: the champion's network, thinking ahead with us
+            ...(partner === 'real' ? { partner: { kind: 'real' as const, genome }, searchPartner: true } : {}),
+            ...(opponents !== 'none' ? { opponents, opponentGenome: genome } : {}),
+          });
       this.run<EpisodeResult>(this.job(args), PRI.actor)
         .then((r) => {
           if (pool !== this.pool) return;
           const id = drill
             ? this.store.addMatch({ gen: champ, kind: 'drill', seed: args.seed, partner: args.partner?.kind ?? 'none', start: r.start ?? 'F3', reward: r.reward, score: r.score, info: { drill: drill.tag, tick: drill.tick, searched: r.searched } })
-            : this.store.addMatch({ gen: champ, kind: 'actor', seed, partner, start: r.start ?? 'F3', reward: r.reward, score: r.score, info: { window: [from, from + c.window], searched: r.searched, mistakes: r.mistakes, opponents } });
+            : this.store.addMatch({ gen: champ, kind: 'actor', seed, partner, start: r.start ?? 'F3', reward: r.reward, score: r.score, info: { window: [from, from + c.window], searched: r.searched, mistakes: r.mistakes, opponents, play: play.id } });
           if (drill) this.st.totals.drills = (this.st.totals.drills ?? 0) + 1;
           const rows = labelRows(r, id, champ, c.search);
           this.store.tx(() => this.store.addDecisions(rows));
@@ -457,6 +476,26 @@ export class Continuous extends EventEmitter {
           this.fill();
         });
     }
+  }
+
+  /** the play an actor match plays: the team-play book's best beside this partner (60 %), any play of
+   * the library (25 %: exploring), free play (15 %) */
+  private pickPlay(partner: PartnerKind | 'none', seed: number): Play {
+    if (Date.now() - this.teamAt > 600_000) {
+      this.teamAt = Date.now();
+      try {
+        this.teamBook ??= new TeamPlaybook(this.st.config.profile);
+        for (const e of this.teamBook.entries()) this.teamBest.set(e.partner, this.teamBook.best(e.partner));
+      } catch {
+        /* no book yet */
+      }
+    }
+    const u = (seedOf(seed, 'play') % 1000) / 1000;
+    const best = this.teamBest.get(partner) ?? [];
+    const lib = partner === 'none' ? PLAYS.filter((p) => SOLO_PLAYS.includes(p.id)) : PLAYS;
+    if (u < 0.6 && best.length) return best[seedOf(seed, 'best') % best.length];
+    if (u < 0.85) return lib[seedOf(seed, 'lib') % lib.length];
+    return PLAYS[0];
   }
 
   // ─────────────────────────────── learner ───────────────────────────────

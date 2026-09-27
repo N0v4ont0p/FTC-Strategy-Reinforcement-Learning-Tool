@@ -129,6 +129,7 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('.tabs [data-tab]')
     for (const p of document.querySelectorAll<HTMLElement>('[data-panel]')) p.hidden = p.dataset.panel !== b.dataset.tab;
     if (b.dataset.tab === 'overview') renderHistory();
     if (b.dataset.tab === 'robot') void loadRobots();
+    if (b.dataset.tab === 'plays') void loadTeam();
     if (b.dataset.tab === 'home') void loadSetup();
   };
 }
@@ -865,6 +866,7 @@ $('homeProfile').onchange = () =>
     void loadMistakes();
     void loadExamSheet();
     void loadSetup(true);
+    void loadTeam();
   });
 $('homeTrain').onclick = async () => {
   try {
@@ -959,6 +961,100 @@ $('rtWatch').onclick = async () => {
 };
 void loadRoutes();
 
+// ─────────────────────────────── Team plays ───────────────────────────────
+type Words = { us: Record<string, string>; partner: Record<string, string> };
+interface TeamEntryV {
+  partner: string;
+  time: string;
+  seconds: number;
+  evaluated: number;
+  generations: number;
+  free: { mean: number; cvar10: number };
+  ranked: { play: { id: string; label: string; blurb: string; parent?: string; change?: string; roles: unknown }; mean: number; ci95: number; cvar10: number; n: number; vsFree: number }[];
+  words: Record<string, Words>;
+}
+interface TeamV {
+  profile: string;
+  status: { running: boolean; done: number; total: number; current: string | null };
+  entries: TeamEntryV[];
+  library: { id: string; label: string; blurb: string; solo: boolean; words: Words }[];
+}
+let TP: TeamV | null = null;
+let tpPartner = 'real';
+let tpSel = 0;
+const TP_PARTNERS: [string, string][] = [['real', 'a second REAL-v1'], ['skimmer', 'Skimmer'], ['sniper', 'Sniper'], ['hauler', 'Hauler'], ['parker', 'parks only'], ['none', 'alone']];
+const PH: [string, string][] = [['auto', 'AUTO'], ['teleop', 'TELEOP'], ['end', 'last 30 s']];
+function renderTeam(): void {
+  if (!TP) return;
+  const st = TP.status;
+  $('tpStatus').textContent = st.running ? `searching ${st.done + 1}/${st.total}${st.current ? ` · beside ${st.current}` : ''}` : TP.entries.length ? `${TP.entries.length} partner kinds searched` : '';
+  ($('tpFill') as HTMLElement).style.width = st.total ? `${(100 * st.done) / st.total}%` : '0%';
+  $<HTMLButtonElement>('tpBuild').disabled = st.running;
+  $<HTMLButtonElement>('tpStop').disabled = !st.running;
+  $('tpPartners').innerHTML = TP_PARTNERS.map(([k, l]) => {
+    const e = TP!.entries.find((x) => x.partner === k);
+    const b = e?.ranked[0];
+    return `<button type="button" class="chip${k === tpPartner ? ' sel' : ''}" data-p="${k}"><b>${esc(l)}</b>${b ? `<span class="${b.vsFree > 0 ? 'up' : ''}">${b.play.label.split(' (')[0]} ${sgn(b.vsFree)}</span>` : '<span>not searched</span>'}</button>`;
+  }).join('');
+  for (const b of $('tpPartners').querySelectorAll<HTMLButtonElement>('button[data-p]'))
+    b.onclick = () => {
+      tpPartner = b.dataset.p!;
+      tpSel = 0;
+      renderTeam();
+    };
+  const e = TP.entries.find((x) => x.partner === tpPartner);
+  $('tpList').innerHTML = e
+    ? `<table><thead><tr><th>#</th><th class="l">play</th><th title="alliance points per match, fresh luck">points</th><th title="paired with free play on the same luck">vs free</th><th title="mean of the worst tenth">worst tenth</th></tr></thead><tbody>${e.ranked
+        .map((r, i) => `<tr data-i="${i}" class="pick${i === tpSel ? ' sel' : ''}"><td>${i + 1}</td><td class="l">${esc(r.play.label)}${r.play.parent ? ' <span class="badge">discovered</span>' : ''}</td><td>${r.mean.toFixed(1)} ± ${r.ci95.toFixed(1)}</td><td class="${r.vsFree > 0 ? 'gain' : ''}">${sgn(r.vsFree)}</td><td>${r.cvar10.toFixed(0)}</td></tr>`)
+        .join('')}</tbody></table><p class="hint">${e.evaluated} plays scored over ${e.generations} generations in ${(e.seconds / 60).toFixed(1)} min; the finalists on ${e.ranked[0]?.n ?? 0} fresh luck draws.</p>`
+    : `<p class="hint">${st.running && st.current === tpPartner ? 'Searching now…' : 'Not searched yet beside this partner — press Search plays.'}</p>`;
+  for (const tr of $('tpList').querySelectorAll<HTMLTableRowElement>('tr[data-i]'))
+    tr.onclick = () => {
+      tpSel = Number(tr.dataset.i);
+      renderTeam();
+    };
+  const r = e?.ranked[tpSel];
+  $('tpDetail').hidden = !r;
+  if (r && e) {
+    const lib = TP.library.find((x) => x.id === r.play.id);
+    $('tpTitle').textContent = r.play.label;
+    $('tpBlurb').innerHTML = r.play.parent ? `<b>Discovered</b> by the search, from ${esc(r.play.parent)}: ${esc(r.play.change ?? '')}.` : esc(lib?.blurb ?? r.play.blurb ?? '');
+    const w = e.words[r.play.id];
+    $('tpRoles').innerHTML = w
+      ? `<table><thead><tr><th class="l"></th><th class="l"><i class="dot us"></i>our robot</th><th class="l"><i class="dot pa"></i>${tpPartner === 'none' ? '(no partner)' : 'partner'}</th></tr></thead><tbody>${PH.map(([k, l]) => `<tr><td class="l ph">${l}</td><td class="l">${esc(w.us[k])}</td><td class="l">${tpPartner === 'none' ? '' : esc(w.partner[k])}</td></tr>`).join('')}</tbody></table>`
+      : '';
+  }
+  $('tpLib').innerHTML = TP.library.map((q) => `<div class="libitem"><b>${esc(q.label)}</b>${q.solo ? ' <span class="badge">solo too</span>' : ''}<span class="sub">${esc(q.blurb)}</span></div>`).join('');
+}
+async function loadTeam(): Promise<void> {
+  try {
+    TP = await getJSON<TeamV>(`/api/teamplays${HOME?.profile ? `?profile=${encodeURIComponent(HOME.profile)}` : ''}`);
+    renderTeam();
+  } catch (e) {
+    $('tpList').innerHTML = `<p class="hint">${esc((e as Error).message)}</p>`;
+  }
+}
+$('tpBuild').onclick = () => TP && void act(post('/api/teamplays/build', { profile: TP.profile, budget: $<HTMLSelectElement>('tpBudget').value }), 'searching plays beside every kind of partner — results appear as each finishes');
+$('tpStop').onclick = () => void act(post('/api/teamplays/stop', {}), 'stops after the partner in progress');
+$('tpWatch').onclick = async () => {
+  const e = TP?.entries.find((x) => x.partner === tpPartner);
+  const r = e?.ranked[tpSel];
+  if (!r || !TP) return;
+  try {
+    toast('playing it in DSIM…');
+    const f = await post<{ frames: Frames; events: [number, string][]; reward: number }>('/api/teamplays/watch', { profile: TP.profile, partner: tpPartner, play: r.play });
+    view.loadFocus({ gen: 0, fitness: 0, score: 0, death: 'survived', parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, lineage: { id: -1, op: 'champion', parents: [], muts: 0, born: 0 }, frames: f.frames, events: f.events } as FocusFile);
+    view.seek(view.startTick);
+    view.playing = true;
+    $('play').textContent = 'Pause';
+    replayLabel = `team play · ${r.play.label} · ${TP_PARTNERS.find(([k]) => k === tpPartner)?.[1] ?? tpPartner} · ${f.reward} points`;
+    setMode('replay');
+  } catch (err) {
+    toast((err as Error).message, true);
+  }
+};
+void loadTeam();
+
 // ─────────────────────────────── Mistakes: the audit ───────────────────────────────
 const MK_LABEL: Record<string, string> = { 'empty-trip': 'empty trip', 'blocked-shot': 'blocked shot', idle: 'idle', foul: 'foul', stall: 'stall', crash: 'crash', judgement: 'judgement' };
 let MK: { profile: string; audit: AuditV | null; history: AuditPointV[]; drills: { n: number; used: number; played: number } | null } | null = null;
@@ -1048,6 +1144,7 @@ interface SetupV {
   notify: boolean;
   run: { champion: number; exam: number | null } | null;
   playbook: { entries: number } | null;
+  teamplays: number | null;
 }
 let setupAt = 0;
 async function loadSetup(force = false): Promise<void> {
@@ -1062,6 +1159,7 @@ async function loadSetup(force = false): Promise<void> {
       { ok: u.service, title: 'The studio runs by itself', detail: u.service ? 'installed: starts at login, restarts after a crash' : 'in Terminal: ./start.sh --install', go: u.service ? undefined : ['copy:./start.sh --install', 'Copy'] },
       { ok: u.notify, title: 'Notifications are on', detail: u.notify ? 'new champions, a finished playbook, problems' : 'switched off below', go: undefined },
       { ok: !!u.run, title: 'Training has started', detail: u.run ? `champion ${u.run.champion ? `#${u.run.champion}` : '(no-learning)'}${u.run.exam !== null ? ` · exam ${u.run.exam.toFixed(1)}` : ''}` : 'press Train below' },
+      { ok: (u.teamplays ?? 0) >= 3, title: 'Team plays are searched', detail: u.teamplays ? `beside ${u.teamplays} kinds of partner — training plays inside the winners` : 'while training is paused: the plays that win beside each partner', go: (u.teamplays ?? 0) >= 3 ? undefined : ['plays', 'Open'] },
       { ok: (u.playbook?.entries ?? 0) >= 20, title: 'The AUTO playbook is built', detail: u.playbook ? `${u.playbook.entries} plans` : 'while training is paused', go: (u.playbook?.entries ?? 0) >= 20 ? undefined : ['playbook', 'Open'] },
     ];
     $('setupScore').textContent = `${items.filter((i) => i.ok).length} of ${items.length}`;
@@ -1738,6 +1836,13 @@ function connect(): void {
     } else void loadHome();
   });
   es.addEventListener('routes', () => void loadRoutes());
+  es.addEventListener('teamplays', (e) => {
+    const d = JSON.parse((e as MessageEvent).data) as { profile: string; status: TeamV['status']; entry?: boolean };
+    if (!TP || d.profile !== TP.profile) return;
+    TP.status = d.status;
+    if (d.entry) void loadTeam();
+    else renderTeam();
+  });
   es.addEventListener('mistakes', () => void loadMistakes());
   es.addEventListener('robots', () => {
     void loadRobots();

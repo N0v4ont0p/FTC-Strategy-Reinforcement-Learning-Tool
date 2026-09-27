@@ -43,6 +43,8 @@ import { mineRoutes } from './routes';
 import { OPPONENT_KINDS } from './team';
 import { describeBuild, draftFrom, floorsOf, inspectRobot, listRobots, replayRobots, saveRobot, shapeProblems, specsIn } from './robots';
 import { notify } from './notify';
+import { PLAYS, PLAY_QUICK, cross, mutate, playKey, playWords, role as mkRole, searchPlays, type Play } from './teamplay';
+import { TeamPlaybook } from './teamplaybook';
 
 process.env.BIOBUZZ_NO_NOTIFY = '1'; // the gate never posts macOS notifications
 let fails = 0;
@@ -873,6 +875,57 @@ const s2a = runEpisode(s2args(null));
   await srv.close();
   const suj = JSON.parse(su.text) as { robot: { ok: boolean }; envelope: string };
   check('16 studio: the Robot page, the setup checklist, notification settings and the printable playbook are served; a bad robot is explained, not crashed on', rb.status === 200 && JSON.parse(rb.text).robots.length >= 3 && su.status === 200 && suj.robot.ok && suj.envelope === 'measured' && nt.status === 200 && 'settings' in JSON.parse(nt.text) && pr.status === 200 && pr.text.includes('Print') && ins2.status === 400);
+}
+
+// ---- 17. team plays: roles, joint search, discovered plays -------------------------------------------------------
+{
+  const a4 = (seed: number, play: string, o: Partial<EpisodeArgs> = {}): EpisodeArgs => ({ genome: null, profile: V1P, sampleProfile: true, seed, stage: 'full', driver: 'oracle', track: true, record: false, partner: { kind: 'real' }, play, ...o });
+  const tb = [41, 42, 43].map((sd) => runEpisode(a4(sd, 'top-bottom')));
+  const fr = [41, 42, 43].map((sd) => runEpisode(a4(sd, 'free')));
+  // our robot's collecting jobs (field, loading zone, FLOWER) and where they went
+  const share = (R: EpisodeResult[], ok: (d: [number, number, number, number, number]) => boolean, kinds: number[]): number => {
+    const ds = R.flatMap((r) => (r.decisions ?? []).filter((d) => kinds.includes(d[1]) && d[0] > 38 * 60 + 240));
+    return ds.filter(ok).length / Math.max(1, ds.length);
+  };
+  const COL = [0, 1, 2];
+  const topTb = share(tb, (d) => d[3] >= 0, COL);
+  const topFr = share(fr, (d) => d[3] >= 0, COL);
+  check('17 roles: a zone steers a robot — "top · bottom": our robot collects in the top half (the north cell\'s side) in TELEOP', topTb >= 0.75 && topTb > topFr + 0.15, `${(100 * topTb).toFixed(0)} % in the top half (free play ${(100 * topFr).toFixed(0)} %)`);
+  const lf = [41, 42, 43].map((sd) => runEpisode(a4(sd, 'lz-field')));
+  const lzP = share(lf, (d) => d[1] === 1, COL);
+  const lzF = share(fr, (d) => d[1] === 1, COL);
+  check('17 roles: a kind preference steers a robot — "loading zone · field": our robot works the loading zone far more than in free play', lzP > 2.5 * lzF && lzP > 0.1, `${(100 * lzP).toFixed(0)} % of its collecting in the loading zone (free play ${(100 * lzF).toFixed(0)} %)`);
+  const again = runEpisode(a4(41, 'top-bottom'));
+  check('17 plays: deterministic; every play of the library runs a whole match beside a partner', again.reward === tb[0].reward && PLAYS.every((p) => runEpisode(a4(44, p.id, { track: false })).ticks > 9000));
+  // mutation and crossover
+  const rnd = mulberry32(5);
+  const kids: Play[] = [];
+  for (let i = 0; i < 40; i++) kids.push(i % 3 ? mutate(PLAYS[i % PLAYS.length], rnd, i) : cross(PLAYS[i % PLAYS.length], PLAYS[(i * 7) % PLAYS.length], rnd, i));
+  const noop = { ...PLAYS[0], roles: [{ auto: null, teleop: mkRole({ yLine: 12 }), end: null }, { auto: null, teleop: null, end: null }] } as Play;
+  check('17 discovery: mutants and crossbreeds are valid plays with their story; a change that does nothing is recognised as the same play', kids.every((k) => k.roles.length === 2 && !!k.change && !!k.parent && !!playWords(k).us.teleop) && playKey(noop) === playKey(PLAYS[0]) && new Set(kids.map(playKey)).size > 25);
+  // the joint search: both robots think ahead
+  const js = runEpisode(a4(45, 'both-target', { track: false, partner: { kind: 'real', genome: null }, search2: QUICK2, keepSearched: true, searchPartner: true, searchWindow: [2400, 4000] }));
+  const L = js.labels ?? [];
+  check('17 joint search: a second REAL-v1 thinks ahead at its own job starts too; both robots\' decisions are lessons', L.some((l) => l.robot === 0) && L.some((l) => l.robot === 1) && L.every((l) => !!l.x));
+  // the play search and the book
+  const pool = new WorkerPool(8);
+  const sr = await searchPlays({ profile: V1P, partner: 'none', genome: null, seed: 2 }, pool, PLAY_QUICK);
+  pool.close();
+  const fre = sr.ranked.find((r) => r.play.id === 'free');
+  check('17 play search: plays scored on shared luck, mutants added, finalists (free play among them) re-scored on fresh luck', sr.evaluated >= 10 && !!fre && Math.abs(fre.vsFree) < 1e-9 && sr.ranked.every((r) => r.n === PLAY_QUICK.finalDraws) && sr.ranked[0].mean >= sr.ranked[sr.ranked.length - 1].mean, `${sr.evaluated} plays; best alone: ${sr.ranked[0].play.label} ${sr.ranked[0].mean.toFixed(1)} (${sr.ranked[0].vsFree >= 0 ? '+' : ''}${sr.ranked[0].vsFree.toFixed(1)} over free)`);
+  const tdir = join(ROOT, 'runs', '_check-teamplays');
+  rmSync(tdir, { recursive: true, force: true });
+  const book = new TeamPlaybook(V1P, tdir);
+  await book.build({ partners: ['parker'], budget: 'quick', workers: 8 });
+  const e = book.entry('parker');
+  check('17 team-play book: a search per partner kind is kept with the plays in words, and training reads its best plays', !!e && e.ranked.length >= 2 && !!e.words[e.ranked[0].play.id] && book.best('parker').length >= 1);
+  book.store.close();
+  rmSync(tdir, { recursive: true, force: true });
+  const srv = startServer(4793, undefined, { noResume: true });
+  const tp = await fetch('http://127.0.0.1:4793/api/teamplays?profile=profiles/real-v1.json');
+  const tj = (await tp.json()) as { library: unknown[] };
+  await srv.close();
+  check('17 studio: the Team plays page is served with the whole library', tp.status === 200 && tj.library.length === PLAYS.length);
 }
 
 console.log(fails === 0 ? '\nTRAINING PLATFORM GATE: ALL PASS' : `\nTRAINING PLATFORM GATE: ${fails} FAIL`);

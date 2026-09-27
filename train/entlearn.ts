@@ -43,7 +43,7 @@ export function labelRows(r: EpisodeResult, match: number, gen: number, spec: Se
       const rq = new Float32Array(l.rq.length * k).fill(NaN);
       l.rq.forEach((row, i) => row.forEach((v, j) => v !== null && (rq[i * k + j] = v)));
       return {
-        match, gen, tick: l.tick, robot: 0, chosen: l.chosen, best: l.chosen, net: l.net,
+        match, gen, tick: l.tick, robot: l.robot ?? 0, chosen: l.chosen, best: l.chosen, net: l.net,
         obs: f(l.x!.g), feats: f(l.x!.f), ents: f(l.x!.e), opt: f(l.x!.o),
         q: Float32Array.from(l.q.map((v) => v ?? NaN)), se: Float32Array.from(l.se.map((v) => v ?? NaN)), n: Float32Array.from(l.n),
         rq, rd: Float32Array.from(spec.rounds.slice(0, l.rq.length).map((x) => x.draws)),

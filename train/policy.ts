@@ -15,6 +15,7 @@ import { share } from './fork';
 import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, parkGoal, type Option, type OptionKind, type Style } from './skills';
 import { NO_AVOID, type AllianceBoard, type BrainMode } from './team';
 import { matchStep, type PlanStep, type TakenStep } from './plan';
+import { PTS_PER_S, roleBias, roleFilter, roleNow, type Play, type Role } from './teamplay';
 
 export const HIDDEN = 16;
 export { STYLE };
@@ -146,6 +147,11 @@ export class Brain {
   private plan: PlanStep[] | null = null;
   /** the plan's steps as they were taken, and when (the timing sheet) */
   taken: TakenStep[] = [];
+  /** the TEAM PLAY (train/teamplay.ts) and which of its robots this is (0 = ours, 1 = the partner) */
+  private play: Play | null;
+  private seat: number;
+  private role: Role | null = null;
+  private holdSince = -1; // a joint volley: tick it started waiting for the partner
   /** the planner's look-ahead: at the first job start past the plan, keep the options in `free` */
   stopAtFree = false;
   free: { tick: number; opts: Option[]; scores: number[] } | null = null;
@@ -156,7 +162,7 @@ export class Brain {
     private robotId = 0,
     public log?: Decision[],
     public samples?: Sample[],
-    o: { mode?: BrainMode; board?: AllianceBoard | null; parkSlot?: number } = {},
+    o: { mode?: BrainMode; board?: AllianceBoard | null; parkSlot?: number; play?: Play | null; seat?: number } = {},
   ) {
     this.net = params instanceof Float32Array ? new Mlp(SHAPE, share(params)) : null;
     if (params && !(params instanceof Float32Array)) this.ent = share(new EntNet(ENT_SHAPE, share(params.ent)));
@@ -165,6 +171,8 @@ export class Brain {
     this.mode = o.mode ?? 'play';
     this.board = o.board ?? null;
     this.parkSlot = o.parkSlot ?? 0;
+    this.play = o.play ?? null;
+    this.seat = o.seat ?? 0;
   }
   /** the robot this brain drives */
   get id(): number {
@@ -193,14 +201,20 @@ export class Brain {
     this.entIn = null;
     if (this.ent || this.wantEnts) {
       const { e, n } = encodeEnts(w, r);
-      this.entIn = { g: this.obs, e, n, o: optInput(r, opts), k: opts.length };
+      this.entIn = { g: this.obs, e, n, o: optInput(r, opts, this.role, w), k: opts.length };
     }
-    if (this.ent) return Array.from(this.ent.forward(this.entIn!).q);
+    // the team play's role: its preference, in seconds (greedy) or points (a network)
+    const role = this.role;
+    const bias = (o: Option): number => (role ? roleBias(role, o, w) : 0);
+    if (this.ent) {
+      const q = this.ent.forward(this.entIn!).q;
+      return opts.map((o, i) => q[i] + bias(o) * PTS_PER_S);
+    }
     return opts.map((o) => {
-      if (!this.net) return greedyScore(o, r.hopper.length >= this.cap);
+      if (!this.net) return greedyScore(o, r.hopper.length >= this.cap) + bias(o);
       this.x.set(this.obs, 0);
       this.x.set(o.feats, N_OBS);
-      return this.net.forward(this.x)[0];
+      return this.net.forward(this.x)[0] + bias(o) * PTS_PER_S;
     });
   }
   /** the human player's button needs nothing from the robot: pressing it is done ALONGSIDE the job
@@ -274,6 +288,8 @@ export class Brain {
       return new Map([[this.robotId, this.pilot.drive(r, w.tick, g, null, { vMax: 45 })]]);
     }
     const avoid = this.board ? this.board.avoidFor(this.robotId) : NO_AVOID;
+    this.role = roleNow(this.play, this.seat, w);
+    this.pilot.parkLead = this.role?.parkLead ?? 0;
     this.pilot.avoidSpots = avoid.spots;
     this.pilot.others = w.robots.length > 1 ? w.robots.filter((q) => q.id !== this.robotId).map((q) => ({ pos: { x: q.pos.x, y: q.pos.y }, heading: q.heading, spec: q.spec })) : [];
     const style = this.style;
@@ -307,7 +323,7 @@ export class Brain {
       if (this.ex && this.cur && this.cur.kind !== 'park' && !this.committed && w.tick - this.lastThink >= THINK_TICKS) {
         this.lastThink = w.tick;
         const held = this.ex;
-        const opts = options(w, r, this.pilot, this.cap, this.banned, (o) => held.holds(o), avoid);
+        const opts = roleFilter(this.role, options(w, r, this.pilot, this.cap, this.banned, (o) => held.holds(o), avoid), w, (o) => held.holds(o));
         const ci = opts.findIndex((o) => o.feats[F_CURRENT] === 1);
         if (ci >= 0 && opts.length > 1) {
           const sc = this.score(w, r, opts);
@@ -342,7 +358,7 @@ export class Brain {
         }
       }
       if (!this.ex) {
-        const opts = options(w, r, this.pilot, this.cap, this.banned, () => false, avoid);
+        const opts = roleFilter(this.role, options(w, r, this.pilot, this.cap, this.banned, () => false, avoid), w);
         if (opts.length) {
           const sc = this.score(w, r, opts);
           let commit = !!this.force?.commit;
@@ -397,6 +413,16 @@ export class Brain {
     if ((ph === 'auto' || ph === 'teleop') && r.hopper.length < this.cap && !spillNear) c.intake = true;
     // (a dumper holds fire only at its shooting spot: DSIM's aim assist turns its whole chassis)
     if (fireGate(w, r) && (!this.pilot.dumper || this.ex?.firing)) c.fire = true;
+    // a JOINT VOLLEY: hold fire until the partner is loaded too (or this hopper is full, or 4 s)
+    if (this.role?.hold && c.fire) {
+      const mate = w.robots.find((q) => q.alliance === r.alliance && q.id !== this.robotId);
+      const ready = !mate || r.hopper.length >= this.cap || mate.hopper.length >= 2 || (this.holdSince >= 0 && w.tick - this.holdSince > 240);
+      if (!ready) {
+        if (this.holdSince < 0) this.holdSince = w.tick;
+        c.fire = false;
+      }
+    }
+    if (!r.hopper.length) this.holdSince = -1;
     return new Map([[this.robotId, c]]);
   }
 

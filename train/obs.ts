@@ -10,6 +10,7 @@ import { BB, C, bb, type RobotState, type World } from '../harness/dsim';
 import type { Resolved } from '../harness/profiles';
 import { envelopeOf, inEnv } from './envelope';
 import { N_OPT_FEATS, type Option } from './skills';
+import { PTS_PER_S, inZone, roleBias, type Role } from './teamplay';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const K_NEAR = 6; // nearest collectable elements seen
@@ -177,8 +178,9 @@ export const ENT_FEATS = ['self', 'partner', 'opponent', 'pollen', 'ownNectar', 
 export const N_ENT = ENT_FEATS.length;
 /** at most this many entities (the nearest): the field never holds more in play, it only bounds the cost */
 export const ENT_MAX = 96;
-/** an option as the entity network reads it: its features and where it goes, robot-relative */
-export const N_OPT_IN = N_OPT_FEATS + 3;
+/** an option as the entity network reads it: its features, where it goes (robot-relative), and what
+ * the team play's role says of it (in its zone ±1, 0 without a role; the role's preference) */
+export const N_OPT_IN = N_OPT_FEATS + 5;
 
 export function encodeEnts(w: World, r: RobotState): { e: Float32Array; n: number } {
   const m = r.alliance === 'blue' ? 1 : -1;
@@ -230,7 +232,7 @@ export function encodeEnts(w: World, r: RobotState): { e: Float32Array; n: numbe
 }
 
 /** every option's input row: its features, then its first target relative to the robot */
-export function optInput(r: RobotState, opts: Option[]): Float32Array {
+export function optInput(r: RobotState, opts: Option[], role: Role | null = null, w: World | null = null): Float32Array {
   const m = r.alliance === 'blue' ? 1 : -1;
   const h = r.heading + (m > 0 ? 0 : Math.PI);
   const c = Math.cos(h);
@@ -244,6 +246,10 @@ export function optInput(r: RobotState, opts: Option[]): Float32Array {
     out[b] = Math.max(-4, Math.min(4, (dx * c + dy * s) / 72));
     out[b + 1] = Math.max(-4, Math.min(4, (-dx * s + dy * c) / 72));
     out[b + 2] = Math.min(4, Math.hypot(dx, dy) / 144);
+    if (role && w) {
+      out[b + 3] = inZone(role, o, w) ? 1 : -1;
+      out[b + 4] = Math.max(-4, Math.min(4, (roleBias(role, o, w) * PTS_PER_S) / 10));
+    }
   });
   return out;
 }

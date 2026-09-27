@@ -163,6 +163,48 @@ round.
   problem in training, a studio crash. Each can be switched off; **Send a test** shows one now.
   Settings in `runs/.notify.json`.
 
+## Team plays (the alliance plays together)
+
+Two robots should not each do their own thing. A **team play** (`train/teamplay.ts`) gives each
+robot a **role** for AUTO, TELEOP and the last 30 s; a role shapes what its brain may and wants to do,
+on top of its own judgement:
+
+- **what** — prefer or avoid kinds of job (FLOWERs, ground groups, the loading zone, the human
+  player, the tip cycle, placing NECTAR), in seconds of travel (+4 s: a FLOWER beats a group up to
+  4 s closer);
+- **where** — the top or bottom half (each robot one side of the HIVE: its north and south cells
+  face those halves), our half or the far half, or a **moving zone**: the side the HIVE's target
+  cell faces now ("both on the target side"), or the other side; strict or loose;
+- **when** — park early (a sure PARK while the other scores on) or score to the last moment;
+- **together** — a **joint volley**: whoever is loaded holds fire (up to 4 s) until the other is too,
+  so both robots' elements reach the cell at once.
+
+Shooting, parking and getting in position are never taken away: roles steer, they never strand a
+robot. The library holds 21 plays — free play; FLOWERs · ground (from AUTO on: FLOWERs hold their
+POLLEN in AUTO); top · bottom; both on the target side; target · other side; our half · far half;
+tip cycle · support; loading zone · field; joint volleys; a diagonal split; who parks early; a
+FLOWER rush then halves; endgame FLOWERs — each with its mirror.
+
+The **Team plays** tab searches them (`train/teamplaybook.ts`, needs every core, so not while
+training): beside each kind of partner — and alone, where a play is a style for our robot — every
+play is scored in DSIM on shared luck draws; then the best are **mutated** (a zone moves, a line
+shifts, the robots swap, a preference grows, a phase takes another's role, a volley is tried) and
+**crossed** (phases from two parents) for several generations, a change that does nothing
+recognised as the same play; the finalists and free play are re-scored on fresh luck, so the gain
+shown is not the search's own luck. Every play reads in words, robot by robot and phase by phase,
+with where a discovered one came from; **Watch it** plays it on the field.
+
+**Training plays inside the winners**: actor matches play one of the best plays beside their
+partner (60 %), any play of the library (25 %) or free play (15 %). A second REAL-v1 is our own
+robot: it carries the champion's network and **thinks ahead at its own job starts too**, with our
+robot's choice already made — the alliance plans together, and both robots' decisions are lessons.
+The entity network reads what the role says of each option (in its zone, its preference).
+
+First measurements (6 shared draws beside a second REAL-v1, the no-learning order): support · tip
+cycle +31.5, both on the target side +29.5, FLOWERs · ground +27.0, our half · far half +22.5 over
+free play; a quick search beside a Sniper found support · tip cycle +38.8. Run the full search for
+real numbers.
+
 ## Robot (the robot lab)
 
 The **Robot** tab is where a robot is made and kept true (`train/robots.ts`). A robot is its DSIM

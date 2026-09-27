@@ -32,6 +32,7 @@ import { VALUE_SHAPE, VALUE_SCALE } from './value';
 import { Tally, type Activity, type Loads, type Parts } from './gap';
 import { AllianceBoard, OPPONENTS, OPP_FIRST_START, PARTNERS, defaultPartnerStart, legalPair, partnerProfile, seatStart, type OpponentKind, type PartnerKind, type StartId } from './team';
 import type { OptionKind } from './skills';
+import { playById, type Play } from './teamplay';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -77,6 +78,8 @@ export interface EpisodeArgs {
   start?: StartId; // where our robot starts (default: F3, the team's start)
   partner?: PartnerArgs; // an alliance partner (default: none — the solo game)
   opponents?: OpponentKind; // a red alliance (phase 5; default: none)
+  play?: Play | string; // a TEAM PLAY (train/teamplay.ts): roles for our robot and its partner (default: free)
+  searchPartner?: boolean; // search2 thinks ahead at the partner's job starts too (a copy of our robot on the same network: the alliance plans together)
   opponentGenome?: string | null; // the red copies of our robot play this network ('mirror': self-play); default: the no-learning order
   routes?: boolean; // record our robot's scoring cycles (the route library, train/routes.ts)
   audit?: boolean; // record every mistake with its moment (the mistake audit, MASTERPLAN §7)
@@ -170,6 +173,7 @@ export interface Searched {
   at: 'think' | 'begin';
   chosen: number; // what the robot did
   net: number; // what its network alone would have done
+  robot?: number; // 0 = ours, 1 = the partner (searchPartner)
   q: (number | null)[];
   se: (number | null)[];
   n: number[];
@@ -349,7 +353,9 @@ export class Episode {
     this.start = a.start ?? 'F3';
     const duo = !!a.partner && a.partner.kind !== 'none';
     const board = duo ? new AllianceBoard() : null;
-    this.brain = new Brain(decodeGenome(a.genome), this.prof, 0, o.decisions, o.samples ?? undefined, { board, parkSlot: duo ? 1 : 0 });
+    const play = typeof a.play === 'string' ? playById(a.play) : (a.play ?? null);
+    if (typeof a.play === 'string' && !play) throw new Error(`no team play called ${a.play}`);
+    this.brain = new Brain(decodeGenome(a.genome), this.prof, 0, o.decisions, o.samples ?? undefined, { board, parkSlot: duo ? 1 : 0, play, seat: 0 });
     this.brain.wantObs = !!(a.lessons || a.search || a.search2 || a.returns);
     this.brain.wantEnts = !!a.keepSearched;
     this.brains = [this.brain];
@@ -364,12 +370,16 @@ export class Episode {
       const ps = P.start ?? defaultPartnerStart(this.prof.spec, this.start, pp.spec);
       if (!legalPair(this.prof.spec, this.start, pp.spec, ps)) throw new Error(`our robot at ${this.start} and a ${P.kind} partner at ${ps} cannot start together`);
       seats.push({ id: 1, alliance: 'blue', spec: pp.spec, ...seatStart(pp.spec, ps) });
-      this.brains.push(new Brain(decodeGenome(P.genome), pp, 1, undefined, undefined, { mode: PARTNERS[P.kind].mode, board, parkSlot: 2 }));
+      this.brains.push(new Brain(decodeGenome(P.genome), pp, 1, undefined, undefined, { mode: PARTNERS[P.kind].mode, board, parkSlot: 2, play, seat: 1 }));
       limits.set(1, pp.limits);
       perRobot.set(1, pp.perturb);
       this.partnerProf = pp;
       this.partnerStart = ps;
       this.partnerTally = new Tally();
+      if (a.searchPartner) {
+        this.brains[1].wantObs = true;
+        this.brains[1].wantEnts = !!a.keepSearched;
+      }
     }
     const opp = a.opponents && a.opponents !== 'none' ? OPPONENTS[a.opponents] : null;
     if (opp) {
@@ -641,10 +651,10 @@ export class Episode {
   /** the points option `key` makes from this (pre-decision) state: a fork takes it on tick `tick`,
    * plays on with the same brain for `horizon` ticks under fresh luck `luck`, and the predictor
    * values what is left of the match (a match that ends, or a robot that dies, is valued as it is) */
-  whatIf(key: string, tick: number, luck: number, horizon: number, value: Mlp | null, commit: boolean): number {
+  whatIf(key: string, tick: number, luck: number, horizon: number, value: Mlp | null, commit: boolean, who = 0): number {
     const b = this.fork();
     b.reseed(luck);
-    b.brain.force = { key, tick, commit };
+    b.brains[who].force = { key, tick, commit };
     const r0 = b.reward();
     const end = b.w.tick + horizon;
     // after the buzzer nothing is decided any more, but points still land: play the settle out
@@ -683,7 +693,7 @@ export class Episode {
   }
 
   /** SEQUENTIAL HALVING (Search2Spec) over decision `d` taken on tick d.tick from this state */
-  searchHalving(d: DecisionPoint, S: Search2Spec, value: Mlp | null, luckBase: number): Searched {
+  searchHalving(d: DecisionPoint, S: Search2Spec, value: Mlp | null, luckBase: number, who = 0): Searched {
     const m = d.opts.length;
     const q: (number | null)[] = new Array(m).fill(null);
     const se: (number | null)[] = new Array(m).fill(null);
@@ -697,7 +707,7 @@ export class Episode {
       const vals = alive.map(() => [] as number[]);
       for (let k = 0; k < R.draws; k++) {
         const luck = seedOf(luckBase, d.tick, r, k);
-        alive.forEach((i, j) => vals[j].push(this.whatIf(optKey(d.opts[i]), d.tick, luck, R.horizon, value, false)));
+        alive.forEach((i, j) => vals[j].push(this.whatIf(optKey(d.opts[i]), d.tick, luck, R.horizon, value, false, who)));
       }
       rq.push(new Array(m).fill(null));
       alive.forEach((i, j) => {
@@ -733,7 +743,7 @@ export class Episode {
         if (md > S.margin && z > S.z && (best === d.chosen || q[i]! > q[best]!)) best = i;
       }
     }
-    return { tick: d.tick, at: d.at, chosen: best, net: d.chosen, q, se, n, depth, rq };
+    return { tick: d.tick, at: d.at, chosen: best, net: d.chosen, robot: who, q, se, n, depth, rq };
   }
 
   /** the whole life, with lessons / search at the decisions when asked */
@@ -804,6 +814,28 @@ export class Episode {
             }
             if (a.inspect) this.inspectPush(d, q, best);
           } else if (a.inspect && !a.lessons) this.inspectPush(d, d.opts.map(() => null));
+        }
+        // THE PARTNER THINKS AHEAD TOO (a copy of our robot on the same network): at its job starts
+        // the alliance's options are searched with our robot's choice already made (a fresh probe
+        // when ours was just changed, so the partner decides on the very list it will see)
+        if (a.search2 && a.searchPartner && this.brains[1]) {
+          const pr = this.brain.force ? this.fork() : probe;
+          if (pr !== probe) pr.step();
+          const d2 = pr.brains[1].last;
+          if (d2 && d2.tick === t && d2.at === 'begin') {
+            const res = this.searchHalving(d2, a.search2, value, seedOf(a.seed, 'search2', 'partner'), 1);
+            searched++;
+            if (res.chosen !== d2.chosen) {
+              changed++;
+              this.brains[1].force = { key: optKey(d2.opts[res.chosen]), tick: t, commit: false };
+              res.change = { key: optKey(d2.opts[res.chosen]), from: d2.opts[d2.chosen].label, to: d2.opts[res.chosen].label };
+            }
+            if (a.keepSearched && d2.ent) {
+              res.sofar = this.reward();
+              res.x = { g: b64(d2.ent.g), e: b64(d2.ent.e), n: d2.ent.n, o: b64(d2.ent.o), f: b64(Float32Array.from(d2.opts.flatMap((o) => o.feats))) };
+              labels.push(res);
+            }
+          }
         }
       }
       if (!this.step()) break;

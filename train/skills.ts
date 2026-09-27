@@ -258,6 +258,9 @@ export class Pilot {
   readonly tank: boolean;
   /** a turretless launcher (the dumper): it aims by turning the chassis and must be close */
   readonly dumper: boolean;
+  /** a team play's park timing (train/teamplay.ts): leave this many seconds earlier; < 0 = never
+   * park in TELEOP (score to the last moment) */
+  parkLead = 0;
   /** centre → the dumper's firing edge (in) */
   private readonly fireReach: number;
   /** the Box Tube's placement point in the robot frame (DSIM bbPlacePointLocal), null without one */
@@ -746,8 +749,8 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
   }
   const g = parkGoal(a, pilot, pilot.parkSlot);
   // PARK counts at the instant AUTO / the match ends, so go only when it takes about that long
-  const parkT = pilot.estTime(r, g, g.h) + pilot.style.parkMarginS;
-  if ((ph === 'auto' || ph === 'teleop') && w.match.phaseTimeLeft < parkT) {
+  const parkT = pilot.estTime(r, g, g.h) + pilot.style.parkMarginS + Math.max(0, pilot.parkLead);
+  if ((ph === 'auto' || (ph === 'teleop' && pilot.parkLead >= 0)) && w.match.phaseTimeLeft < parkT) {
     out.push({ kind: 'park', label: 'park in the loading zone', x: g.x, y: g.y, feats: feats('park', g, g.h) });
   }
   // never idle: with nothing else on the list, getting in position is always there (even while

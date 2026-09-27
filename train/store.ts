@@ -156,6 +156,23 @@ export class Store {
     return rows.map((r) => ({ id: Number(r.id), gen: Number(r.gen), tag: String(r.tag), args: JSON.parse(String(r.args)), forces: JSON.parse(String(r.forces)), tick: Number(r.tick), score: Number(r.score) }));
   }
 
+  /** the highest-priority state whose tag starts with `prefix`, used least so far (the pick marks it used) */
+  pickState(prefix: string): (StateRow & { id: number }) | null {
+    const r = this.s("SELECT * FROM states WHERE tag LIKE ? || '%' ORDER BY used ASC, score DESC, id DESC LIMIT 1").get(prefix) as Record<string, unknown> | undefined;
+    if (!r) return null;
+    this.s('UPDATE states SET used = used + 1 WHERE id = ?').run(Number(r.id));
+    return { id: Number(r.id), gen: Number(r.gen), tag: String(r.tag), args: JSON.parse(String(r.args)), forces: JSON.parse(String(r.forces)), tick: Number(r.tick), score: Number(r.score) };
+  }
+  /** keep only the newest `keep` states whose tag starts with `prefix` */
+  pruneStates(prefix: string, keep: number): number {
+    const r = this.s("DELETE FROM states WHERE tag LIKE ? || '%' AND id NOT IN (SELECT id FROM states WHERE tag LIKE ? || '%' ORDER BY id DESC LIMIT ?)").run(prefix, prefix, keep);
+    return Number(r.changes);
+  }
+  countStates(prefix: string): { n: number; used: number } {
+    const r = this.s("SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN used > 0 THEN 1 ELSE 0 END), 0) AS used FROM states WHERE tag LIKE ? || '%'").get(prefix) as { n: number | bigint; used: number | bigint };
+    return { n: Number(r.n), used: Number(r.used) };
+  }
+
   /** a plan (AUTO playbook entries, routes): the latest under (kind, key) is the current one */
   putPlan(kind: string, key: string, score: number, plan: unknown): number {
     const r = this.s('INSERT INTO plans(kind, key, score, json, at) VALUES(?,?,?,?,?)').run(kind, key, score, JSON.stringify(plan), new Date().toISOString());

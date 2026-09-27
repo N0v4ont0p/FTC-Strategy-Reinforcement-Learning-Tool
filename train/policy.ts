@@ -254,6 +254,25 @@ export class Brain {
       const g = parkGoal(r.alliance, this.pilot, this.parkSlot);
       return new Map([[this.robotId, this.pilot.drive(r, w.tick, g, g.h, { vCap: 18 })]]);
     }
+    if (this.mode === 'defend') {
+      // A DEFENDER (phase 5): in AUTO it only leaves (to its park spot: no AUTO interference, G402);
+      // in TELEOP it shadows the nearest opposing robot 24 in toward that robot's HIVE — in the way of
+      // its shots and of its path home — and it parks for the last 15 s
+      const ph = w.match.phase;
+      this.pilot.others = w.robots.filter((q) => q.id !== this.robotId).map((q) => ({ pos: { x: q.pos.x, y: q.pos.y }, heading: q.heading, spec: q.spec }));
+      if (ph !== 'auto' && ph !== 'teleop') return new Map([[this.robotId, cmd()]]);
+      const park = parkGoal(r.alliance, this.pilot, this.parkSlot);
+      const foe = w.robots.filter((q) => q.alliance !== r.alliance).sort((a, b) => Math.hypot(a.pos.x - r.pos.x, a.pos.y - r.pos.y) - Math.hypot(b.pos.x - r.pos.x, b.pos.y - r.pos.y))[0];
+      if (ph === 'auto' || !foe || w.match.phaseTimeLeft < 15) return new Map([[this.robotId, this.pilot.drive(r, w.tick, park, park.h, { vCap: 18 })]]);
+      const hx = foe.alliance === 'blue' ? BB.BB_HIVE_X : -BB.BB_HIVE_X;
+      const dx = hx - foe.pos.x;
+      const dy = -foe.pos.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const k = Math.min(24, d / 2);
+      // on a 6 in grid: the path is re-planned when the goal moves, not every tick
+      const g = { x: Math.round((foe.pos.x + (k * dx) / d) / 6) * 6, y: Math.round((foe.pos.y + (k * dy) / d) / 6) * 6 };
+      return new Map([[this.robotId, this.pilot.drive(r, w.tick, g, null, { vMax: 45 })]]);
+    }
     const avoid = this.board ? this.board.avoidFor(this.robotId) : NO_AVOID;
     this.pilot.avoidSpots = avoid.spots;
     this.pilot.others = w.robots.length > 1 ? w.robots.filter((q) => q.id !== this.robotId).map((q) => ({ pos: { x: q.pos.x, y: q.pos.y }, heading: q.heading, spec: q.spec })) : [];

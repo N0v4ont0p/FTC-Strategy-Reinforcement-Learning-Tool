@@ -41,8 +41,8 @@
           <canvas id="field" aria-label="Robots on the BIOBUZZ field"></canvas>
           <div class="overlay" id="overlay"></div>
           <div class="empty" id="empty" hidden>
-            <p class="emptyhead">No run open</p>
-            <p>A run is one line of learning: its champion, lessons, checkpoints and history.</p>
+            <p class="emptyhead">No generational run open</p>
+            <p>Training is one button on the <b>Home</b> tab. A generational run (the older trainer) is one line of learning: its champion, lessons, checkpoints and history.</p>
             <button id="btnNew2" type="button">Create a run</button>
           </div>
         </div>
@@ -75,6 +75,8 @@
           <button role="tab" aria-selected="true" data-tab="home" type="button">Home</button>
           <button role="tab" aria-selected="false" data-tab="overview" type="button">Overview</button>
           <button role="tab" aria-selected="false" data-tab="playbook" type="button">Playbook</button>
+          <button role="tab" aria-selected="false" data-tab="routes" type="button">Routes</button>
+          <button role="tab" aria-selected="false" data-tab="mistakes" type="button">Mistakes</button>
           <button role="tab" aria-selected="false" data-tab="race" type="button">Race</button>
           <button role="tab" aria-selected="false" data-tab="report" type="button">Report</button>
           <button role="tab" aria-selected="false" data-tab="runs" type="button">Runs</button>
@@ -87,7 +89,7 @@
 
         <div class="panel" data-panel="home">
           <div class="counters">
-            <div class="big"><span class="k">exam — our robot alone, every partner kind</span><span class="v mono" id="homeExam">—</span><span class="sub" id="homeExamSub">press Train: nothing has been learned yet</span></div>
+            <div class="big"><span class="k">exam — our robot alone, every partner and opponent</span><span class="v mono" id="homeExam">—</span><span class="sub" id="homeExamSub">press Train: nothing has been learned yet</span></div>
             <div class="pair">
               <div><span class="k">state</span><span class="v" id="homeState">idle</span><span class="sub" id="homeDoing"></span></div>
               <div><span class="k">cores busy</span><span class="v mono" id="homeCpu">—</span><span class="sub" id="homeHours"></span></div>
@@ -112,8 +114,12 @@
             <div class="chartlegend" id="homeLegend"></div>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>Beside each partner</h2><span class="sub">exam points, champion vs no-learning</span></div>
+            <div class="cardhead"><h2>Beside each partner</h2><span class="sub">the champion's exam points</span></div>
             <div id="homePartners" class="table"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Against each opponent</h2><span class="sub">the champion's exam points</span></div>
+            <div id="homeOpponents" class="table"></div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Candidates</h2><span class="sub" id="homeLearner"></span></div>
@@ -191,6 +197,43 @@
           <div class="card" id="pbDetail" hidden>
             <div class="cardhead"><h2 id="pbTitle"></h2><button id="pbWatch" type="button">Watch it</button></div>
             <div id="pbSheet"></div>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="routes" hidden>
+          <div class="card">
+            <div class="cardhead"><h2>Route library</h2><span class="sub" id="rtWhen"></span></div>
+            <p class="hint">How the champion scores, cycle by cycle, on its exam matches (every partner kind, every opponent kind — the same matches for every champion). A cycle runs volley to volley; <b>in/min</b> — our robot's elements into the HIVE per minute of it — is what the route is worth (alliance points arrive in lumps when a HIVE tips). Click a route for when it is used, then <b>Watch it</b> in DSIM's replay.</p>
+            <div id="rtList" class="table tall"><p class="hint">After the first exam on the Home page.</p></div>
+          </div>
+          <div class="card" id="rtDetail" hidden>
+            <div class="cardhead"><h2 id="rtTitle"></h2><button id="rtWatch" type="button">Watch it</button></div>
+            <div id="rtSheet" class="table"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Openings</h2><span class="sub">the first four places of TELEOP — the group order</span></div>
+            <div id="rtOpen" class="table"></div>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="mistakes" hidden>
+          <div class="counters">
+            <div class="pair">
+              <div><span class="k">repeat mistakes per match</span><span class="v mono" id="mkRepeats">—</span><span class="sub">the goal: 0</span></div>
+              <div><span class="k">mistakes per match</span><span class="v mono" id="mkPer">—</span><span class="sub" id="mkWho"></span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>By champion</h2><span class="sub">mistakes per exam match</span></div>
+            <canvas id="mkChart" height="150" aria-label="Mistakes and repeat mistakes per exam match, champion by champion"></canvas>
+            <div class="chartlegend" id="mkLegend"></div>
+            <div id="mkKinds" class="table"></div>
+            <p class="hint">Every champion's exam matches are audited: <b>empty trips</b> (a collecting job that got nothing), <b>blocked shots</b>, <b>idle</b> spells (3 s or more standing still, not parking), <b>fouls</b> by rule, <b>stalls</b> (20 s without progress), <b>crashes</b> into the HIVE frame, and <b>judgement</b> mistakes — decisions where thinking ahead beat the network by more than 5 points (from its thinking-ahead exam). A <b>repeat</b> is one the previous champion made too: same match, same moment and place. Each mistake becomes a <b>drill</b>: every 4th training match starts 3 s before one, exactly as it happened, and the champion thinks it through.</p>
+            <div class="sub" id="mkDrills"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>The champion's mistakes</h2><label class="hint">Kind <select id="mkFilter"><option value="">every kind</option><option value="repeat">repeats only</option></select></label></div>
+            <div id="mkList" class="table tall"><p class="hint">After the first exam on the Home page.</p></div>
           </div>
         </div>
 

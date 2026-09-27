@@ -27,6 +27,8 @@ export interface GuardReport {
   strikeProfit: Partial<Record<Alliance, number>>;
   /** rule violations by the robot that committed them (the rules that name one) */
   byRobot: Record<number, Partial<Record<GuardRule, number>>>;
+  /** violations by the offender's alliance (in a 2v2 match the other alliance's fouls are not ours) */
+  byAlliance: Partial<Record<Alliance, Partial<Record<GuardRule, number>>>>;
   events: GuardEvent[];
 }
 
@@ -60,7 +62,7 @@ const frameBars = (): number[][] => [
 ];
 
 export class Guards {
-  private rep: GuardReport = { violations: {}, anomalies: {}, strikeProfit: {}, byRobot: {}, events: [] };
+  private rep: GuardReport = { violations: {}, anomalies: {}, strikeProfit: {}, byRobot: {}, byAlliance: {}, events: [] };
   private struck = new Map<number, number>(); // element id → tick of its latest strike
   private prevKind = new Map<number, string>();
   private prevEl = new Map<number, string>();
@@ -68,6 +70,7 @@ export class Guards {
   private landTick = new Map<number, number>();
   private frameContact = new Set<number>();
   private lastG407 = -10;
+  private who = new Map<number, Alliance>(); // robot id → alliance
   private lastFast = new Map<number, number>();
   private prevSpeed = new Map<number, number>();
   private embedSince = new Map<string, number>();
@@ -75,12 +78,17 @@ export class Guards {
 
   constructor(private rules: RuleOpts, private totalElements = 56) {}
 
-  private add(tick: number, rule: GuardRule | AnomalyKind, detail: string, robot?: number, anomaly = false): void {
+  private add(tick: number, rule: GuardRule | AnomalyKind, detail: string, robot?: number, anomaly = false, alliance?: Alliance): void {
     const bucket = anomaly ? this.rep.anomalies : this.rep.violations;
     (bucket as Record<string, number>)[rule] = ((bucket as Record<string, number>)[rule] ?? 0) + 1;
     if (!anomaly && robot !== undefined) {
       const mine = (this.rep.byRobot[robot] ??= {}) as Record<string, number>;
       mine[rule] = (mine[rule] ?? 0) + 1;
+    }
+    const al = alliance ?? (robot !== undefined ? this.who.get(robot) : undefined);
+    if (!anomaly && al) {
+      const theirs = (this.rep.byAlliance[al] ??= {}) as Record<string, number>;
+      theirs[rule] = (theirs[rule] ?? 0) + 1;
     }
     if (this.rep.events.length < 500) this.rep.events.push({ tick, rule, robot, detail });
   }
@@ -88,6 +96,7 @@ export class Guards {
   /** call once per tick, after the step, with the commands that were applied */
   observe(w: World, applied: Map<number, RobotCommand>): void {
     const t = w.tick;
+    for (const r of w.robots) this.who.set(r.id, r.alliance);
     // DSIM's own fouls/warnings, logged for the report (DSIM already scores them)
     for (const e of w.events) if (/G\d{3}/.test(e)) this.add(t, 'DSIM-foul', e);
 
@@ -114,7 +123,7 @@ export class Guards {
     // G407 as a violation (DSIM only warns): the warning event names the offender's alliance
     for (const e of w.events)
       if (e.includes('G407')) {
-        if (t - this.lastG407 > 1) this.add(t, 'G407-control-over-4', e); // one per episode
+        if (t - this.lastG407 > 1) this.add(t, 'G407-control-over-4', e, undefined, false, /WARNING - RED/.test(e) ? 'red' : /WARNING - BLUE/.test(e) ? 'blue' : undefined); // one per episode
         this.lastG407 = t;
       }
 

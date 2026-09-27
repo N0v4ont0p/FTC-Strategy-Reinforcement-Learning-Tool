@@ -213,7 +213,7 @@ export interface HomeStatusV {
   name: string;
   profile: string;
   running: boolean;
-  champion: { id: number; born: string; learned: boolean; exam: (MeanCiV & { vsBase: MeanCiV; cvar10: number; byPartner: Record<string, number> }) | null };
+  champion: { id: number; born: string; learned: boolean; exam: (MeanCiV & { vsBase: MeanCiV; cvar10: number; byPartner: Record<string, number>; byOpponents: Record<string, number> }) | null };
   base: number | null;
   trend: number | null;
   improving: 'improving' | 'flat' | null;
@@ -237,3 +237,8 @@ export interface HomeV {
   status: HomeStatusV | null;
   busy: { v1: string | null; playbook: string | null };
 }
+
+/** the mistake audit (train/continuous.ts) */
+export type { Audit as AuditV, AuditEntry as AuditEntryV, AuditPoint as AuditPointV } from '../../train/continuous';
+/** the route library (train/routes.ts) */
+export type { RouteLibrary as RouteLibraryV, RouteStat as RouteStatV } from '../../train/routes';

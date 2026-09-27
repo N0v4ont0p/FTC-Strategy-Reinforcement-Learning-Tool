@@ -38,7 +38,9 @@ import { EntNet, entInit, layout, type EntShape } from './entnet';
 import { ENT_PREFIX, ENT_SHAPE, decodeGenome, genomeStyle } from './policy';
 import { N_ENT, N_OPT_IN } from './obs';
 import { entEval, entFit, entGenome, labelRows, learnJob, toLabels } from './entlearn';
-import { Continuous, V2_DIR, examList, sprt, v2Defaults } from './continuous';
+import { Continuous, V2_DIR, examList, sameMistake, sprt, v2Defaults, type AuditEntry } from './continuous';
+import { mineRoutes } from './routes';
+import { OPPONENT_KINDS } from './team';
 
 let fails = 0;
 const check = (name: string, ok: boolean, detail = ''): void => {
@@ -735,6 +737,92 @@ const s2a = runEpisode(s2args(null));
   const pz = await fetch('http://127.0.0.1:4797/api/home/pause', { method: 'POST', body: '{}' });
   await srv.close();
   check('13 studio: the Home page lists the robots and runs; Pause with nothing training is harmless', h.status === 200 && hj.profiles.includes(V1P) && Array.isArray(hj.runs) && pz.status === 200);
+}
+
+// ---- 14. opponents and the route library (MASTERPLAN phase 5) ----------------------------------------------------
+{
+  const a2 = (seed: number, o: Partial<EpisodeArgs> = {}): EpisodeArgs => ({ genome: null, profile: V1P, sampleProfile: true, seed, stage: 'full', driver: 'oracle', track: false, record: false, routes: true, ...o });
+  const vs = Object.fromEntries((['presets', 'mirror', 'defense'] as const).map((k) => [k, runEpisode(a2(21, { opponents: k, frames: true }))]));
+  const ok2 = Object.values(vs).every((r) => r.death !== 'crash' && r.parts.shotsIn > 10 && (r.opponents?.score ?? 0) > 30 && r.frames!.oppSpecs?.length === 2 && r.frames!.f.every((f) => f.opp?.length === 2));
+  check('14 opponents: a red alliance plays full 2v2 matches (DSIM presets, two copies of our robot, a defender): both alliances score, the frames carry every robot', ok2, Object.entries(vs).map(([k, r]) => `${k}: us ${r.reward}, red ${r.opponents!.score}`).join(', '));
+  const again = runEpisode(a2(21, { opponents: 'defense', frames: true }));
+  check('14 opponents: a 2v2 match is deterministic', again.reward === vs.defense.reward && again.ticks === vs.defense.ticks && again.frames!.f.length === vs.defense.frames!.f.length);
+  let close = 0;
+  let minD = Infinity;
+  for (const f of vs.defense.frames!.f)
+    if (f.m[0] === 'teleop' && f.opp) {
+      const d = Math.hypot(f.opp[0][0] - f.r[0], f.opp[0][1] - f.r[1]);
+      minD = Math.min(minD, d);
+      if (d < 36) close++;
+    }
+  check('14 opponents: the defender shadows our robot in TELEOP (close to it, between it and its HIVE)', (close * 2) / 60 >= 10, `${((close * 2) / 60).toFixed(0)} s within 36 in, closest ${minD.toFixed(0)} in`);
+  const tiles = (r: EpisodeResult): boolean => !!r.cycles && r.cycles.length > 10 && r.cycles.every((c, i) => c.t1 >= c.t0 && (i === 0 || c.t0 >= r.cycles![i - 1].t1)) && r.cycles.reduce((x, c) => x + c.mine, 0) === r.parts.shotsIn;
+  check('14 routes: cycles run volley to volley and tile the match; every one of our shots that went in is credited to exactly one (in 2v2 too: only our own shots count)', Object.values(vs).every(tiles) && tiles(runEpisode(a2(22))));
+  const ms = [22, 23, 24].map((seed, i) => {
+    const r = runEpisode(a2(seed, { opponents: OPPONENT_KINDS[i + 1] }));
+    return { match: i, partner: 'none', opponents: OPPONENT_KINDS[i + 1], reward: r.reward, cycles: r.cycles!, teleopStart: Math.round((4 + 30 + 8) * 60), end: Math.round((4 + 158) * 60) };
+  });
+  const lib = mineRoutes(ms, 0);
+  const shares = lib.routes.reduce((x, r) => x + r.share, 0);
+  check('14 route library: every cycle in exactly one route; each route with its rate, when it is used and an exam moment to watch', Math.abs(shares - 1) < 1e-9 && lib.cycles === ms.reduce((x, m) => x + m.cycles.length, 0) && lib.routes.every((r) => r.example.match >= 0 && r.example.match < 3 && ms[r.example.match].cycles.some((c) => c.t0 === r.example.t0) && r.when.auto + r.when.teleop + r.when.endgame === r.n) && lib.openings.length > 0, `${lib.routes.length} routes from ${lib.cycles} cycles`);
+  const ex = examList(v2Defaults(V1P));
+  const pairs = new Set(ex.map((e) => `${e.partner}|${e.opponents}`));
+  check('14 exam: every partner kind meets every opponent kind, the same matches forever', pairs.size === v2Defaults(V1P).partners.length * v2Defaults(V1P).opponents.length && ex.length === 144);
+  const srv = startServer(4796, undefined, { noResume: true });
+  const rt = await fetch('http://127.0.0.1:4796/api/routes');
+  const rj = (await rt.json()) as { library: unknown };
+  await srv.close();
+  check('14 studio: the route library is served (none before a run has taken its exam)', rt.status === 200 && 'library' in rj);
+}
+
+// ---- 15. the mistake audit and drills (MASTERPLAN phase 6) --------------------------------------------------------
+{
+  const a3 = (seed: number, o: Partial<EpisodeArgs> = {}): EpisodeArgs => ({ genome: null, profile: V1P, sampleProfile: true, seed, stage: 'full', driver: 'oracle', track: false, record: false, audit: true, ...o });
+  const R = [31, 32, 33, 34].map((s) => runEpisode(a3(s, s === 34 ? { opponents: 'defense' } : {})));
+  const kinds = new Set(['empty-trip', 'blocked-shot', 'idle', 'foul', 'stall', 'crash', 'judgement']);
+  const consistent = R.every((r) => {
+    const A = r.audit ?? [];
+    const n = (k: string): number => A.filter((x) => x.kind === k).length;
+    return A.every((x, i) => kinds.has(x.kind) && (i === 0 || x.tick >= A[i - 1].tick)) && n('empty-trip') === r.mistakes.emptyTrips && n('blocked-shot') === r.mistakes.blockedShots && n('stall') === r.mistakes.stalls && n('crash') === (r.death === 'crash' ? 1 : 0) && A.filter((x) => x.kind === 'idle').every((x) => x.cost >= 3);
+  });
+  check('15 audit: every mistake of a match with its moment and cost — empty trips, blocked shots, stalls and crashes agree with the match\'s own counts; idle spells are 3 s or more', consistent && R.some((r) => (r.audit ?? []).length > 0), R.map((r) => `${(r.audit ?? []).length}`).join(', ') + ' mistakes');
+  // a search's changes replayed as forced choices rebuild its match exactly (a judgement drill's recipe)
+  const sm = runEpisode(s2args(null, { searchWindow: undefined, seed: 12 }));
+  const forces: [number, string][] = (sm.labels ?? []).filter((l) => l.change).map((l) => [l.tick, l.change!.key]);
+  const rp = runEpisode({ ...s2args(null, { seed: 12 }), search2: undefined, keepSearched: false, searchWindow: undefined, forces });
+  check('15 drills: a thought-through match is rebuilt exactly from its forced choices (a state\'s recipe), without searching', forces.length >= 2 && rp.reward === sm.reward && rp.ticks === sm.ticks, `${forces.length} changes, ${sm.reward} vs ${rp.reward}`);
+  // a drill: the recipe up to a moment, then the champion, thinking ahead
+  const dtick = forces[1][0] + 1;
+  const dr = runEpisode({ ...s2args(null, { seed: 12 }), forces: forces.slice(0, 2), handover: { tick: dtick, genome: entGenome(9) }, searchWindow: [dtick, dtick + 600] });
+  check('15 drills: a drill replays the recipe to its moment, hands over and searches only from there', (dr.labels ?? []).length >= 1 && (dr.labels ?? []).every((l) => l.tick >= dtick && l.tick < dtick + 600));
+  const e = (o: Partial<AuditEntry>): AuditEntry => ({ tick: 1000, kind: 'empty-trip', cost: 2, detail: 'x', x: 10, y: 10, match: 3, repeat: false, ...o });
+  check('15 repeats: the same kind of mistake in the same exam match, within 5 s and 24 in, is a repeat; elsewhere or later it is not', sameMistake(e({}), e({ tick: 1200, x: 20 })) && !sameMistake(e({}), e({ match: 4 })) && !sameMistake(e({}), e({ tick: 1400 })) && !sameMistake(e({}), e({ x: 60 })) && !sameMistake(e({ kind: 'foul', detail: 'G417' }), e({ kind: 'foul', detail: 'G409' })));
+  // the engine: an audited champion, its drills, drill matches among the actors'
+  const name = '_check-v2d';
+  rmSync(join(V2_DIR, name), { recursive: true, force: true });
+  const cfg = { ...v2Defaults(V1P), workers: 6, search: QUICK2, window: 600, learnEvery: 1e9, examSeeds: 1, partners: ['none', 'parker'] as ('none' | 'parker')[] };
+  const c = new Continuous(name, cfg);
+  const t0 = Date.now();
+  c.start();
+  while (!(c.st.totals.drills ?? 0) && Date.now() - t0 < 300_000) await new Promise((res) => setTimeout(res, 1000));
+  c.stop('paused');
+  const au = c.audit();
+  const drillRows = Number((c.store.db.prepare("SELECT COUNT(*) AS n FROM matches WHERE kind = 'drill'").get() as { n: number }).n);
+  const ds = c.store.countStates('drill:');
+  let replayOk = false;
+  if (au?.items.length) {
+    const m = c.mistakeArgs(0);
+    const rr = runEpisode({ ...m.args, audit: true, frames: false });
+    replayOk = (rr.audit ?? []).some((x) => x.kind === au.items[0].kind && x.tick === au.items[0].tick);
+  }
+  check('15 continuous: the no-learning champion\'s exam is audited, its mistakes become drills, and actors play them', !!au && au.champion === 0 && au.items.every((x) => x.match >= 0 && x.match < 2 && !x.repeat) && ds.n > 0 && drillRows >= 1 && c.st.audits.length === 1, `${au?.items.length ?? 0} mistakes, ${ds.n} drills, ${drillRows} drill matches, ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+  check('15 continuous: a mistake replays exactly where the audit found it (the Mistakes page\'s "watch")', !au?.items.length || replayOk);
+  c.store.close();
+  rmSync(join(V2_DIR, name), { recursive: true, force: true });
+  const srv = startServer(4795, undefined, { noResume: true });
+  const mk = await fetch('http://127.0.0.1:4795/api/mistakes');
+  await srv.close();
+  check('15 studio: the Mistakes page is served', mk.status === 200 && 'audit' in ((await mk.json()) as object));
 }
 
 console.log(fails === 0 ? '\nTRAINING PLATFORM GATE: ALL PASS' : `\nTRAINING PLATFORM GATE: ${fails} FAIL`);

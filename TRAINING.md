@@ -134,12 +134,48 @@ The **Home** tab is the new way to train: pick the robot, press **Train**, and i
 - Every few hours the champion also takes a **thinking-ahead exam** (6 solo exam matches with the
   search on): the goal of phase 4 is the network alone as good as the network with search.
 
+- **Opponents** (phase 5): matches also bring a **red alliance** — DSIM's Skimmer + Sniper playing
+  their own game, two copies of our robot (in the actors' matches they carry the champion's network:
+  self-play), or a **defender** (a Sniper that shadows our robot toward our HIVE in TELEOP and parks
+  at the end) beside a Skimmer. In the exam every partner kind meets every opponent kind (144
+  matches). Only our alliance's fouls count against us; only our robot's own shots are its shots.
+
 Home shows the champion's exam score and its trend, how busy the cores are, lessons learned, every
 candidate's verdict, the exam beside each partner kind and what it is doing now. Evaluator work jumps
 the queue, then the learner, then the actors, so nothing waits long and no core idles. It survives a
-crash or a restart (the service carries on where it was); Pause is the only stop. One trainer at a
+crash or a restart (the service carries on where it was); Pause is the only stop. While it trains
+the Mac is kept awake. The Store keeps the newest 300 000 lessons (~1.5 GB; the learner reads the
+newest 40 000). One trainer at a
 time: Train is refused while a generational run trains or the playbook builds, and the other way
 round.
+
+## Routes (v2 phase 5)
+
+The **Routes** tab is the champion's **route library** (`train/routes.ts`), mined from its exam
+matches every time a champion is crowned. A **cycle** runs volley to volley: from the end of one
+volley to the last shot of the next (the robot fires on the move, so cycles are its real
+pickups and shots, not its jobs). A **route** is a kind of cycle: where it picked up (a field
+region, the loading zone, a FLOWER, the tip cycle by the HIVE) and where it shot from. Each route
+shows how often it is used, its cycle time, **our robot's elements into the HIVE per cycle and per
+minute** (the rate; alliance points arrive in lumps when a HIVE tips, so they are shown only as
+context), when it is used (AUTO, TELEOP, the last 30 s), beside which partners and against which
+opponents, and **Watch it** replays an exam match at that moment. **Openings** lists the first four
+places of TELEOP match by match — the group order — with each match's points.
+
+## Mistakes (v2 phase 6)
+
+The **Mistakes** tab is the audit (MASTERPLAN §7). Every champion's exam matches are audited:
+**empty trips** (a collecting job that got nothing), **blocked shots**, **idle** spells (3 s or more
+standing still, not parking), **fouls** by rule, **stalls** (20 s without progress), **crashes**
+into the HIVE frame — and, from its thinking-ahead exam, **judgement** mistakes: decisions where
+thinking ahead beat the network by more than 5 points. A **repeat** is a mistake the previous
+champion made too (same exam match, same kind, within 5 s and 24 in); the goal is none. Each mistake
+has a **watch** button (the exam match replayed from 3 s before it).
+
+Every mistake becomes a **drill**: its state is kept in the Store as a recipe (the exam match, the
+choices made on the way, the moment 3 s before), and every 4th training match starts there — rebuilt
+exactly, handed over to the current champion, thought through with the search — so the network
+learns most where it went wrong. The thinking-ahead exam's decisions are lessons too.
 
 ## Start and stop everything
 
@@ -347,6 +383,7 @@ Keys: `p` pause, `o` open the studio, `q` stop.
 | `outputs/imitation/` | replay data sets, the fitted network, the distilled no-learning network, the starting predictor |
 | `profiles/real-v0.json` | the team robot's ranges |
 | `runs/.v2/<robot>/state.json` · `store.db` · `events.jsonl` | continuous training (Home): its state, every searched decision, the log |
+| `runs/.v2/<robot>/routes.json` · `audit.json` | the champion's route library and mistake audit |
 
 ## Checks
 

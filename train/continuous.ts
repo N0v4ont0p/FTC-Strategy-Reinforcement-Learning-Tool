@@ -12,6 +12,17 @@
 //     robot draws forever — paired against the champion's own exam matches, and promotes it by a
 //     sequential probability ratio test (SPRT: it stops as soon as the evidence is clear), never with
 //     a worse worst tenth. The actors pick a new champion up at their next match.
+//   · OPPONENTS (phase 5): matches bring a red alliance too — DSIM's presets, two copies of our robot
+//     (carrying the champion's network in the actors' matches: self-play), a defender — in the exam
+//     every partner kind meets every opponent kind. Each champion's exam matches also give the
+//     ROUTE LIBRARY (train/routes.ts): how it scores, cycle by cycle.
+//   · THE MISTAKE AUDIT (phase 6, MASTERPLAN §7): each champion's exam matches are audited — empty
+//     trips, blocked shots, idle spells, fouls, stalls, crashes — and its thinking-ahead exam adds the
+//     JUDGEMENT mistakes (decisions where the search beat the network by more than JUDGE_PTS). A
+//     mistake the previous champion made in the same match, at the same moment and place, is a REPEAT
+//     (the goal: none). Every mistake becomes a DRILL: its state (a recipe: the exam match, the choices
+//     on the way, the moment 3 s before) goes to the Store, and every DRILL_EVERY-th actor match
+//     starts there, hands over to the current champion and thinks ahead through it.
 // Until the first network beats it, the champion is the no-learning robot (the greedy order).
 // Evaluator jobs jump the queue, then the learner, then actors: nothing waits long, nothing idles.
 // State: runs/.v2/<name>/state.json (written atomically) + store.db. A studio restarted after a crash
@@ -20,22 +31,33 @@ import { EventEmitter } from 'node:events';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { availableParallelism } from 'node:os';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { WorkerPool, type Job } from '../harness/pool';
 import { seedOf } from '../harness/rng';
 import { C, DT } from '../harness/dsim';
 import { loadProfile, profileProblems } from '../harness/profiles';
 import { RUNS, ROOT, meanCi, type MeanCi } from './engine';
-import { SEARCH2, type EpisodeArgs, type EpisodeResult, type Search2Spec } from './episode';
+import { JUDGE_PTS, SEARCH2, type AuditItem, type EpisodeArgs, type EpisodeResult, type MistakeKind, type Search2Spec } from './episode';
+import { mineRoutes, type RouteLibrary } from './routes';
 import { Store } from './store';
 import { entGenome, labelRows, type EntFitReport, type LearnArgs, type LearnResult } from './entlearn';
-import type { PartnerKind } from './team';
+import type { OpponentKind, PartnerKind } from './team';
 
 export const V2_DIR = join(RUNS, '.v2');
-export const V2_VERSION = 1;
+export const V2_VERSION = 2; // 2: the exam brings opponents
 const EXAM_SEED = 525_252;
 const PRE = Math.round(C.PRE_COUNTDOWN / DT);
 const PLAY_END = Math.round((C.PRE_COUNTDOWN + C.AUTO_DURATION + C.TRANSITION_DURATION + C.TELEOP_DURATION) / DT);
+const TELEOP_START = Math.round((C.PRE_COUNTDOWN + C.AUTO_DURATION + C.TRANSITION_DURATION) / DT);
 const PRI = { actor: 0, learner: 1, exam: 2 } as const;
+const DRILL_EVERY = 4; // every 4th actor match is a drill (when there are drills)
+const DRILL_LEAD = 180; // a drill starts 3 s before its mistake
+const DRILLS_PER_EXAM = 60; // the costliest mistakes of each audited exam become drills
+const DRILLS_KEPT = 400;
+/** searched decisions kept in the Store (~5 KB each: ~1.5 GB); the learner reads the newest 40 000 */
+const STORE_KEEP = 300_000;
+const REPEAT_TICKS = 300; // a repeat: the same kind of mistake in the same exam match within 5 s …
+const REPEAT_IN = 24; // … and 24 in
 const seed7 = (...p: (number | string)[]): number => seedOf(...p) % 1_000_000_007;
 const now = (): string => new Date().toISOString();
 
@@ -49,6 +71,7 @@ export interface V2Config {
   epochs: number;
   examSeeds: number; // exam matches per partner kind
   partners: (PartnerKind | 'none')[];
+  opponents: OpponentKind[]; // the red alliances matches bring (the exam: each seed its own, in turn)
   sprt: { delta: number; alpha: number; beta: number; sigmaFloor: number; minN: number; chunk: number };
   tailTol: number; // the candidate's worst tenth may be at most this much below the champion's
 }
@@ -62,6 +85,7 @@ export const v2Defaults = (profile: string): V2Config => ({
   epochs: 4,
   examSeeds: 24,
   partners: ['none', 'real', 'skimmer', 'sniper', 'hauler', 'parker'],
+  opponents: ['none', 'presets', 'mirror', 'defense'],
   sprt: { delta: 4, alpha: 0.05, beta: 0.1, sigmaFloor: 10, minN: 36, chunk: 36 },
   tailTol: 5,
 });
@@ -76,6 +100,7 @@ export interface ExamSummary extends MeanCi {
   vsBase: MeanCi;
   cvar10: number;
   byPartner: Record<string, number>;
+  byOpponents: Record<string, number>;
 }
 export interface CandidateRecord {
   time: string;
@@ -106,10 +131,33 @@ export interface V2State {
   nextId: number;
   actorSeq: number; // actor matches handed out (their seeds)
   labelsAtLearn: number;
-  totals: { matches: number; labels: number; examMatches: number; wallSeconds: number; busySeconds: number; promotions: number; rejections: number };
+  totals: { matches: number; labels: number; examMatches: number; wallSeconds: number; busySeconds: number; promotions: number; rejections: number; drills?: number };
   history: HistoryPoint[];
   candidates: CandidateRecord[];
   searchExam: { time: string; hours: number; champion: number; n: number; alone: number; search: number; gain: MeanCi } | null;
+  audits: AuditPoint[]; // one per audited champion
+}
+/** a mistake as the audit keeps it: which exam match, whether the previous champion made it too */
+export interface AuditEntry extends AuditItem {
+  match: number;
+  repeat: boolean;
+  forces?: [number, string][]; // judgement mistakes: the search's earlier changes (to replay the match to it)
+}
+export interface Audit {
+  champion: number;
+  time: string;
+  matches: number;
+  items: AuditEntry[];
+  judged: number[]; // exam matches the thinking-ahead exam audited (judgement mistakes)
+  prevJudgement: AuditEntry[]; // the previous champion's (repeats are judged against them)
+}
+export interface AuditPoint {
+  time: string;
+  champion: number;
+  perMatch: number; // mistakes per exam match
+  byKind: Partial<Record<MistakeKind, number>>; // …per match, by kind
+  repeats: number; // repeat mistakes per match
+  judgement: number | null; // judgement mistakes per thinking-ahead exam match
 }
 /** how the champion alone compares with the champion thinking ahead (MASTERPLAN phase 4's pass
  * condition: the network alone reaches the search): this many solo exam matches, at most this often */
@@ -135,11 +183,13 @@ export const cvar10 = (v: number[]): number => {
 export interface ExamEntry {
   seed: number;
   partner: PartnerKind | 'none';
+  opponents: OpponentKind;
 }
-/** the fixed exam: every partner kind, the same seeds forever, interleaved so any prefix covers them all */
-export function examList(c: Pick<V2Config, 'examSeeds' | 'partners'>): ExamEntry[] {
+/** the fixed exam: every partner kind against every opponent kind, the same seeds forever, interleaved
+ * so any prefix covers them all */
+export function examList(c: Pick<V2Config, 'examSeeds' | 'partners' | 'opponents'>): ExamEntry[] {
   const out: ExamEntry[] = [];
-  for (let k = 0; k < c.examSeeds; k++) for (const p of c.partners) out.push({ seed: seed7(EXAM_SEED, p, k), partner: p });
+  for (let k = 0; k < c.examSeeds; k++) for (const p of c.partners) out.push({ seed: seed7(EXAM_SEED, p, k), partner: p, opponents: c.opponents[k % c.opponents.length] });
   return out;
 }
 
@@ -170,6 +220,7 @@ export class Continuous extends EventEmitter {
   private failures = 0;
   private searchExamRunning = false;
   private recent: string[] = [];
+  private awake: ChildProcess | null = null; // caffeinate: the Mac stays awake while it trains
   problems: string[] = [];
 
   /** open (or create) the run for a robot profile */
@@ -193,10 +244,11 @@ export class Continuous extends EventEmitter {
         learner: { genome: entGenome(seedOf(name, 'learner')), lr: 0.002, runs: 0, last: null, before: null, tried: [] },
         nextId: 1, actorSeq: 0, labelsAtLearn: 0,
         totals: { matches: 0, labels: 0, examMatches: 0, wallSeconds: 0, busySeconds: 0, promotions: 0, rejections: 0 },
-        history: [], candidates: [], searchExam: null,
+        history: [], candidates: [], searchExam: null, audits: [],
       };
       this.save();
     }
+    this.st.audits ??= [];
     this.store = new Store(join(this.dir, 'store.db'));
   }
   get name(): string {
@@ -226,6 +278,10 @@ export class Continuous extends EventEmitter {
   private args(genome: string | null, seed: number, partner: PartnerKind | 'none', o: Partial<EpisodeArgs> = {}): EpisodeArgs {
     return { genome, profile: this.st.config.profile, sampleProfile: true, seed, stage: 'full', driver: 'oracle', track: false, record: false, ...(partner !== 'none' ? { partner: { kind: partner } } : {}), ...o };
   }
+  /** exam match `e` for a network (the opponents always the no-learning order: the exam never changes) */
+  private examArgs(genome: string | null, e: ExamEntry, o: Partial<EpisodeArgs> = {}): EpisodeArgs {
+    return this.args(genome, e.seed, e.partner, { ...(e.opponents !== 'none' ? { opponents: e.opponents } : {}), routes: true, audit: true, ...o });
+  }
   private job(a: EpisodeArgs): Job {
     return { module: '../train/episode.ts', fn: 'runEpisode', args: a };
   }
@@ -246,6 +302,10 @@ export class Continuous extends EventEmitter {
     this.startedAt = Date.now();
     this.pool = new WorkerPool(this.st.config.workers);
     this.save();
+    if (process.platform === 'darwin' && !this.awake) {
+      this.awake = spawn('caffeinate', ['-ims', '-w', String(process.pid)], { stdio: 'ignore' });
+      this.awake.on('error', () => (this.awake = null));
+    }
     this.say(`training ${basename(this.st.config.profile, '.json')}: ${this.st.config.workers} workers`);
     this.timers.push(
       setInterval(() => {
@@ -275,6 +335,8 @@ export class Continuous extends EventEmitter {
     this.active = false;
     if (why !== 'interrupted') this.st.running = false;
     for (const t of this.timers) clearInterval(t);
+    this.awake?.kill();
+    this.awake = null;
     this.timers = [];
     this.pool?.close();
     this.pool = null;
@@ -311,9 +373,17 @@ export class Continuous extends EventEmitter {
     const champ = s.champion;
     this.searchExamRunning = true;
     this.say(`thinking-ahead exam: champion #${champ.id} with search on ${idx.length} solo exam matches`);
-    Promise.all(idx.map((i) => this.run<EpisodeResult>(this.job(this.args(champ.genome, list[i].seed, 'none', { search2: s.config.search })), PRI.learner)))
+    Promise.all(idx.map((i) => this.run<EpisodeResult>(this.job(this.examArgs(champ.genome, list[i], { search2: s.config.search, keepSearched: true, routes: false, audit: false })), PRI.learner)))
       .then((res) => {
         if (pool !== this.pool || champ !== this.st.champion) return;
+        // its searched decisions are lessons too (whole matches, every job start)
+        res.forEach((r, k) => {
+          const id = this.store.addMatch({ gen: champ.id, kind: 'search-exam', seed: list[idx[k]].seed, partner: 'none', start: r.start ?? 'F3', reward: r.reward, score: r.score });
+          const rows = labelRows(r, id, champ.id, s.config.search);
+          this.store.tx(() => this.store.addDecisions(rows));
+          this.st.totals.labels += rows.length;
+        });
+        this.judge(res, idx, champ);
         const srch = res.map((r) => r.reward);
         const alone = idx.map((i) => champ.exam[i]);
         const gain = meanCi(srch.map((x, k) => x - alone[k]));
@@ -353,14 +423,24 @@ export class Continuous extends EventEmitter {
       const n = this.st.actorSeq++;
       const c = this.st.config;
       const partner = c.partners[n % c.partners.length];
+      const opponents = c.opponents[Math.floor(n / c.partners.length) % c.opponents.length];
       const seed = seed7(this.st.name, 'actor', n);
       const from = PRE + (seedOf(seed, 'window') % Math.max(1, PLAY_END - PRE - c.window));
       const genome = this.st.champion.genome;
       const champ = this.st.champion.id;
-      this.run<EpisodeResult>(this.job(this.args(genome, seed, partner, { search2: c.search, keepSearched: true, searchWindow: [from, from + c.window] })), PRI.actor)
+      // a DRILL: a mistake's moment, replayed exactly, handed over to the champion, thought through
+      const drill = n % DRILL_EVERY === DRILL_EVERY - 1 ? this.store.pickState('drill:') : null;
+      const args: EpisodeArgs = drill
+        ? { ...(drill.args as EpisodeArgs), forces: drill.forces, handover: { tick: drill.tick, genome }, search2: c.search, keepSearched: true, searchWindow: [drill.tick, drill.tick + c.window] }
+        : // copies of our robot on red carry the champion too: self-play
+          this.args(genome, seed, partner, { search2: c.search, keepSearched: true, searchWindow: [from, from + c.window], ...(opponents !== 'none' ? { opponents, opponentGenome: genome } : {}) });
+      this.run<EpisodeResult>(this.job(args), PRI.actor)
         .then((r) => {
           if (pool !== this.pool) return;
-          const id = this.store.addMatch({ gen: champ, kind: 'actor', seed, partner, start: r.start ?? 'F3', reward: r.reward, score: r.score, info: { window: [from, from + c.window], searched: r.searched, mistakes: r.mistakes } });
+          const id = drill
+            ? this.store.addMatch({ gen: champ, kind: 'drill', seed: args.seed, partner: args.partner?.kind ?? 'none', start: r.start ?? 'F3', reward: r.reward, score: r.score, info: { drill: drill.tag, tick: drill.tick, searched: r.searched } })
+            : this.store.addMatch({ gen: champ, kind: 'actor', seed, partner, start: r.start ?? 'F3', reward: r.reward, score: r.score, info: { window: [from, from + c.window], searched: r.searched, mistakes: r.mistakes, opponents } });
+          if (drill) this.st.totals.drills = (this.st.totals.drills ?? 0) + 1;
           const rows = labelRows(r, id, champ, c.search);
           this.store.tx(() => this.store.addDecisions(rows));
           this.st.totals.matches++;
@@ -398,6 +478,8 @@ export class Continuous extends EventEmitter {
         L.before = r.before;
         L.tried = r.tried;
         const id = this.st.nextId++;
+        const pruned = this.store.pruneDecisions(STORE_KEEP);
+        if (pruned) this.say(`the Store keeps the newest ${STORE_KEEP.toLocaleString('en-US')} decisions (${pruned} older ones dropped)`);
         this.say(`candidate #${id}: held-out agrees with the search ${(100 * r.report.agree).toFixed(0)}% (was ${(100 * r.before.agree).toFixed(0)}%), gives away ${r.report.regret.toFixed(1)} pts per decision (was ${r.before.regret.toFixed(1)}); learning rate ${r.lr.toPrecision(2)}`);
         this.pending = { ...r, id };
         this.save();
@@ -415,11 +497,15 @@ export class Continuous extends EventEmitter {
     const list = examList(this.st.config);
     this.say(`exam: the no-learning robot on ${list.length} matches (every partner kind)`);
     const pool = this.pool!;
-    const res = await Promise.all(list.map((e) => this.run<EpisodeResult>(this.job(this.args(null, e.seed, e.partner)), PRI.exam)));
+    const res = await Promise.all(list.map((e) => this.run<EpisodeResult>(this.job(this.examArgs(null, e)), PRI.exam)));
     if (pool !== this.pool) return;
     this.st.base = res.map((r) => r.reward);
     this.st.totals.examMatches += res.length;
-    if (!this.st.champion.genome) this.st.champion.exam = [...this.st.base];
+    if (!this.st.champion.genome) {
+      this.st.champion.exam = [...this.st.base];
+      this.saveRoutes(res, 0);
+      this.saveAudit(res, 0);
+    }
     this.point();
     this.say(`no-learning robot: ${meanCi(this.st.base).mean.toFixed(1)} on the exam`);
     this.save();
@@ -434,14 +520,16 @@ export class Continuous extends EventEmitter {
     const champ = this.st.champion;
     if (champ.exam.length !== list.length) return; // (the baseline exam comes first)
     const got: number[] = [];
+    const played: EpisodeResult[] = [];
     this.evaluating = { id: cand.id, done: 0, total: list.length };
     let verdict: 'H1' | 'H0' | null = null;
     try {
       for (let i = 0; i < list.length && verdict === null; i += c.sprt.chunk) {
         const part = list.slice(i, i + c.sprt.chunk);
-        const res = await Promise.all(part.map((e) => this.run<EpisodeResult>(this.job(this.args(cand.genome, e.seed, e.partner)), PRI.exam)));
+        const res = await Promise.all(part.map((e) => this.run<EpisodeResult>(this.job(this.examArgs(cand.genome, e)), PRI.exam)));
         if (pool !== this.pool) return;
         got.push(...res.map((r) => r.reward));
+        played.push(...res);
         this.st.totals.examMatches += res.length;
         this.evaluating = { id: cand.id, done: got.length, total: list.length };
         this.emit('status', this.status());
@@ -455,9 +543,10 @@ export class Continuous extends EventEmitter {
       if (promote && got.length < list.length) {
         // a champion's exam is always the whole list (the next candidate is paired with all of it)
         const rest = list.slice(got.length);
-        const res = await Promise.all(rest.map((e) => this.run<EpisodeResult>(this.job(this.args(cand.genome, e.seed, e.partner)), PRI.exam)));
+        const res = await Promise.all(rest.map((e) => this.run<EpisodeResult>(this.job(this.examArgs(cand.genome, e)), PRI.exam)));
         if (pool !== this.pool) return;
         got.push(...res.map((r) => r.reward));
+        played.push(...res);
         this.st.totals.examMatches += res.length;
       }
       this.st.candidates = [...this.st.candidates.slice(-49), { time: now(), id: cand.id, lr: cand.lr, verdict: promote ? 'promoted' : 'rejected', n: diff.n, diff, learn: cand.report }];
@@ -466,6 +555,8 @@ export class Continuous extends EventEmitter {
         this.st.champion = { id: cand.id, genome: cand.genome, born: now(), exam: got };
         this.st.totals.promotions++;
         this.point();
+        this.saveRoutes(played, cand.id);
+        this.saveAudit(played, cand.id);
         this.say(`★ new champion #${cand.id}: ${sgn(diff.mean)} ± ${diff.ci95.toFixed(1)} over #${champ.id} on ${diff.n} exam matches — exam ${meanCi(got).mean.toFixed(1)}`);
         this.emit('champion', this.status().champion);
       } else {
@@ -483,6 +574,94 @@ export class Continuous extends EventEmitter {
       }
     }
   }
+  /** the champion's route library, from its exam matches */
+  private saveRoutes(res: EpisodeResult[], champion: number): void {
+    const list = examList(this.st.config);
+    const lib = mineRoutes(
+      res.map((r, i) => ({ match: i, partner: list[i].partner, opponents: list[i].opponents, reward: r.reward, cycles: r.cycles ?? [], teleopStart: TELEOP_START, end: PLAY_END })),
+      champion,
+    );
+    writeFileSync(join(this.dir, 'routes.json'), JSON.stringify(lib));
+    this.emit('routes', lib);
+  }
+  /** the champion's mistake audit, its repeats against the previous champion's, and its drills */
+  private saveAudit(res: EpisodeResult[], champion: number): void {
+    const prev = this.audit();
+    const items: AuditEntry[] = res.flatMap((r, i) => (r.audit ?? []).map((a) => ({ ...a, match: i, repeat: false })));
+    if (prev) for (const it of items) it.repeat = prev.items.some((p) => sameMistake(p, it));
+    const a: Audit = { champion, time: now(), matches: res.length, items, judged: [], prevJudgement: prev?.items.filter((x) => x.kind === 'judgement') ?? [] };
+    writeFileSync(join(this.dir, 'audit.json'), JSON.stringify(a));
+    const n = Math.max(1, res.length);
+    const byKind: Partial<Record<MistakeKind, number>> = {};
+    for (const it of items) byKind[it.kind] = (byKind[it.kind] ?? 0) + 1 / n;
+    this.st.audits.push({ time: a.time, champion, perMatch: items.length / n, byKind, repeats: items.filter((x) => x.repeat).length / n, judgement: null });
+    // the costliest become drills (a state 3 s before, reached exactly as in the exam)
+    const list = examList(this.st.config);
+    const genome = this.st.champion.genome;
+    this.store.tx(() => {
+      for (const it of [...items].sort((x, y) => y.cost - x.cost).slice(0, DRILLS_PER_EXAM)) {
+        const { routes: _r, audit: _a, ...args } = this.examArgs(genome, list[it.match]);
+        this.store.addState({ gen: champion, tag: `drill:${it.kind}`, args, forces: [], tick: Math.max(PRE + 1, it.tick - DRILL_LEAD), score: it.cost });
+      }
+      this.store.pruneStates('drill:', DRILLS_KEPT);
+    });
+    this.emit('audit', a);
+    this.say(`audit of champion #${champion}: ${(items.length / n).toFixed(1)} mistakes per exam match, ${items.filter((x) => x.repeat).length} repeats`);
+  }
+  /** judgement mistakes from the thinking-ahead exam: where the search beat the network clearly */
+  private judge(res: EpisodeResult[], idx: number[], champ: Champion): void {
+    const a = this.audit();
+    if (!a || a.champion !== champ.id) return;
+    const list = examList(this.st.config);
+    const found: AuditEntry[] = [];
+    res.forEach((r, k) => {
+      const forces: [number, string][] = [];
+      for (const l of r.labels ?? []) {
+        if (!l.change) continue;
+        const gain = (l.q[l.chosen] ?? 0) - (l.q[l.net] ?? 0);
+        if (gain > JUDGE_PTS) found.push({ tick: l.tick, kind: 'judgement', cost: gain, detail: `network: ${l.change.from} · search: ${l.change.to}`, x: 0, y: 0, match: idx[k], repeat: false, forces: [...forces] });
+        forces.push([l.tick, l.change.key]);
+      }
+    });
+    for (const it of found) it.repeat = a.prevJudgement.some((p) => sameMistake(p, it));
+    a.items = [...a.items.filter((x) => x.kind !== 'judgement'), ...found];
+    a.judged = idx;
+    writeFileSync(join(this.dir, 'audit.json'), JSON.stringify(a));
+    const last = this.st.audits[this.st.audits.length - 1];
+    if (last?.champion === champ.id) last.judgement = found.length / Math.max(1, idx.length);
+    this.store.tx(() => {
+      for (const it of found) {
+        const { routes: _r, audit: _a, ...args } = this.examArgs(champ.genome, list[it.match]);
+        const lastForce = it.forces!.length ? it.forces![it.forces!.length - 1][0] : 0;
+        this.store.addState({ gen: champ.id, tag: 'drill:judgement', args, forces: it.forces!, tick: Math.max(PRE + 1, lastForce + 1, it.tick - DRILL_LEAD), score: it.cost });
+      }
+      this.store.pruneStates('drill:', DRILLS_KEPT);
+    });
+    this.emit('audit', a);
+    this.say(`thinking-ahead exam: ${found.length} judgement mistakes (the search better by more than ${JUDGE_PTS} points)`);
+  }
+  audit(): Audit | null {
+    const f = join(this.dir, 'audit.json');
+    return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as Audit) : null;
+  }
+  /** audit item `i` replayed with exact frames: the champion's exam match, up to and past the mistake */
+  mistakeArgs(i: number): { args: EpisodeArgs; tick: number } {
+    const a = this.audit();
+    const it = a?.items[i];
+    if (!a || !it) throw new Error('no such mistake');
+    const list = examList(this.st.config);
+    return { args: this.examArgs(this.st.champion.genome, list[it.match], { frames: true, routes: false, audit: false, ...(it.forces?.length ? { forces: it.forces } : {}) }), tick: it.tick };
+  }
+  routes(): RouteLibrary | null {
+    const f = join(this.dir, 'routes.json');
+    return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as RouteLibrary) : null;
+  }
+  /** the champion's exam match `i`, with exact frames (the Routes page's "watch it") */
+  watchArgs(i: number): EpisodeArgs {
+    const list = examList(this.st.config);
+    if (!Number.isInteger(i) || i < 0 || i >= list.length) throw new Error('no such exam match');
+    return this.examArgs(this.st.champion.genome, list[i], { frames: true, routes: false });
+  }
   private point(): void {
     const base = this.st.base;
     const ex = this.st.champion.exam;
@@ -495,12 +674,15 @@ export class Continuous extends EventEmitter {
     const base = this.st.base;
     if (!v.length || !base) return null;
     const list = examList(this.st.config);
-    const byPartner: Record<string, number> = {};
-    for (const p of this.st.config.partners) {
-      const idx = list.map((e, i) => (e.partner === p ? i : -1)).filter((i) => i >= 0 && i < v.length);
-      if (idx.length) byPartner[p] = idx.reduce((a, i) => a + v[i], 0) / idx.length;
-    }
-    return { ...meanCi(v), vsBase: meanCi(v.map((x, i) => x - base[i])), cvar10: cvar10(v), byPartner };
+    const avgBy = (keys: string[], key: (e: ExamEntry) => string): Record<string, number> => {
+      const o: Record<string, number> = {};
+      for (const p of keys) {
+        const idx = list.map((e, i) => (key(e) === p ? i : -1)).filter((i) => i >= 0 && i < v.length);
+        if (idx.length) o[p] = idx.reduce((a, i) => a + v[i], 0) / idx.length;
+      }
+      return o;
+    };
+    return { ...meanCi(v), vsBase: meanCi(v.map((x, i) => x - base[i])), cvar10: cvar10(v), byPartner: avgBy(this.st.config.partners, (e) => e.partner), byOpponents: avgBy(this.st.config.opponents, (e) => e.opponents) };
   }
   status() {
     const s = this.st;
@@ -526,8 +708,18 @@ export class Continuous extends EventEmitter {
       activity: { actors: this.actorsInFlight, learning: this.learning, evaluating: this.evaluating },
       lastPromotion: lastPromo,
       searchExam: s.searchExam,
+      audit: s.audits[s.audits.length - 1] ?? null,
+      drills: { ...this.store.countStates('drill:'), played: s.totals.drills ?? 0 },
       problems: this.problems,
       log: this.recent.slice(-30),
     };
   }
+}
+
+/** the same mistake: one exam match, one kind, within REPEAT_TICKS and REPEAT_IN (a foul: the same rule) */
+export function sameMistake(p: AuditEntry, q: AuditEntry): boolean {
+  if (p.match !== q.match || p.kind !== q.kind || Math.abs(p.tick - q.tick) > REPEAT_TICKS) return false;
+  if (p.kind === 'foul') return p.detail === q.detail;
+  if (p.kind === 'judgement') return p.detail === q.detail;
+  return Math.hypot(p.x - q.x, p.y - q.y) <= REPEAT_IN;
 }

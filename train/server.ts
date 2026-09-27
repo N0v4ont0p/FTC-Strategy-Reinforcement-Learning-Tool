@@ -95,6 +95,8 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     c.on('status', push);
     c.on('state', push);
     c.on('champion', push);
+    c.on('routes', () => send('routes', { profile: c.st.config.profile }));
+    c.on('audit', () => send('mistakes', { profile: c.st.config.profile }));
     c.on('log', (l: string) => send('log', `training: ${l}`));
     return c;
   };
@@ -297,6 +299,46 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     if (p === '/api/home/pause' && post) {
       coach?.stop('paused');
       return json(res, 200, home());
+    }
+
+    // the route library (the champion's exam matches, cycle by cycle)
+    if (p === '/api/routes' && !post) {
+      const profile = url.searchParams.get('profile') ?? coach?.st.config.profile ?? listV2()[0]?.profile ?? 'profiles/real-v1.json';
+      const has = coach?.st.config.profile === profile || (!coach?.running && listV2().some((r) => r.profile === profile));
+      return json(res, 200, { profile, library: has ? coachFor(profile).routes() : null });
+    }
+    if (p === '/api/routes/watch' && post) {
+      const b = await body(req);
+      const c = coachFor(String(b.profile ?? coach?.st.config.profile ?? 'profiles/real-v1.json'));
+      let args;
+      try {
+        args = c.watchArgs(Number(b.match));
+      } catch (err) {
+        throw bad(err);
+      }
+      const [r] = await runPool<{ frames: unknown; events: unknown }>([{ module: '../train/episode.ts', fn: 'runEpisode', args }], 1);
+      return json(res, 200, { frames: r.frames, events: r.events });
+    }
+
+    // the mistake audit (the champion's exam matches; judgement mistakes from its thinking-ahead exam)
+    if (p === '/api/mistakes' && !post) {
+      const profile = url.searchParams.get('profile') ?? coach?.st.config.profile ?? listV2()[0]?.profile ?? 'profiles/real-v1.json';
+      const has = coach?.st.config.profile === profile || (!coach?.running && listV2().some((r) => r.profile === profile));
+      if (!has) return json(res, 200, { profile, audit: null, history: [], drills: null });
+      const c = coachFor(profile);
+      return json(res, 200, { profile, audit: c.audit(), history: c.st.audits, drills: c.status().drills });
+    }
+    if (p === '/api/mistakes/watch' && post) {
+      const b = await body(req);
+      const c = coachFor(String(b.profile ?? coach?.st.config.profile ?? 'profiles/real-v1.json'));
+      let m;
+      try {
+        m = c.mistakeArgs(Number(b.i));
+      } catch (err) {
+        throw bad(err);
+      }
+      const [r] = await runPool<{ frames: unknown; events: unknown }>([{ module: '../train/episode.ts', fn: 'runEpisode', args: m.args }], 1);
+      return json(res, 200, { frames: r.frames, events: r.events, tick: m.tick });
     }
 
     // runs

@@ -16,7 +16,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { C, DT, Match, bb, coerce, recordScore, verifyReplay, worldResult, type RobotCommand, type Seat, type World } from '../harness/dsim';
+import { C, DT, Match, bb, coerce, recordScore, verifyReplay, worldResult, type RobotCommand, type RobotSpec, type Seat, type World } from '../harness/dsim';
 import { loadProfile, resolve, type Resolved } from '../harness/profiles';
 import { MatchFilter, HUMAN, ORACLE, RULES_CONSERVATIVE } from '../harness/filters';
 import { Perturber } from '../harness/perturb';
@@ -30,7 +30,8 @@ import { N_OBS, encode } from './obs';
 import { deepClone, share } from './fork';
 import { VALUE_SHAPE, VALUE_SCALE } from './value';
 import { Tally, type Activity, type Loads, type Parts } from './gap';
-import { AllianceBoard, PARTNERS, defaultPartnerStart, legalPair, partnerProfile, seatStart, type PartnerKind, type StartId } from './team';
+import { AllianceBoard, OPPONENTS, OPP_FIRST_START, PARTNERS, defaultPartnerStart, legalPair, partnerProfile, seatStart, type OpponentKind, type PartnerKind, type StartId } from './team';
+import type { OptionKind } from './skills';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -75,6 +76,57 @@ export interface EpisodeArgs {
   verify?: boolean; // with record: re-simulate the replay in DSIM and compare (verified)
   start?: StartId; // where our robot starts (default: F3, the team's start)
   partner?: PartnerArgs; // an alliance partner (default: none — the solo game)
+  opponents?: OpponentKind; // a red alliance (phase 5; default: none)
+  opponentGenome?: string | null; // the red copies of our robot play this network ('mirror': self-play); default: the no-learning order
+  routes?: boolean; // record our robot's scoring cycles (the route library, train/routes.ts)
+  audit?: boolean; // record every mistake with its moment (the mistake audit, MASTERPLAN §7)
+  forces?: [number, string][]; // (tick, option key): choices made for our robot on the way (a Store state's recipe: a search's changes)
+}
+/** THE MISTAKE AUDIT (phase 6): what went wrong in a match, when and where, and what it cost */
+export type MistakeKind = 'empty-trip' | 'blocked-shot' | 'idle' | 'foul' | 'stall' | 'crash' | 'judgement';
+export interface AuditItem {
+  tick: number;
+  kind: MistakeKind;
+  cost: number; // seconds (trips, shots, idle, stall), foul points, or points (judgement)
+  detail: string;
+  x: number;
+  y: number;
+}
+/** standing still this long, holding no job that waits (parking), is a mistake */
+export const IDLE_S = 3;
+/** a search that beats the network's choice by more than this many points marks a judgement mistake */
+export const JUDGE_PTS = 5;
+interface AuditRec {
+  items: AuditItem[];
+  still: number; // tick a still spell began (-1: moving)
+  stillJob: string; // …and the job it was doing then
+  lastAct: number; // tick of our last pickup or shot
+  rules: Record<string, number>; // our alliance's violations so far, by rule
+}
+/** one scoring CYCLE of our robot — volley to volley, from its actual pickups and shots (it fires on
+ * the move, so jobs do not mark them): it starts when the previous volley ended (the first one when
+ * AUTO or TELEOP starts) and ends when its hopper is empty again after shooting. Where it picked up,
+ * doing what; where its first shot left from; how many of its shots went in; the alliance's points
+ * in that stretch (measured LAND_TICKS after each last shot, so consecutive cycles tile the match).
+ * The route library's raw material (train/routes.ts) */
+export interface Cycle {
+  t0: number; // tick it started (the previous volley's end)
+  t1: number; // tick of its last shot
+  collect: { kind: OptionKind; x: number; y: number; label: string }[]; // one per pickup: the job it was doing, where
+  shoot: { x: number; y: number };
+  points: number; // the alliance's reward gained in the stretch
+  mine: number; // its shots that went into the HIVE
+}
+const LAND_TICKS = 90; // a shot has landed by then
+const AUTO_TICK = Math.round(C.PRE_COUNTDOWN / DT);
+const TELEOP_TICK = Math.round((C.PRE_COUNTDOWN + C.AUTO_DURATION + C.TRANSITION_DURATION) / DT);
+interface RouteRec {
+  out: Cycle[];
+  cur: Cycle | null;
+  shooting: boolean;
+  from: number; // where the next cycle starts: the last volley's end (the first: when AUTO starts)
+  mark: number; // the reward when the last cycle was measured
+  pending: Cycle[]; // closed, measured at t1 + LAND_TICKS
 }
 export interface PartnerArgs {
   kind: PartnerKind;
@@ -125,6 +177,7 @@ export interface Searched {
   rq: (number | null)[][]; // per round: each option's mean on that round's shared draws (null: out by then) — the learner centres within a round
   sofar?: number; // the reward when it was decided (with the match's final reward: the points still to come)
   x?: LabelInput; // with keepSearched: what the networks saw
+  change?: { key: string; from: string; to: string }; // the search overruled the network: the option it took (key), the network's and its labels
 }
 /** a label's inputs, base64 Float32: the v1 observation, the entity rows (n × N_ENT), the options'
  * entity-network rows (k × N_OPT_IN) and their v1 features (k × N_OPT_FEATS) */
@@ -186,6 +239,9 @@ export interface EpisodeResult {
   labels?: Searched[]; // with keepSearched: every searched decision, with its inputs
   partner?: { kind: PartnerKind; start: StartId; parts: Parts }; // the partner's own play (the score is the alliance's)
   start?: StartId;
+  opponents?: { kind: OpponentKind; score: number }; // the red alliance and its DSIM score
+  cycles?: Cycle[]; // with routes
+  audit?: AuditItem[]; // with audit: its mistakes, in time order
 }
 
 /** exact frames — what DSIM's renderers need to redraw this life exactly as it was trained */
@@ -193,6 +249,7 @@ export interface Frames {
   stride: number;
   spec: unknown;
   spec2?: unknown; // the partner's build (frames with a partner)
+  oppSpecs?: unknown[]; // the red robots' builds (frames with opponents)
   alliance: string;
   meta: [number, string, number | null][]; // ball id, colour, radius (world.balls order)
   f: Frame[];
@@ -208,6 +265,8 @@ export interface Frame {
   o?: [number, string, number, number]; // current option: kind index, label, target x, y
   p?: number[]; // the partner: x, y, heading, turret, turret2, pitch, pitch2, intake
   ph?: string; // the partner's hopper
+  opp?: number[][]; // each red robot: x, y, heading, turret, turret2, pitch, pitch2
+  oh?: string[]; // …its hopper
 }
 
 const kindIdx = (k: string | undefined): number => (k ? OPTION_KINDS.indexOf(k as (typeof OPTION_KINDS)[number]) : -1);
@@ -240,6 +299,8 @@ interface Outputs {
   lessons: Sample[] | null;
   values: { obs: number[]; at: number[]; score: number[] } | null;
   inspect: Inspected[] | null;
+  route: RouteRec | null; // routes: our robot's cycles
+  audit: AuditRec | null; // audit: our robot's mistakes
 }
 
 export class Episode {
@@ -281,6 +342,8 @@ export class Episode {
       lessons: a.lessons ? [] : null,
       values: a.returns ? { obs: [], at: [], score: [] } : null,
       inspect: a.inspect ? [] : null,
+      route: a.routes ? { out: [], cur: null, shooting: false, from: AUTO_TICK, mark: 0, pending: [] } : null,
+      audit: a.audit ? { items: [], still: -1, stillJob: '', lastAct: 0, rules: {} } : null,
     };
     this.out = o;
     this.start = a.start ?? 'F3';
@@ -307,6 +370,23 @@ export class Episode {
       this.partnerProf = pp;
       this.partnerStart = ps;
       this.partnerTally = new Tally();
+    }
+    const opp = a.opponents && a.opponents !== 'none' ? OPPONENTS[a.opponents] : null;
+    if (opp) {
+      if (a.profile.startsWith('replay:')) throw new Error('opponents play against a profile robot, not a replay build');
+      const redBoard = new AllianceBoard();
+      let first: { spec: RobotSpec; start: StartId } | null = null;
+      opp.robots.forEach((o, i) => {
+        const id = 2 + i;
+        const pp = partnerProfile(o.build, join(root, a.profile), seedOf(a.seed, 'opponent', i), a.sampleProfile);
+        share(pp);
+        const start: StartId = first ? defaultPartnerStart(first.spec, first.start, pp.spec) : OPP_FIRST_START;
+        seats.push({ id, alliance: 'red', spec: pp.spec, ...seatStart(pp.spec, start) });
+        this.brains.push(new Brain(o.build === 'real' ? decodeGenome(a.opponentGenome) : null, pp, id, undefined, undefined, { mode: o.mode, board: redBoard, parkSlot: i + 1 }));
+        limits.set(id, pp.limits);
+        perRobot.set(id, pp.perturb);
+        first ??= { spec: pp.spec, start };
+      });
     }
     this.m = new Match(a.seed, seats, { record: a.record });
     this.filter = new MatchFilter(a.seed, limits, a.driver === 'human' ? HUMAN : ORACLE, RULES_CONSERVATIVE);
@@ -400,6 +480,7 @@ export class Episode {
     const parts = this.parts;
     const seen = this.tally.observe(w, r);
     for (const k of seen.ev) this.ev(t, k);
+    if (o?.route) this.route(o.route, t, r, seen.ev);
     let progress = seen.progress;
     const sc = w.match.scores[r.alliance].total;
     if (sc !== this.prevScore) {
@@ -411,7 +492,8 @@ export class Episode {
     const rep = this.guards.report();
     let viol = 0;
     let fouls = 0;
-    for (const [k, v] of Object.entries(rep.violations)) {
+    // our alliance's violations only (a red robot's fouls are the other alliance's)
+    for (const [k, v] of Object.entries(rep.byAlliance.blue ?? {})) {
       if (k === 'DSIM-foul' || !v) continue;
       viol += v;
       fouls += v * (MINOR_RULES.has(k) ? FOUL.minor : FOUL.major);
@@ -419,6 +501,12 @@ export class Episode {
     if (viol > this.prevViol) {
       this.ev(t, 'violation');
       this.prevViol = viol;
+      if (o?.audit)
+        for (const [k, v] of Object.entries(rep.byAlliance.blue ?? {})) {
+          if (k === 'DSIM-foul' || !v || v <= (o.audit.rules[k] ?? 0)) continue;
+          o.audit.items.push({ tick: t, kind: 'foul', cost: (v - (o.audit.rules[k] ?? 0)) * (MINOR_RULES.has(k) ? FOUL.minor : FOUL.major), detail: k, x: Math.round(r.pos.x), y: Math.round(r.pos.y) });
+          o.audit.rules[k] = v;
+        }
     }
     parts.violations = viol;
     parts.strikes = rep.anomalies['fast-ground-element'] ?? 0;
@@ -429,11 +517,74 @@ export class Episode {
     if ((rep.byRobot[0]?.['G417-hive-frame-contact'] ?? 0) > 0) {
       this.death = 'crash';
       this.deathTick = t;
+      o?.audit?.items.push({ tick: t, kind: 'crash', cost: 0, detail: 'touched the HIVE frame (G417): its match ended there', x: Math.round(r.pos.x), y: Math.round(r.pos.y) });
     } else if ((t - this.lastProgress) * DT > STALL_S) {
       this.stalls++;
       this.lastProgress = t;
       this.ev(t, 'stall');
+      o?.audit?.items.push({ tick: t, kind: 'stall', cost: STALL_S, detail: `no progress for ${STALL_S} s${this.brain.current() ? ` (${this.brain.current()!.label})` : ''}`, x: Math.round(r.pos.x), y: Math.round(r.pos.y) });
     }
+    if (o?.audit) this.idleWatch(o.audit, t, r, seen.ev, ph === 'auto' || ph === 'teleop');
+  }
+
+  /** a still spell of IDLE_S or more, not parking and neither picking up nor shooting, is an idle mistake */
+  private idleWatch(A: AuditRec, t: number, r: World['robots'][number], ev: string[], playing: boolean): void {
+    if (ev.includes('pickup') || ev.includes('shot')) A.lastAct = t;
+    const job = this.brain.current();
+    const still = playing && Math.hypot(r.vel.x, r.vel.y) < 3 && Math.abs(r.angVel) < 0.3 && t - A.lastAct > 60 && job?.kind !== 'park';
+    if (still && A.still < 0) {
+      A.still = t;
+      A.stillJob = job ? `still during "${job.label}"` : 'still, no job';
+    }
+    if (!still && A.still >= 0) {
+      const secs = (t - A.still) * DT;
+      if (secs >= IDLE_S) A.items.push({ tick: A.still, kind: 'idle', cost: secs, detail: A.stillJob, x: Math.round(r.pos.x), y: Math.round(r.pos.y) });
+      A.still = -1;
+    }
+  }
+
+  /** the cycle recorder */
+  private route(R: RouteRec, t: number, r: World['robots'][number], ev: string[]): void {
+    for (const e of ev) {
+      if (e === 'shotIn') {
+        // a shot going in belongs to the cycle that shot it: the open one while it shoots, else the one just closed
+        const last = R.out[R.out.length - 1];
+        if (R.cur && R.shooting) R.cur.mine++;
+        else if (last && t - last.t1 <= LAND_TICKS) last.mine++;
+        else if (R.cur) R.cur.mine++;
+        continue;
+      }
+      if (e !== 'pickup' && e !== 'shot') continue;
+      if (!R.cur) R.cur = { t0: Math.min(R.from, t), t1: t, collect: [], shoot: { x: 0, y: 0 }, points: 0, mine: 0 };
+      if (e === 'pickup') {
+        const job = this.brain.current();
+        R.cur.collect.push({ kind: job?.kind ?? 'field', x: Math.round(r.pos.x), y: Math.round(r.pos.y), label: job?.label ?? '' });
+      } else {
+        if (!R.shooting) R.cur.shoot = { x: Math.round(r.pos.x), y: Math.round(r.pos.y) };
+        R.shooting = true;
+        R.cur.t1 = t;
+      }
+    }
+    // the volley is over when the hopper is empty again
+    if (R.cur && R.shooting && r.hopper.length === 0) this.closeCycle(R);
+    while (R.pending.length && R.pending[0].t1 + LAND_TICKS <= t) {
+      R.pending.shift()!.points = this.reward() - R.mark;
+      R.mark = this.reward();
+    }
+    // TELEOP starts the clock again (the transition is nobody's cycle; AUTO's end bonuses are not a TELEOP route's)
+    if (t === TELEOP_TICK) {
+      if (R.cur) R.cur.t0 = Math.max(R.cur.t0, t);
+      else R.from = t;
+      if (!R.pending.length) R.mark = this.reward();
+    }
+  }
+  private closeCycle(R: RouteRec): void {
+    if (!R.cur) return;
+    R.out.push(R.cur);
+    R.pending.push(R.cur);
+    R.from = R.cur.t1;
+    R.cur = null;
+    R.shooting = false;
   }
 
   private frame(w: World, intake = false): void {
@@ -441,10 +592,12 @@ export class Episode {
     const fr = o.frames!;
     const r = w.robots.find((q) => q.id === 0)!;
     const p2 = w.robots.find((q) => q.id === 1);
+    const reds = w.robots.filter((q) => q.alliance !== r.alliance);
     if (!fr.spec) {
       fr.spec = r.spec;
       fr.alliance = r.alliance;
       if (p2) fr.spec2 = p2.spec;
+      if (reds.length) fr.oppSpecs = reds.map((x) => x.spec);
     }
     if (fr.meta.length !== w.balls.length) fr.meta = w.balls.map((b) => [b.id, b.color, (b as { r?: number }).r ?? null]);
     const q = (v: number): number => Math.round(v * 100) / 100;
@@ -476,6 +629,10 @@ export class Episode {
     if (p2) {
       f.p = [q(p2.pos.x), q(p2.pos.y), p2.heading, p2.turretHeading ?? p2.heading, p2.bbTurret2Heading ?? p2.heading + Math.PI, p2.bbTurretPitch ?? 0, p2.bbTurret2Pitch ?? 0, 0];
       f.ph = p2.hopper.map((c) => c[0]).join('');
+    }
+    if (reds.length) {
+      f.opp = reds.map((x) => [q(x.pos.x), q(x.pos.y), x.heading, x.turretHeading ?? x.heading, x.bbTurret2Heading ?? x.heading + Math.PI, x.bbTurretPitch ?? 0, x.bbTurret2Pitch ?? 0]);
+      f.oh = reds.map((x) => x.hopper.map((c) => c[0]).join(''));
     }
     fr.f.push(f);
   }
@@ -587,6 +744,8 @@ export class Episode {
     const watch = !!(a.lessons || a.search || a.search2);
     const win = a.searchWindow ?? [0, Infinity];
     const handover = a.handover ? decodeGenome(a.handover.genome) : null;
+    const forces = a.forces ?? [];
+    let fi = 0;
     const labels: Searched[] = [];
     let lastSearch = -1e9;
     let searched = 0;
@@ -594,6 +753,8 @@ export class Episode {
     for (;;) {
       const ph = this.w.match.phase;
       if (a.handover && this.w.tick === a.handover.tick) this.brain.setNet(handover);
+      while (fi < forces.length && forces[fi][0] < this.w.tick) fi++;
+      if (fi < forces.length && forces[fi][0] === this.w.tick) this.brain.force = { key: forces[fi][1], tick: forces[fi++][0], commit: false };
       if (watch && (ph === 'auto' || ph === 'teleop') && this.w.tick >= win[0] && this.w.tick < win[1]) {
         // will the brain decide on this tick? A fork steps once to find out (a job can end at any tick)
         const t = this.w.tick;
@@ -619,6 +780,7 @@ export class Episode {
             if (res.chosen !== d.chosen) {
               changed++;
               this.brain.force = { key: optKey(d.opts[res.chosen]), tick: t, commit: false };
+              res.change = { key: optKey(d.opts[res.chosen]), from: d.opts[d.chosen].label, to: d.opts[res.chosen].label };
             }
             if (a.keepSearched && d.ent) {
               res.sofar = this.reward();
@@ -680,6 +842,25 @@ export class Episode {
     }
     const res: EpisodeResult = { reward, score, parts: this.parts, ticks: w.tick, death: this.death, deathTick: this.deathTick, point: this.prof.point, mistakes, activity: this.tally.activity, loads: this.tally.loads, start: this.start };
     if (this.partnerTally && this.a.partner) res.partner = { kind: this.a.partner.kind, start: this.partnerStart!, parts: this.partnerTally.parts };
+    if (this.a.opponents && this.a.opponents !== 'none') res.opponents = { kind: this.a.opponents, score: recordScore(w, 'red') };
+    if (o.audit) {
+      const A = o.audit;
+      for (const d of dec) {
+        if (d.outcome !== 'failed' || d.endTick === undefined) continue;
+        const kind = d.kind === 'shoot' ? 'blocked-shot' : d.kind === 'field' || d.kind === 'lz' || d.kind === 'flower' ? 'empty-trip' : null;
+        if (kind) A.items.push({ tick: d.tick, kind, cost: (d.endTick - d.tick) * DT, detail: d.label, x: Math.round(d.x), y: Math.round(d.y) });
+      }
+      if (A.still >= 0 && (w.tick - A.still) * DT >= IDLE_S) A.items.push({ tick: A.still, kind: 'idle', cost: (w.tick - A.still) * DT, detail: A.stillJob, x: Math.round(w.robots[0].pos.x), y: Math.round(w.robots[0].pos.y) });
+      res.audit = A.items.sort((p, q) => p.tick - q.tick);
+    }
+    if (o.route) {
+      if (o.route.shooting) this.closeCycle(o.route);
+      for (const c of o.route.pending) {
+        c.points = reward - o.route.mark; // the match ended first
+        o.route.mark = reward;
+      }
+      res.cycles = o.route.out;
+    }
     if (o.path) {
       res.track = b64(new Float32Array(o.path));
       res.events = o.events!;

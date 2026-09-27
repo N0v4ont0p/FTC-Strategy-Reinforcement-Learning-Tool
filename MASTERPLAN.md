@@ -4,8 +4,12 @@ Status (2026-09-27): phase 0 measured; **phase 1 built** (alliance play, partner
 per-build envelopes, paths, strike rule, stalls, Store, service); **phase 2 built** (AUTO planner,
 playbook, studio Playbook tab); **phase 3 built and passed** (sequential-halving search on shared luck:
 259.1 vs v1 look-ahead 231.3, +27.8 ± 12.7 on 24 paired exam matches); **phase 4 built** (entity
-network, learner, continuous actor/learner/evaluator engine with SPRT, one-button Home) — its pass
-condition is measured by training, which the team runs. Phases 5–6 next. Replaces the
+network, learner, continuous actor/learner/evaluator engine with SPRT, one-button Home); **phase 5
+built** (red opponents: presets, mirror self-play, a defender; route library + Routes page); **phase 6
+built** (mistake audit with repeats, judgement mistakes from the thinking-ahead exam, drills from
+exact state recipes, Mistakes page). The pass conditions of phases 4–6 (network ≥ search, gains
+every exam, robust against every opponent, zero repeat mistakes) are measured by training, which the
+team runs; the Home, Routes and Mistakes pages show them. Replaces the
 generational trainer (TRAINING.md) phase by phase; every phase passes the gate before it ships.
 
 ## 1. Goal

@@ -1,6 +1,6 @@
 import { Comb } from './comb';
 import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
-import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type HomeStatusV, type HomeV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
+import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type HomeStatusV, type HomeV, type RouteLibraryV, type AuditV, type AuditPointV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
 import type { World } from '../../dsim-main/src/types';
 
@@ -33,7 +33,9 @@ let run: RunState | null = null;
 let hist: GenSummary[] = [];
 let onDisk: number[] = [];
 /** LIVE follows training; the two replays are for analysing at 1× or 2× */
-let mode: 'live' | 'best' | 'champion' | 'playbook' = 'live';
+let mode: 'live' | 'best' | 'champion' | 'playbook' | 'replay' = 'live';
+/** what a 'replay' shows (a route's example, a mistake's moment) */
+let replayLabel = '';
 let liveGen = -1;
 let pendingGen = -1;
 let bestGen = -1;
@@ -133,7 +135,7 @@ function renderRuns(): void {
     ? runs.map((r) => `<option value="${esc(r.name)}" ${run?.name === r.name ? 'selected' : ''}>${esc(r.name)} · gen ${r.gen}${r.legacy ? ' · old version' : r.exam !== null ? ` · exam ${Math.round(r.exam)} pts` : ''}</option>`).join('')
     : '<option value="">no runs yet</option>';
   if (!run) sel.insertAdjacentHTML('afterbegin', '<option value="" selected>— choose —</option>');
-  $('empty').hidden = !!run;
+  $('empty').hidden = !!run || mode === 'playbook' || mode === 'replay';
   $('runsList').innerHTML = runs.length
     ? runs
         .map((r) => {
@@ -574,6 +576,7 @@ function setMode(m: typeof mode): void {
   $('transportLive').hidden = m !== 'live';
   $('transportReplay').hidden = m === 'live';
   $('inspector').hidden = m !== 'champion';
+  $('empty').hidden = !!run || m === 'playbook' || m === 'replay';
   view.loop = m === 'live';
   if (m !== 'live') view.speed = speed;
   renderViewInfo();
@@ -586,7 +589,8 @@ const newest = (): number => (onDisk.length ? onDisk[onDisk.length - 1] : -1);
 function renderViewInfo(): void {
   const n = newest();
   let html = '';
-  if (mode === 'playbook') html = pbWatching ? `AUTO playbook · ${esc(pbLabel(pbWatching))} · exactly as planned` : 'AUTO playbook';
+  if (mode === 'replay') html = `${esc(replayLabel)} · exactly as played`;
+  else if (mode === 'playbook') html = pbWatching ? `AUTO playbook · ${esc(pbLabel(pbWatching))} · exactly as planned` : 'AUTO playbook';
   else if (!run) html = '';
   else if (mode === 'live') html = liveGen >= 0 ? `generation ${fmt(liveGen)} · the champion's lesson matches · follows training` : run.running && !run.paused ? `generation ${fmt(run.gen)} is being played — its lesson matches appear here when it finishes` : 'no generations yet — press Start training';
   else if (mode === 'best') html = bestGen >= 0 ? `generation ${fmt(bestGen)} · its best lesson match · exactly as played${n > bestGen ? ` · <button type="button" class="link" id="loadNewest">newest: ${fmt(n)}</button>` : ''}` : 'no generations yet';
@@ -778,6 +782,12 @@ function renderHome(): void {
         .map(([k, v]) => `<tr><td class="l">${esc(PL[k] ?? k)}</td><td>${v.toFixed(1)}</td></tr>`)
         .join('')}</tbody></table>${s?.searchExam ? `<p class="hint">Thinking ahead (champion #${s.searchExam.champion}, ${s.searchExam.n} solo matches): alone ${s.searchExam.alone.toFixed(1)}, with search ${s.searchExam.search.toFixed(1)} (${sgn(s.searchExam.gain.mean)} ± ${s.searchExam.gain.ci95.toFixed(1)}). The goal: the network alone as good as with search.</p>` : ''}`
     : '<p class="hint">After the first exam.</p>';
+  const OL: Record<string, string> = { none: 'no opponents', presets: 'Skimmer + Sniper', mirror: 'two REAL-v1s', defense: 'a defender + Skimmer' };
+  $('homeOpponents').innerHTML = ex?.byOpponents
+    ? `<table><thead><tr><th class="l">red alliance</th><th>champion</th></tr></thead><tbody>${Object.entries(ex.byOpponents)
+        .map(([k, v]) => `<tr><td class="l">${esc(OL[k] ?? k)}</td><td>${v.toFixed(1)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : '<p class="hint">After the first exam.</p>';
   const L = s?.learner;
   $('homeLearner').textContent = L?.last ? `last lesson: agrees with the search ${pct(L.last.agree)} of held-out decisions, gives away ${L.last.regret.toFixed(1)} pts each · learning rate ${L.lr.toPrecision(2)}` : '';
   $('homeCands').innerHTML = s?.candidates.length
@@ -796,7 +806,11 @@ async function loadHome(profile?: string): Promise<void> {
     $('homeProblems').textContent = (e as Error).message;
   }
 }
-$('homeProfile').onchange = () => void loadHome($<HTMLSelectElement>('homeProfile').value);
+$('homeProfile').onchange = () =>
+  void loadHome($<HTMLSelectElement>('homeProfile').value).then(() => {
+    void loadRoutes();
+    void loadMistakes();
+  });
 $('homeTrain').onclick = async () => {
   try {
     HOME = await post<HomeV>('/api/home/train', { profile: $<HTMLSelectElement>('homeProfile').value });
@@ -816,6 +830,148 @@ $('homePause').onclick = async () => {
 };
 void loadHome();
 window.setInterval(() => HOME && renderHome(), 60_000); // "… min ago"
+
+// ─────────────────────────────── Routes: the route library ───────────────────────────────
+let RT: { profile: string; library: RouteLibraryV | null } | null = null;
+let rtSel = -1;
+function renderRoutes(): void {
+  const L = RT?.library;
+  $('rtWhen').textContent = L ? `champion ${L.champion ? `#${L.champion}` : '(no-learning)'} · ${L.cycles} cycles in ${L.matches} exam matches` : '';
+  if (!L) {
+    $('rtList').innerHTML = '<p class="hint">After the first exam on the Home page.</p>';
+    $('rtOpen').innerHTML = '';
+    $('rtDetail').hidden = true;
+    return;
+  }
+  const rows = L.routes.filter((r) => r.n >= 3);
+  $('rtList').innerHTML = rows.length
+    ? `<table><thead><tr><th class="l">collect</th><th class="l">shoot from</th><th title="cycles, and their share of all cycles">cycles</th><th title="mean cycle time, volley to volley">s</th><th title="our robot's elements into the HIVE per cycle">in</th><th title="…per minute of the route: the rate">in/min</th><th title="the alliance's points meanwhile (they arrive in lumps when a HIVE tips)">alliance pts</th></tr></thead><tbody>${rows
+        .map((r, i) => `<tr data-i="${i}" class="pick${i === rtSel ? ' sel' : ''}"><td class="l">${esc(r.collect)}</td><td class="l">${esc(r.shoot)}</td><td>${r.n} (${pct(r.share)})</td><td>${r.seconds.toFixed(1)}</td><td>${r.mine.toFixed(1)}</td><td>${r.inPerMin.toFixed(1)}</td><td>${r.points.toFixed(1)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : '<p class="hint">No route was used 3 times yet.</p>';
+  for (const tr of $('rtList').querySelectorAll<HTMLTableRowElement>('tr[data-i]'))
+    tr.onclick = () => {
+      rtSel = Number(tr.dataset.i);
+      renderRoutes();
+    };
+  const r = rows[rtSel];
+  $('rtDetail').hidden = !r;
+  if (r) {
+    $('rtTitle').textContent = r.sig;
+    const PL: Record<string, string> = { none: 'no partner', real: 'a second REAL-v1', sniper: 'Sniper', hauler: 'Hauler', skimmer: 'Skimmer', parker: 'parks only', idle: 'does nothing' };
+    const OL: Record<string, string> = { none: 'no opponents', presets: 'Skimmer + Sniper', mirror: 'two REAL-v1s', defense: 'a defender + Skimmer' };
+    const list = (o: Record<string, number>, names: Record<string, string>): string =>
+      Object.entries(o)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${esc(names[k] ?? k)} ${v}`)
+        .join(' · ');
+    $('rtSheet').innerHTML = `<table><tbody>
+      <tr><td class="l">when</td><td class="l">AUTO ${r.when.auto} · TELEOP ${r.when.teleop} · last 30 s ${r.when.endgame}</td></tr>
+      <tr><td class="l">beside</td><td class="l">${list(r.byPartner, PL)}</td></tr>
+      <tr><td class="l">against</td><td class="l">${list(r.byOpponents, OL)}</td></tr>
+      <tr><td class="l">example</td><td class="l">exam match ${r.example.match + 1}, ${((r.example.t0 - AUTO_START) / 60).toFixed(1)}–${((r.example.t1 - AUTO_START) / 60).toFixed(1)} s</td></tr>
+    </tbody></table>`;
+  }
+  $('rtOpen').innerHTML = L.openings.length
+    ? `<table><thead><tr><th class="l">first TELEOP places</th><th>matches</th><th title="the match's reward">points</th></tr></thead><tbody>${L.openings
+        .map((o) => `<tr><td class="l">${esc(o.seq)}</td><td>${o.n}</td><td>${o.reward.toFixed(1)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : '';
+}
+async function loadRoutes(): Promise<void> {
+  try {
+    RT = await getJSON<{ profile: string; library: RouteLibraryV | null }>(`/api/routes${HOME?.profile ? `?profile=${encodeURIComponent(HOME.profile)}` : ''}`);
+    renderRoutes();
+  } catch (e) {
+    $('rtList').innerHTML = `<p class="hint">${esc((e as Error).message)}</p>`;
+  }
+}
+$('rtWatch').onclick = async () => {
+  const r = RT?.library?.routes.filter((q) => q.n >= 3)[rtSel];
+  if (!r || !RT) return;
+  try {
+    toast('playing that exam match in DSIM…');
+    const f = await post<{ frames: Frames; events: [number, string][] }>('/api/routes/watch', { profile: RT.profile, match: r.example.match });
+    view.loadFocus({ gen: 0, fitness: 0, score: 0, death: 'survived', parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, lineage: { id: -1, op: 'champion', parents: [], muts: 0, born: 0 }, frames: f.frames, events: f.events } as FocusFile);
+    view.seek(r.example.t0);
+    view.playing = true;
+    $('play').textContent = 'Pause';
+    replayLabel = `route · ${r.sig} · the champion's exam match ${r.example.match + 1}`;
+    setMode('replay');
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+};
+void loadRoutes();
+
+// ─────────────────────────────── Mistakes: the audit ───────────────────────────────
+const MK_LABEL: Record<string, string> = { 'empty-trip': 'empty trip', 'blocked-shot': 'blocked shot', idle: 'idle', foul: 'foul', stall: 'stall', crash: 'crash', judgement: 'judgement' };
+let MK: { profile: string; audit: AuditV | null; history: AuditPointV[]; drills: { n: number; used: number; played: number } | null } | null = null;
+const mkChart = new LineChart<AuditPointV>($<HTMLCanvasElement>('mkChart'), $('mkLegend'), [
+  { label: 'mistakes', color: '--s-mean', get: (x) => x.perMatch },
+  { label: 'repeats', color: '--s-best', get: (x) => x.repeats },
+], { unit: '', zeroBase: true, xLabel: (x) => (x.champion ? `#${x.champion}` : 'no-learning'), tip: (x) => `<b>${x.champion ? `champion #${x.champion}` : 'the no-learning robot'}</b><br>${x.perMatch.toFixed(2)} mistakes per match, ${x.repeats.toFixed(2)} repeats${x.judgement !== null ? `<br>${x.judgement.toFixed(1)} judgement mistakes per thinking-ahead match` : ''}`, empty: 'after the first exam' });
+function renderMistakes(): void {
+  const a = MK?.audit;
+  const h = MK?.history ?? [];
+  const last = h[h.length - 1];
+  $('mkRepeats').textContent = last ? last.repeats.toFixed(2) : '—';
+  $('mkPer').textContent = last ? last.perMatch.toFixed(1) : '—';
+  $('mkWho').textContent = a ? `${a.champion ? `champion #${a.champion}` : 'the no-learning robot'} · ${a.matches} exam matches` : '';
+  mkChart.set(h);
+  const kinds = Object.keys(MK_LABEL);
+  $('mkKinds').innerHTML = h.length
+    ? `<table><thead><tr><th class="l">champion</th>${kinds.map((k) => `<th>${MK_LABEL[k]}</th>`).join('')}<th>repeats</th></tr></thead><tbody>${[...h]
+        .reverse()
+        .slice(0, 12)
+        .map((x) => `<tr><td class="l">${x.champion ? `#${x.champion}` : 'no-learning'}</td>${kinds.map((k) => `<td>${k === 'judgement' ? (x.judgement === null ? '—' : x.judgement.toFixed(1)) : (x.byKind[k as keyof typeof x.byKind] ?? 0).toFixed(2)}</td>`).join('')}<td>${x.repeats.toFixed(2)}</td></tr>`)
+        .join('')}</tbody></table>`
+    : '';
+  const d = MK?.drills;
+  $('mkDrills').textContent = d ? `${fmt(d.n)} drills waiting (${fmt(d.used)} practised at least once) · ${fmt(d.played)} drill matches played` : '';
+  const f = $<HTMLSelectElement>('mkFilter');
+  if (f.options.length === 2) f.innerHTML += kinds.map((k) => `<option value="${k}">${MK_LABEL[k]}</option>`).join('');
+  if (!a) {
+    $('mkList').innerHTML = '<p class="hint">After the first exam on the Home page.</p>';
+    return;
+  }
+  const rows = a.items.map((it, i) => ({ it, i })).filter(({ it }) => !f.value || (f.value === 'repeat' ? it.repeat : it.kind === f.value));
+  rows.sort((p, q) => Number(q.it.repeat) - Number(p.it.repeat) || q.it.cost - p.it.cost);
+  const unit = (k: string): string => (k === 'foul' || k === 'judgement' ? ' pts' : k === 'crash' ? '' : ' s');
+  $('mkList').innerHTML = rows.length
+    ? `<table><thead><tr><th>match</th><th>time</th><th class="l">kind</th><th class="l">what</th><th>cost</th><th></th></tr></thead><tbody>${rows
+        .slice(0, 300)
+        .map(({ it, i }) => `<tr><td>${it.match + 1}</td><td>${((it.tick - AUTO_START) / 60).toFixed(1)} s</td><td class="l">${MK_LABEL[it.kind]}${it.repeat ? ' <b>· repeat</b>' : ''}</td><td class="l">${esc(it.detail)}</td><td>${it.kind === 'crash' ? '' : it.cost.toFixed(1)}${unit(it.kind)}</td><td><button type="button" class="link" data-mk="${i}">watch</button></td></tr>`)
+        .join('')}</tbody></table>`
+    : '<p class="hint">None of this kind.</p>';
+  for (const b of $('mkList').querySelectorAll<HTMLButtonElement>('button[data-mk]')) b.onclick = () => void watchMistake(Number(b.dataset.mk));
+}
+async function loadMistakes(): Promise<void> {
+  try {
+    MK = await getJSON(`/api/mistakes${HOME?.profile ? `?profile=${encodeURIComponent(HOME.profile)}` : ''}`);
+    renderMistakes();
+  } catch (e) {
+    $('mkList').innerHTML = `<p class="hint">${esc((e as Error).message)}</p>`;
+  }
+}
+async function watchMistake(i: number): Promise<void> {
+  const it = MK?.audit?.items[i];
+  if (!it || !MK) return;
+  try {
+    toast('replaying that exam match in DSIM…');
+    const f = await post<{ frames: Frames; events: [number, string][]; tick: number }>('/api/mistakes/watch', { profile: MK.profile, i });
+    view.loadFocus({ gen: 0, fitness: 0, score: 0, death: 'survived', parts: { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 }, lineage: { id: -1, op: 'champion', parents: [], muts: 0, born: 0 }, frames: f.frames, events: f.events } as FocusFile);
+    view.seek(Math.max(0, f.tick - 180));
+    view.playing = true;
+    $('play').textContent = 'Pause';
+    replayLabel = `mistake · ${MK_LABEL[it.kind]}: ${it.detail} · exam match ${it.match + 1} at ${((it.tick - AUTO_START) / 60).toFixed(1)} s (from 3 s before)`;
+    setMode('replay');
+  } catch (e) {
+    toast((e as Error).message, true);
+  }
+}
+$('mkFilter').onchange = () => renderMistakes();
+void loadMistakes();
 
 $('modeLive').onclick = () => void showLive(newest());
 $('modeBest').onclick = () => void showBest(newest());
@@ -901,7 +1057,7 @@ view.onFrame = (f: FrameInfo) => {
     const hop = [...(f.hopper ?? '')].map((c) => `<i class="dot ${c}"></i>`).join('') || '<span class="sub">empty</span>';
     const ph = f.phase === 'teleop' ? 'TELEOP' : f.phase === 'auto' ? 'AUTO' : (f.phase ?? '').toUpperCase();
     if (mode === 'champion') renderInspector(f.tick);
-    $('overlay').innerHTML = `<span class="alive">${f.score ?? 0}</span>DSIM points · ${f.tips ?? 0} tips · ${ph} ${Math.max(0, f.phaseLeft ?? 0).toFixed(0)} s<br>hopper ${hop}<br>${opt ? `<i class="optsw" style="background:${opt.color}"></i>${esc(f.option ?? '')}` : '<span class="sub">deciding…</span>'}<br><span class="sub">${mode === 'champion' ? `champion #${champId}` : mode === 'playbook' ? 'AUTO playbook, luck draw 1' : `best lesson match of generation ${fmt(bestGen)}`} · exactly as played · ${speed}×</span>`;
+    $('overlay').innerHTML = `<span class="alive">${f.score ?? 0}</span>DSIM points · ${f.tips ?? 0} tips · ${ph} ${Math.max(0, f.phaseLeft ?? 0).toFixed(0)} s<br>hopper ${hop}<br>${opt ? `<i class="optsw" style="background:${opt.color}"></i>${esc(f.option ?? '')}` : '<span class="sub">deciding…</span>'}<br><span class="sub">${mode === 'champion' ? `champion #${champId}` : mode === 'playbook' ? 'AUTO playbook, luck draw 1' : mode === 'replay' ? esc(replayLabel) : `best lesson match of generation ${fmt(bestGen)}`} · exactly as played · ${speed}×</span>`;
   }
 };
 /** the decision the champion was at on this tick: every option it had, what the network scored,
@@ -1165,6 +1321,8 @@ function connect(): void {
       renderHome();
     } else void loadHome();
   });
+  es.addEventListener('routes', () => void loadRoutes());
+  es.addEventListener('mistakes', () => void loadMistakes());
   es.addEventListener('quit', () => {
     es.close();
     showClosed();

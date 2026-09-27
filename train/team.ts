@@ -21,7 +21,7 @@ export const PARTNER_KINDS = ['none', 'real', 'sniper', 'hauler', 'skimmer', 'pa
 export type PartnerKind = (typeof PARTNER_KINDS)[number];
 /** how a seat's brain plays: its skills in the network's (or the greedy) order; drive off the wall
  * and park; or nothing at all */
-export type BrainMode = 'play' | 'park' | 'idle';
+export type BrainMode = 'play' | 'park' | 'idle' | 'defend';
 
 export interface PartnerDef {
   kind: PartnerKind;
@@ -41,6 +41,31 @@ export const PARTNERS: Record<PartnerKind, PartnerDef> = {
   parker: { kind: 'parker', label: 'Parks only', blurb: 'drives off the wall and parks: LEAVE + PARK, nothing else', mode: 'park', build: 0 },
   idle: { kind: 'idle', label: 'Does nothing', blurb: 'a robot that never moves (it still takes up space)', mode: 'idle', build: 0 },
 };
+// ─────────────────────────────── opponents (MASTERPLAN phase 5) ───────────────────────────────
+/** the RED alliance a match can bring. Every red robot plays with the same skills (the no-learning
+ * order, or a network), a typical robot's limits and misses, and its own alliance board:
+ *   · MIRROR — two copies of our robot: every element contested (self-play when they carry our network)
+ *   · PRESETS — DSIM's shipped Skimmer and Sniper playing their own game on the shared field
+ *   · DEFENSE — a Sniper that plays DEFENSE (in AUTO it only leaves; in TELEOP it shadows our robot
+ *     24 in toward our HIVE, in the way of its shots and its path home; it parks at the end) beside
+ *     a Skimmer that plays */
+export const OPPONENT_KINDS = ['none', 'presets', 'mirror', 'defense'] as const;
+export type OpponentKind = (typeof OPPONENT_KINDS)[number];
+export interface OpponentDef {
+  kind: OpponentKind;
+  label: string;
+  blurb: string;
+  robots: { build: PartnerKind; mode: BrainMode }[];
+}
+export const OPPONENTS: Record<OpponentKind, OpponentDef> = {
+  none: { kind: 'none', label: 'No opponents', blurb: 'the red side empty', robots: [] },
+  presets: { kind: 'presets', label: 'Skimmer + Sniper', blurb: "DSIM's shipped builds playing their own game", robots: [{ build: 'skimmer', mode: 'play' }, { build: 'sniper', mode: 'play' }] },
+  mirror: { kind: 'mirror', label: 'Two REAL-v1s', blurb: 'two copies of our robot: every element contested', robots: [{ build: 'real', mode: 'play' }, { build: 'real', mode: 'play' }] },
+  defense: { kind: 'defense', label: 'Defender + Skimmer', blurb: 'a Sniper shadows our robot toward our HIVE; a Skimmer plays', robots: [{ build: 'sniper', mode: 'defend' }, { build: 'skimmer', mode: 'play' }] },
+};
+/** the first red robot starts at DSIM's top-rear anchor (mirrored for red), the second at the first legal anchor beside it */
+export const OPP_FIRST_START = 'TOP_REAR' as const;
+
 /** the partners a playbook covers (every kind but 'none') */
 export const PLAYBOOK_PARTNERS: PartnerKind[] = ['real', 'sniper', 'hauler', 'skimmer', 'parker', 'idle'];
 

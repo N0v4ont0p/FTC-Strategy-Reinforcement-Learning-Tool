@@ -43,6 +43,8 @@ export const ACT_WINDOW = 20; // ticks: a pickup / shot this recent is what the 
 
 /** counts a robot's play from world state, one tick at a time. Plain fields: forkable. */
 export class Tally {
+  private holder = new Map<number, number>(); // element → the robot holding it (last)
+  private mine = new Set<number>(); // elements in the air that this robot shot
   parts: Parts = { pickups: 0, shotsIn: 0, wasted: 0, hp: 0, tips: 0, violations: 0, strikes: 0 };
   activity: Activity = { collect: 0, shoot: 0, drive: 0, idle: 0 };
   loads: Loads = { n: 0, shots: 0, first: -1, last: -1 };
@@ -61,6 +63,8 @@ export class Tally {
       const pk = this.prevKind.get(b.id);
       const k = b.state.kind;
       if (pk !== undefined && pk !== k) {
+        // only this robot's own shots are its shots (a partner's or an opponent's are theirs)
+        const mine = pk === 'flight' && this.mine.delete(b.id);
         if (k === 'held' && (b.state as { robot: number }).robot === r.id) {
           parts.pickups++;
           progress = true;
@@ -68,6 +72,11 @@ export class Tally {
           this.pickedSinceShot = true;
           ev.push('pickup');
         } else if (pk === 'held' && k === 'flight') {
+          if (this.holder.get(b.id) !== r.id) {
+            this.prevKind.set(b.id, k);
+            continue;
+          }
+          this.mine.add(b.id);
           this.lastShot = t;
           this.loads.shots++;
           if (this.pickedSinceShot) {
@@ -77,20 +86,21 @@ export class Tally {
           }
           this.pickedSinceShot = false;
           ev.push('shot');
-        } else if (pk === 'flight' && k === 'element' && (b.state as { el: string }).el === `hive:${r.alliance}`) {
+        } else if (mine && k === 'element' && (b.state as { el: string }).el === `hive:${r.alliance}`) {
           parts.shotsIn++;
           progress = true;
           ev.push('shotIn');
-        } else if (pk === 'flight' && k === 'ground') {
+        } else if (mine && k === 'ground') {
           parts.wasted++;
           ev.push('wasted');
-        } else if (pk === 'stock' && k === 'ground') {
+        } else if (pk === 'stock' && k === 'ground' && b.color === r.alliance) {
           parts.hp++;
           progress = true;
           ev.push('hp');
         }
       }
       this.prevKind.set(b.id, k);
+      if (k === 'held') this.holder.set(b.id, (b.state as { robot: number }).robot);
     }
     const tips = bb(w).hives[r.alliance].tips;
     if (tips > parts.tips) {

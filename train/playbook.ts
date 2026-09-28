@@ -6,7 +6,7 @@
 // exact replay). A build can stop and continue; an entry is only redone when asked.
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { WorkerPool } from '../harness/pool';
@@ -17,9 +17,14 @@ import { Store } from './store';
 import { PARTNERS, PLAYBOOK_PARTNERS, STARTS, legalPair, partnerProfile, type PartnerKind, type StartId } from './team';
 import type { Frames } from './episode';
 import { ensureEnvelopes } from './envelope';
+import { AUTO_RULES } from './skills';
+import { zoneStamp } from './zone';
 
 export const PLAYBOOK_DIR = join(ROOT, 'outputs', 'playbook');
-export type PlaybookEntry = Omit<AutoResult, 'frames' | 'events'> & { key: string; at: string };
+/** `rules`: the AUTO rules and shooting zone it was planned under; `stale`: not today's (a build plans it again) */
+export type PlaybookEntry = Omit<AutoResult, 'frames' | 'events'> & { key: string; at: string; rules?: string; stale?: boolean };
+/** what a plan depends on besides the problem: the AUTO rules (skills.ts AUTO_RULES) and the robot's shooting zone */
+export const rulesStamp = (profile: string): string => `${AUTO_RULES}|${zoneStamp(loadProfile(isAbsolute(profile) ? profile : join(ROOT, profile)).shootZone)}`;
 /** an entry's replay: exact frames and the match's events (what the studio's field view plays) */
 export interface PlaybookReplay {
   frames: Frames;
@@ -94,11 +99,12 @@ export class Playbook extends EventEmitter {
   }
 
   entries(): PlaybookEntry[] {
-    return this.store.plans<PlaybookEntry>('auto').map((e) => ({ ...e, key: e.key }));
+    const now = rulesStamp(this.profile);
+    return this.store.plans<PlaybookEntry>('auto').map((e) => ({ ...e, key: e.key, stale: e.rules !== now }));
   }
   entry(key: string): PlaybookEntry | null {
     const e = this.store.plan<PlaybookEntry>('auto', key);
-    return e ? { ...e, key } : null;
+    return e ? { ...e, key, stale: e.rules !== rulesStamp(this.profile) } : null;
   }
   replay(key: string): PlaybookReplay | null {
     const f = join(this.dir, `${fileOf(key)}.frames.json.gz`);
@@ -126,7 +132,9 @@ export class Playbook extends EventEmitter {
     this.stopFlag = false;
     const cfg: AutoCfg = o.budget === 'quick' ? AUTO_QUICK : AUTO_CFG;
     const all = problems(this.profile, o).map((P) => ({ ...P, genome: o.genome ?? null }));
-    const have = new Set(this.entries().map((e) => e.key));
+    // (an entry planned under other rules or another shooting zone is planned again)
+    const have = new Set(this.entries().filter((e) => !e.stale).map((e) => e.key));
+    const rules = rulesStamp(this.profile);
     const todo = o.redo ? all : all.filter((P) => !have.has(keyOf(P)));
     const t0 = Date.now();
     const took: number[] = [];
@@ -158,7 +166,7 @@ export class Playbook extends EventEmitter {
         Object.assign(this.status, { entryS: took.reduce((a, b) => a + b, 0) / took.length, estimated: false });
         if (this.stopFlag) break;
         const { frames, events, ...rest } = r;
-        this.store.putPlan('auto', key, rest.nominal.mean, rest);
+        this.store.putPlan('auto', key, rest.nominal.mean, { ...rest, rules });
         if (frames) writeFileSync(join(this.dir, `${fileOf(key)}.frames.json.gz`), gzipSync(JSON.stringify({ frames, events: events ?? [] } satisfies PlaybookReplay)));
         this.status.done++;
         this.say(`${describe(P)}: ${rest.nominal.mean.toFixed(1)} ± ${rest.nominal.ci95.toFixed(1)} AUTO points (no plan ${rest.baseline.mean.toFixed(1)}), ${rest.seconds.toFixed(0)} s`);

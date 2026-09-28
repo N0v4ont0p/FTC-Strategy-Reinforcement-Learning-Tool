@@ -188,3 +188,75 @@ export function drawEnvelope(canvas: HTMLCanvasElement, field: World, spec: unkn
   paint(spots.south, 'rgba(246, 183, 60, 0.55)');
   if (start) drawBiobuzzRobot(ctx, robotAt(w, spec, start.x, start.y, start.h), false, [], UP, w);
 }
+
+/** THE SHOOTING ZONE EDITOR's field (Robot tab): every measured scoring spot faint, the ones inside
+ * the team's zone bright (blue: shooting at the north cell, amber: the south), the distance limits as
+ * rings round each cell, and the drawn area with its corner handles. Returns the canvas ↔ field
+ * mapping (CSS pixels ↔ inches, blue frame) for the editor's mouse. */
+export function drawZone(canvas: HTMLCanvasElement, field: World, all: { north: Vec2[]; south: Vec2[] }, kept: { north: Vec2[]; south: Vec2[] }, zone: { maxDist?: number | null; minDist?: number | null; area?: Vec2[] | null } | null, cells: { north: Vec2; south: Vec2 }, css = 360, hot = -1): { toField: (x: number, y: number) => Vec2; toCss: (x: number, y: number) => Vec2 } {
+  const dpr = window.devicePixelRatio || 1;
+  const { ctx, s } = setup(canvas, css, dpr);
+  const w = structuredClone(field);
+  drawBiobuzzField(ctx, w, UP);
+  const px = 1 / s;
+  const paint = (pts: Vec2[], color: string, size: number): void => {
+    ctx.fillStyle = color;
+    for (const p of pts) ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+  };
+  paint([...all.north, ...all.south], 'rgba(168, 156, 138, 0.22)', 1.6);
+  paint(kept.north, 'rgba(124, 196, 255, 0.75)', 2);
+  paint(kept.south, 'rgba(246, 183, 60, 0.75)', 2);
+  const ring = (c: Vec2, r: number, color: string, dash: number[]): void => {
+    ctx.save();
+    ctx.setLineDash(dash.map((d) => d * px));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 * px;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  };
+  for (const [side, color] of [['north', '#7cc4ff'], ['south', '#f6b73c']] as const) {
+    if ((zone?.maxDist ?? 0) > 0) ring(cells[side], zone!.maxDist!, color, [6, 4]);
+    if ((zone?.minDist ?? 0) > 0) ring(cells[side], zone!.minDist!, color, [2, 3]);
+  }
+  const area = zone?.area ?? [];
+  if (area.length) {
+    ctx.save();
+    ctx.beginPath();
+    area.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    if (area.length >= 3) {
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(246, 183, 60, 0.10)';
+      ctx.fill();
+    }
+    ctx.strokeStyle = '#f6b73c';
+    ctx.lineWidth = 2 * px;
+    ctx.stroke();
+    ctx.restore();
+  }
+  const M = ctx.getTransform();
+  const inv = M.inverse();
+  // the corner handles, in pixels (round whatever the field's rotation)
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  area.forEach((p, i) => {
+    const q = M.transformPoint(new DOMPoint(p.x, p.y));
+    ctx.beginPath();
+    ctx.arc(q.x, q.y, (i === hot ? 7 : 5) * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = i === hot ? '#ffd27a' : '#f6b73c';
+    ctx.fill();
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeStyle = '#0e0b08';
+    ctx.stroke();
+  });
+  return {
+    toField: (x, y) => {
+      const q = inv.transformPoint(new DOMPoint(x * dpr, y * dpr));
+      return { x: q.x, y: q.y };
+    },
+    toCss: (x, y) => {
+      const q = M.transformPoint(new DOMPoint(x, y));
+      return { x: q.x / dpr, y: q.y / dpr };
+    },
+  };
+}

@@ -178,6 +178,7 @@ export interface PlaybookEntryV {
   style: number[] | null;
   explored: number;
   seconds: number;
+  stale?: boolean; // planned under older AUTO rules or another shooting zone
 }
 export interface PlaybookStatusV {
   running: boolean;

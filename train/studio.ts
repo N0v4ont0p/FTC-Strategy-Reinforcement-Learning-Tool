@@ -59,7 +59,8 @@ function newest(dir: string): number {
   return t;
 }
 const built = join(ROOT, 'train', 'public', 'index.html');
-if (!existsSync(built) || Math.max(newest(join(ROOT, 'viewer')), statSync(join(ROOT, 'train', 'engine.ts')).mtimeMs) > statSync(built).mtimeMs) {
+// (train/zone.ts is the viewer's too: the Robot tab's shooting-zone editor imports it)
+if (!existsSync(built) || Math.max(newest(join(ROOT, 'viewer')), ...['engine.ts', 'zone.ts'].map((f) => statSync(join(ROOT, 'train', f)).mtimeMs)) > statSync(built).mtimeMs) {
   console.log('building the viewer…');
   execFileSync(bin('vite'), ['build', join(ROOT, 'viewer'), '--config', join(ROOT, 'viewer/vite.config.ts'), '--logLevel', 'error'], { stdio: 'inherit' });
 }

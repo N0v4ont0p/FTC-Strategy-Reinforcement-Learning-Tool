@@ -378,3 +378,25 @@ details.card[open] summary h2::after { content: ' ▾'; }
 .pulse.off { background: var(--honey); animation: none; }
 .jplog { font-size: 10.5px; color: var(--smoke); max-height: 92px; overflow: auto; border-top: 1px solid #2c241c; padding-top: 5px; }
 .jplog div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* the shooting zone editor (Robot tab) */
+.zone { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.zhead { display: flex; align-items: center; gap: 10px; }
+.zhead h3 { margin: 0; font: 700 13px var(--f-display); letter-spacing: 0.05em; text-transform: uppercase; color: var(--honey-hi); }
+.zbody { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start; }
+.zbody canvas { border-radius: 8px; cursor: crosshair; touch-action: none; }
+.zbody canvas.drag { cursor: grabbing; }
+.zctl { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.zslider { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; font-size: 12px; color: var(--wax); }
+.zslider span { grid-column: 1 / -1; }
+.zslider input { width: 100%; accent-color: var(--honey); }
+.zslider b { font-size: 12px; color: var(--honey-hi); min-width: 5.5em; text-align: right; }
+.zpresets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.zpresets button { padding: 4px 10px; font-size: 11.5px; }
+.zstats { font-size: 12px; color: var(--smoke); display: flex; flex-direction: column; gap: 3px; }
+.zstats b { color: var(--wax); font-family: var(--f-mono); font-weight: 600; }
+.zstats .n { color: #7cc4ff; }
+.zstats .s { color: #f6b73c; }
+.zbody.stack { grid-template-columns: 1fr; justify-items: center; }
+.zbody.stack .zctl { width: 100%; }
+.zctl > button.link { align-self: flex-start; }

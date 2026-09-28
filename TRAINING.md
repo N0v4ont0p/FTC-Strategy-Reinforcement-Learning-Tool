@@ -71,6 +71,19 @@ weak partner costs points: it holds its own preloads, which would otherwise be i
 
 ## The AUTO playbook (v2 phase 2)
 
+**AUTO is played in our own half.** Every robot a brain drives — ours, every partner kind, both
+opponents — keeps its whole footprint on its own side of the centre line for the 30 s of AUTO
+(blue x > 0; stricter than G402, which fouls only a robot fully across *and* touching an opponent).
+The options list only what can be reached from our side (elements, FLOWERs F3/F4, scoring spots,
+spill waits, each pose checked corner by corner with 2 in to spare), and the drive has a last-word
+guard: braking distance toward the line, momentum, a spin an element knocked in, and the traffic
+rule's sideways slide can never put a corner over. TELEOP is the whole field again. Measured on 60
+AUTOs (every partner kind, opponents on): the old robots went up to 72 in into the red half; now none
+crosses, and AUTO points are unchanged (46.3 → 47.6). One consequence: beside a second REAL-v1 the
+two robots' own AUTOs are now about as good as a joint plan gets (a joint plan's big gains came from
+the far half); alone, planning still adds ~7 points. Entries planned before this rule show as
+**outdated** and are planned again on the next build.
+
 The **Playbook** tab answers "our partner can do X — what do we run in AUTO?": the best 30 s AUTO for
 our robot beside every kind of partner, from every legal pair of starts (165 entries for REAL-v1),
 found by **search in DSIM**, not learned (`train/auto.ts`, `train/playbook.ts`).
@@ -232,6 +245,15 @@ something on the real robot, narrow its range here.
   **shooting envelope** on the field (every 2-in spot a shot goes in from). **Measure its envelope**
   when it says *not measured* (about a minute on every core; not while training).
 - **Save** writes `profiles/<name>.json` (never over another robot by accident; not while it trains).
+- **Shooting zone** (`train/zone.ts`): where the team lets the robot shoot from. DSIM scores a shot
+  from wherever its physics lands it — out to ~86 in from a cell for REAL-v1 — and the real robot is
+  less sure far out. Limit the **farthest** (and nearest) distance from the cell it shoots at, and/or
+  **draw an area** on the field (click to add a corner, drag to move, double-click to remove), or
+  start from a preset (everything DSIM scores · close 36 in · medium 54 in · our half). The field
+  shows every measured spot faint and the ones kept bright, with the count per cell. With a zone the
+  robot only drives to scoring spots inside it and **only holds fire inside it** (sweeping-and-firing
+  included). A zone that leaves a cell without a single spot is not saved. Changing it marks playbook
+  and team-play entries **outdated**: the next build plans them again.
 
 ## The printed playbook
 

@@ -13,7 +13,8 @@ import { join } from 'node:path';
 import { coerce, type RobotSpec } from '../harness/dsim';
 import { buildOf, loadProfile, pinned, profileProblems, resolve, type ProfileFile } from '../harness/profiles';
 import { ROOT } from './engine';
-import { envelopeOf, envelopeQuality } from './envelope';
+import { envelopeOf, envelopeQuality, zonedEnvelope } from './envelope';
+import { zoneActive, zoneProblems } from './zone';
 import { startPoseOf } from './team';
 
 export const PROFILE_DIR = join(ROOT, 'profiles');
@@ -98,7 +99,15 @@ export function shapeProblems(p: ProfileFile): string[] {
       if (!nums.every((x) => typeof x === 'number' && Number.isFinite(x))) out.push(`${g}.${k}: not a number`);
       else if (!(v.min <= v.nominal && v.nominal <= v.max)) out.push(`${FIELD_INFO[`${g}.${k}`]?.label ?? `${g}.${k}`}: needs min ≤ nominal ≤ max`);
     }
+  out.push(...zoneProblems(p.shootZone));
   return out;
+}
+
+/** a shooting zone must leave the robot somewhere to shoot at each CELL from */
+export function zoneEmpty(p: ProfileFile): string[] {
+  if (!zoneActive(p.shootZone)) return [];
+  const z = zonedEnvelope(resolve(p).spec, p.shootZone).spots;
+  return (['north', 'south'] as const).filter((s) => !z[s].length).map((s) => `shooting zone: no measured scoring spot for the ${s} CELL is left inside it — widen it`);
 }
 
 export interface Inspection {
@@ -120,7 +129,7 @@ export function inspectRobot(p: ProfileFile): Inspection {
   const at = (end: 'min' | 'max'): RobotSpec => resolve(pinned(p, Object.fromEntries(ranges.map(([k, v]) => [`spec.${k}`, v[end]])))).spec;
   const env = envelopeOf(nominal);
   return {
-    problems: profileProblems(p, true),
+    problems: [...zoneEmpty(p), ...profileProblems(p, true)],
     build: describeBuild(nominal),
     nominal,
     small: at('min'),
@@ -214,7 +223,7 @@ export const fileFor = (id: string): string => `profiles/${id.toLowerCase().repl
 
 /** save (the shape must be sound; DSIM problems are saved too — the studio shows them and training refuses) */
 export function saveRobot(p: ProfileFile, overwrite: boolean): string {
-  const shape = shapeProblems(p);
+  const shape = [...shapeProblems(p), ...zoneEmpty(p)];
   if (shape.length) throw new Error(shape.join('; '));
   const file = fileFor(String(p.id));
   if (existsSync(join(ROOT, file)) && !overwrite) throw new Error(`${file} exists — save over it, or give the robot another name`);

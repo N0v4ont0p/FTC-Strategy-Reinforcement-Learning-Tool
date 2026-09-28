@@ -267,6 +267,26 @@
             </div>
             <div class="row"><span id="rbEnvQ" class="sub grow"></span><button id="rbMeasure" type="button" class="quiet small">Measure its envelope</button></div>
             <div id="rbProblems" class="problems"></div>
+            <section class="zone" aria-labelledby="rbZoneH">
+              <div class="zhead"><h3 id="rbZoneH">Shooting zone</h3><span id="rbZoneSum" class="badge"></span></div>
+              <p class="hint">Where the robot may shoot from. DSIM scores a shot from wherever the physics lands it; the real robot is less sure far out. The robot only drives to scoring spots inside the zone and only holds fire inside it. <b>Draw an area:</b> click the field to add a corner, drag a corner to move it, double-click a corner to remove it.</p>
+              <div class="zbody">
+                <canvas id="rbZoneCanvas" aria-label="the shooting zone on the field"></canvas>
+                <div class="zctl">
+                  <label class="zslider"><span>Farthest from the cell it shoots at</span><input id="rbZoneMax" type="range" min="0" max="120" step="2" /><b id="rbZoneMaxV" class="mono"></b></label>
+                  <label class="zslider"><span>Nearest to it</span><input id="rbZoneMin" type="range" min="0" max="60" step="2" /><b id="rbZoneMinV" class="mono"></b></label>
+                  <div class="zpresets"><span class="hint">Start from</span>
+                    <button type="button" class="quiet small" data-zp="off">Everything DSIM scores</button>
+                    <button type="button" class="quiet small" data-zp="36">Close · 36 in</button>
+                    <button type="button" class="quiet small" data-zp="54">Medium · 54 in</button>
+                    <button type="button" class="quiet small" data-zp="ours">Our half</button>
+                  </div>
+                  <button id="rbZoneClear" type="button" class="link">remove the drawn area</button>
+                  <div id="rbZoneStats" class="zstats"></div>
+                  <p class="hint">Saved with the robot. Playbook and team-play entries made under another zone show as <span class="badge warn">outdated</span> and are planned again on the next build.</p>
+                </div>
+              </div>
+            </section>
             <div id="rbRanges" class="ranges"></div>
             <div class="row end"><button id="rbSaveAs" type="button" class="quiet">Save as new</button><button id="rbSave" type="button">Save</button></div>
           </div>

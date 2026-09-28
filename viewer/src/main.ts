@@ -2,7 +2,8 @@ import { Comb } from './comb';
 import { CHOICE_PARTS, LineChart, StackChart, historyTable } from './charts';
 import { AUTO_START, OPTIONS, OP_LABEL, bytes, fmt, getJSON, post, type CheckpointMeta, type EvalResult, type ExamResult, type FocusFile, type Frames, type GenFile, type GenSummary, type Inspected, type PlaybookStatusV, type PlaybookV, type HomeStatusV, type HomeV, type RouteLibraryV, type AuditV, type AuditPointV, type Progress, type RunConfig, type RunState, type State, type Status, type DataInfo } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
-import { drawBuild, drawEnvelope, drawPlan } from './plandiagram';
+import { drawBuild, drawEnvelope, drawPlan, drawZone } from './plandiagram';
+import { cellCentre, zoneActive, zoneSpots, type ShootZone } from '../../train/zone';
 import type { ProfileFile } from '../../harness/profiles';
 import type { World } from '../../dsim-main/src/types';
 
@@ -717,7 +718,7 @@ function renderPlaybook(): void {
     ? `<table><thead><tr><th>entry</th><th title="our nominal robot, 64 fresh luck draws">AUTO points</th><th title="mean of the worst tenth of those draws">worst tenth</th><th title="the same draws with no plan (every robot its own brain)">vs no plan</th><th title="robots drawn from the profile's range">robot range</th></tr></thead><tbody>${rows
         .map(
           (e) =>
-            `<tr data-key="${esc(e.key)}" class="pick${e.key === pbSelected ? ' sel' : ''}"><td>${esc(pbLabel(e.key))}</td><td class="mono">${e.nominal.mean.toFixed(1)} ± ${e.nominal.ci95.toFixed(1)}</td><td class="mono">${e.nominal.cvar10.toFixed(1)}</td><td class="mono">${sgn(e.nominal.mean - e.baseline.mean)}</td><td class="mono">${e.sampled.mean.toFixed(1)}</td></tr>`,
+            `<tr data-key="${esc(e.key)}" class="pick${e.key === pbSelected ? ' sel' : ''}"><td>${esc(pbLabel(e.key))}${e.stale ? ' <span class="badge warn" title="planned under older AUTO rules or another shooting zone — Build playbook plans it again">outdated</span>' : ''}</td><td class="mono">${e.nominal.mean.toFixed(1)} ± ${e.nominal.ci95.toFixed(1)}</td><td class="mono">${e.nominal.cvar10.toFixed(1)}</td><td class="mono">${sgn(e.nominal.mean - e.baseline.mean)}</td><td class="mono">${e.sampled.mean.toFixed(1)}</td></tr>`,
         )
         .join('')}</tbody></table>`
     : `<p class="hint">${PB.status.running ? 'The first entry appears when it is planned.' : 'Nothing planned yet — press Build playbook.'}</p>`;
@@ -965,6 +966,7 @@ void loadRoutes();
 type Words = { us: Record<string, string>; partner: Record<string, string> };
 interface TeamEntryV {
   partner: string;
+  stale?: boolean;
   time: string;
   seconds: number;
   evaluated: number;
@@ -994,7 +996,7 @@ function renderTeam(): void {
   $('tpPartners').innerHTML = TP_PARTNERS.map(([k, l]) => {
     const e = TP!.entries.find((x) => x.partner === k);
     const b = e?.ranked[0];
-    return `<button type="button" class="chip${k === tpPartner ? ' sel' : ''}" data-p="${k}"><b>${esc(l)}</b>${b ? `<span class="${b.vsFree > 0 ? 'up' : ''}">${b.play.label.split(' (')[0]} ${sgn(b.vsFree)}</span>` : '<span>not searched</span>'}</button>`;
+    return `<button type="button" class="chip${k === tpPartner ? ' sel' : ''}" data-p="${k}"><b>${esc(l)}${e?.stale ? ' <span class="badge warn" title="searched under older AUTO rules or another shooting zone — Search plays searches it again">outdated</span>' : ''}</b>${b ? `<span class="${b.vsFree > 0 ? 'up' : ''}">${b.play.label.split(' (')[0]} ${sgn(b.vsFree)}</span>` : '<span>not searched</span>'}</button>`;
   }).join('');
   for (const b of $('tpPartners').querySelectorAll<HTMLButtonElement>('button[data-p]'))
     b.onclick = () => {
@@ -1514,6 +1516,156 @@ function renderInspection(): void {
     $('rbEnvCap').textContent = `where it can score from — blue: aiming at the north cell, amber: the south (${I.envelope.spots.north.length + I.envelope.spots.south.length} spots)`;
     $<HTMLButtonElement>('rbMeasure').hidden = q === 'measured';
   }
+  renderZone();
+}
+
+// ── the shooting zone (train/zone.ts): distance limits and a drawn area, blue frame ──
+let zMap: ReturnType<typeof drawZone> | null = null;
+let zDrag = -1;
+let zHot = -1;
+const zoneOf = (): ShootZone => (RE?.p.shootZone ?? {}) as ShootZone;
+/** set the robot's zone (nothing limited = no zone at all) and check it again */
+function setZone(z: ShootZone, check = true): void {
+  if (!RE) return;
+  const clean: ShootZone = {};
+  if ((z.maxDist ?? 0) > 0) clean.maxDist = z.maxDist;
+  if ((z.minDist ?? 0) > 0) clean.minDist = z.minDist;
+  if (z.area?.length) clean.area = z.area;
+  RE.p.shootZone = Object.keys(clean).length ? clean : null;
+  renderZone();
+  if (check) inspectSoon();
+}
+function renderZone(): void {
+  const E = RE;
+  const I = E?.insp;
+  if (!E || !I || !FIELD) return;
+  const z = zoneOf();
+  const on = zoneActive(z);
+  const kept = zoneSpots(on ? z : null, I.envelope.spots);
+  // side by side when the editor is wide enough, else the field on top and the controls under it
+  const wide = $('rbEditor').clientWidth;
+  const stack = wide < 700;
+  $('rbZoneCanvas').parentElement!.classList.toggle('stack', stack);
+  const css = stack ? Math.max(200, Math.min(440, wide - 36)) : Math.min(420, wide - 330);
+  zMap = drawZone($<HTMLCanvasElement>('rbZoneCanvas'), FIELD, I.envelope.spots, kept, z, { north: cellCentre('north'), south: cellCentre('south') }, css, zDrag >= 0 ? zDrag : zHot);
+  const mx = $<HTMLInputElement>('rbZoneMax');
+  const mn = $<HTMLInputElement>('rbZoneMin');
+  mx.value = String(z.maxDist ?? 0);
+  mn.value = String(z.minDist ?? 0);
+  $('rbZoneMaxV').textContent = (z.maxDist ?? 0) > 0 ? `${z.maxDist} in` : 'no limit';
+  $('rbZoneMinV').textContent = (z.minDist ?? 0) > 0 ? `${z.minDist} in` : 'no limit';
+  const all = I.envelope.spots.north.length + I.envelope.spots.south.length;
+  const k = kept.north.length + kept.south.length;
+  const sum = $('rbZoneSum');
+  sum.className = `badge ${!on ? '' : kept.north.length && kept.south.length ? 'ok' : 'warn'}`;
+  sum.textContent = on ? `${k} of ${all} scoring spots kept` : 'off — everything DSIM scores';
+  const far = (side: 'north' | 'south'): string => {
+    const c = cellCentre(side);
+    const d = kept[side].reduce((m, p) => Math.max(m, Math.hypot(p.x - c.x, p.y - c.y)), 0);
+    return kept[side].length ? `${kept[side].length} of ${I.envelope.spots[side].length} spots, farthest <b>${d.toFixed(0)} in</b>` : '<b>no spot left — widen the zone</b>';
+  };
+  $('rbZoneStats').innerHTML = `<span class="n">● north cell: ${far('north')}</span><span class="s">● south cell: ${far('south')}</span>${(z.area?.length ?? 0) > 0 && (z.area?.length ?? 0) < 3 ? '<span>the area needs 3 corners to count</span>' : ''}`;
+  $<HTMLButtonElement>('rbZoneClear').hidden = !(z.area?.length ?? 0);
+}
+$<HTMLInputElement>('rbZoneMax').oninput = () => setZone({ ...zoneOf(), maxDist: Number($<HTMLInputElement>('rbZoneMax').value) });
+$<HTMLInputElement>('rbZoneMin').oninput = () => setZone({ ...zoneOf(), minDist: Number($<HTMLInputElement>('rbZoneMin').value) });
+$('rbZoneClear').onclick = () => setZone({ ...zoneOf(), area: null });
+for (const b of document.querySelectorAll<HTMLButtonElement>('[data-zp]'))
+  b.onclick = () => {
+    const v = b.dataset.zp!;
+    setZone(v === 'off' ? {} : v === 'ours' ? { area: [{ x: 0, y: -72 }, { x: 72, y: -72 }, { x: 72, y: 72 }, { x: 0, y: 72 }] } : { maxDist: Number(v) });
+  };
+{
+  const cv = $<HTMLCanvasElement>('rbZoneCanvas');
+  const snap = (p: { x: number; y: number }): { x: number; y: number } => ({ x: Math.max(-72, Math.min(72, Math.round(p.x))), y: Math.max(-72, Math.min(72, Math.round(p.y))) });
+  /** the pointer on the canvas, CSS px */
+  const at = (e: MouseEvent): { x: number; y: number } => {
+    const R = cv.getBoundingClientRect();
+    return { x: e.clientX - R.left, y: e.clientY - R.top };
+  };
+  /** the corner under the pointer (within 9 px), or −1 */
+  const hit = (e: PointerEvent | MouseEvent): number => {
+    const m = at(e);
+    const a = zoneOf().area ?? [];
+    let best = -1;
+    let bd = 81;
+    a.forEach((p, i) => {
+      const q = zMap!.toCss(p.x, p.y);
+      const d = (q.x - m.x) ** 2 + (q.y - m.y) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    });
+    return best;
+  };
+  const segDist = (p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }): number => {
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * ex + (p.y - a.y) * ey) / (ex * ex + ey * ey || 1)));
+    return Math.hypot(a.x + ex * t - p.x, a.y + ey * t - p.y);
+  };
+  cv.onpointerdown = (e) => {
+    if (!zMap || !RE?.insp) return;
+    const i = hit(e);
+    cv.setPointerCapture(e.pointerId);
+    if (i >= 0) {
+      zDrag = i;
+      cv.classList.add('drag');
+      return renderZone();
+    }
+    // a new corner, on the edge it is nearest to (so the shape grows the way it is clicked)
+    const m = at(e);
+    const p = snap(zMap.toField(m.x, m.y));
+    const a = [...(zoneOf().area ?? [])];
+    let ins = a.length;
+    if (a.length >= 3) {
+      let bd = Infinity;
+      a.forEach((q, k) => {
+        const d = segDist(p, q, a[(k + 1) % a.length]);
+        if (d < bd) {
+          bd = d;
+          ins = k + 1;
+        }
+      });
+    }
+    a.splice(ins, 0, p);
+    zDrag = ins;
+    cv.classList.add('drag');
+    setZone({ ...zoneOf(), area: a }, false);
+  };
+  cv.onpointermove = (e) => {
+    if (!zMap) return;
+    if (zDrag < 0) {
+      const h = hit(e);
+      if (h !== zHot) {
+        zHot = h;
+        renderZone();
+      }
+      return;
+    }
+    const a = [...(zoneOf().area ?? [])];
+    if (!a[zDrag]) return;
+    const m = at(e);
+    a[zDrag] = snap(zMap.toField(m.x, m.y));
+    setZone({ ...zoneOf(), area: a }, false);
+  };
+  const end = (): void => {
+    if (zDrag < 0) return;
+    zDrag = -1;
+    cv.classList.remove('drag');
+    setZone(zoneOf());
+  };
+  cv.onpointerup = end;
+  cv.onpointercancel = end;
+  cv.ondblclick = (e) => {
+    const i = hit(e);
+    if (i < 0) return;
+    const a = [...(zoneOf().area ?? [])];
+    a.splice(i, 1);
+    zHot = -1;
+    setZone({ ...zoneOf(), area: a.length ? a : null });
+  };
 }
 $<HTMLInputElement>('rbId').oninput = () => {
   if (!RE) return;

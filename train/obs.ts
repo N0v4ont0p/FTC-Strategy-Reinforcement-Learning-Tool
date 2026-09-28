@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BB, C, bb, type RobotState, type World } from '../harness/dsim';
 import type { Resolved } from '../harness/profiles';
-import { envelopeOf, inEnv } from './envelope';
+import { inEnv, zonedEnvelope } from './envelope';
 import { N_OPT_FEATS, type Option } from './skills';
 import { PTS_PER_S, inZone, roleBias, type Role } from './teamplay';
 
@@ -107,7 +107,7 @@ export function encode(w: World, r: RobotState, prof: Resolved, out: Float32Arra
   // where shots should go: the up cell, or the other one once a tip has started (skills.ts targetCell)
   const target = hive.tipping > 0 ? (upBlue === 'north' ? 'south' : 'north') : upBlue;
   put(target === 'north' ? 1 : -1);
-  const env = envelopeOf(r.spec); // this build's own measured envelope
+  const env = zonedEnvelope(r.spec, prof.zone); // this build's own measured envelope, cut to the team's zone
   put(inEnv(env, target, px, py) ? 1 : 0);
   // nearest measured scoring spot for that cell
   let best: Spot | null = null;

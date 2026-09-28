@@ -255,10 +255,12 @@ export class Brain {
   act(w: World): Map<number, RobotCommand> {
     const r = w.robots.find((q) => q.id === this.robotId)!;
     if (!this.pilot) {
-      this.pilot = new Pilot(r.spec, this.prof.limits, this.style);
+      this.pilot = new Pilot(r.spec, this.prof.limits, this.style, this.prof.zone);
       this.pilot.parkSlot = this.parkSlot;
       this.cap = BB.bbHopperCap(r.spec);
     }
+    // AUTO: every robot stays in its own half (skills.ts Pilot.fence)
+    this.pilot.fence = w.match.phase === 'auto' ? (r.alliance === 'blue' ? 1 : -1) : 0;
     if (this.mode === 'idle') return new Map([[this.robotId, cmd()]]);
     if (this.mode === 'park') {
       // a LEAVE + PARK partner: off the wall to its park spot at once, and it stays there
@@ -412,7 +414,8 @@ export class Brain {
     // passes), and fire is held whenever a shot can score
     if ((ph === 'auto' || ph === 'teleop') && r.hopper.length < this.cap && !spillNear) c.intake = true;
     // (a dumper holds fire only at its shooting spot: DSIM's aim assist turns its whole chassis)
-    if (fireGate(w, r) && (!this.pilot.dumper || this.ex?.firing)) c.fire = true;
+    // (and only inside the team's shooting zone: Pilot.mayFire)
+    if (fireGate(w, r) && this.pilot.mayFire(w, r) && (!this.pilot.dumper || this.ex?.firing)) c.fire = true;
     // a JOINT VOLLEY: hold fire until the partner is loaded too (or this hopper is full, or 4 s)
     if (this.role?.hold && c.fire) {
       const mate = w.robots.find((q) => q.alliance === r.alliance && q.id !== this.robotId);

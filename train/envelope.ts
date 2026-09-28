@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { bbLauncherOf, bbLiftOf, type RobotSpec } from '../harness/dsim';
 import { shootingColumn, type ShotCell } from '../harness/s1/lab';
 import { runPool } from '../harness/pool';
+import { zoneActive, zoneSpots, zoneStamp, type ShootZone } from './zone';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const ENV_DIR = join(root, 'outputs/envelopes');
@@ -59,6 +60,19 @@ export function envelopeOf(spec: RobotSpec): Envelope & { set: Record<Side, Set<
   const f = join(ENV_DIR, `${key}.json`);
   const e = existsSync(f) ? withSet(JSON.parse(readFileSync(f, 'utf8')) as Envelope) : nearest(spec) ?? S1;
   cache.set(key, e);
+  return e;
+}
+
+/** this build's envelope cut to the team's shooting zone (train/zone.ts): the spots the robot goes
+ * to, and what "in range" means to it. No zone: the envelope itself. */
+export function zonedEnvelope(spec: RobotSpec, zone: ShootZone | null | undefined): Envelope & { set: Record<Side, Set<string>> } {
+  const env = envelopeOf(spec);
+  if (!zoneActive(zone)) return env;
+  const k = `${env.key}|${zoneStamp(zone)}`;
+  const hit = cache.get(k);
+  if (hit) return hit;
+  const e = withSet({ key: env.key, spots: zoneSpots(zone, env.spots) });
+  cache.set(k, e);
   return e;
 }
 
@@ -118,7 +132,7 @@ export async function ensureEnvelopes(specs: RobotSpec[], log: (s: string) => vo
     writeFileSync(join(ENV_DIR, `${key}.json`), JSON.stringify({ key, spots } satisfies Envelope));
     idx.push({ key, family: familyKey({ ...spec, length: 0, width: 0 }), L: spec.length, W: spec.width });
     writeFileSync(idxF, JSON.stringify(idx));
-    cache.delete(key);
+    cache.clear(); // (builds that fell back to another envelope, and zoned copies, look again)
     log(`shooting envelope measured for ${spec.name ?? key}: ${spots.north.length} + ${spots.south.length} scoring spots (${((performance.now() - t) / 1000).toFixed(0)} s)`);
   }
 }

@@ -37,7 +37,8 @@ import { effective, type Eff } from '../harness/s1/drive';
 import { dropZoneOccupied } from '../harness/filters';
 import { flowerFeet } from '../harness/s1/lab';
 import { polysOverlap, rect } from '../harness/geom';
-import { S1_ENVELOPE, envelopeOf, inEnv, type Envelope } from './envelope';
+import { S1_ENVELOPE, inEnv, zonedEnvelope, type Envelope } from './envelope';
+import { zoneActive, zoneAllows, type ShootZone } from './zone';
 import { share } from './fork';
 import type { Avoid } from './team';
 
@@ -46,7 +47,13 @@ const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 const dist = (a: P, b: P): number => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** bump when the options or how a replay is labelled change: cached demonstrations are rebuilt */
-export const SKILLS_VERSION = 5;
+export const SKILLS_VERSION = 6; // 6: AUTO in our own half only; the team's shooting zone
+/** the AUTO rule every robot plays by (a playbook planned under another is planned again) */
+export const AUTO_RULES = 'own-half-1';
+/** AUTO, OUR HALF ONLY: a planned pose keeps every corner this far from the centre line (in)… */
+export const HALF_MARGIN = 2;
+/** …and the drive's guard steps in this far from it */
+const HALF_GUARD = 1;
 export const OPTION_KINDS = ['field', 'lz', 'flower', 'shoot', 'hp', 'park', 'position', 'cycle', 'place'] as const;
 export type OptionKind = (typeof OPTION_KINDS)[number];
 /** per-option features the policy sees (plus the global observation) */
@@ -273,12 +280,21 @@ export class Pilot {
   others: Other[] = [];
   /** ticks in a row another robot has held it back (the traffic rule took most of its motion) */
   blockedTicks = 0;
+  /** AUTO, OUR HALF ONLY (set by the brain every tick): the sign of x that is this robot's half
+   * (blue +1, red −1), 0 outside AUTO. Every goal it plans keeps its footprint there, and drive()
+   * never lets a corner cross the centre line — stricter than G402, which only fouls a robot fully
+   * across AND touching an opponent. */
+  fence: 0 | 1 | -1 = 0;
+  /** the team's shooting zone (train/zone.ts): it only goes to spots in it and only fires in it */
+  readonly zone: ShootZone | null;
 
   constructor(
     readonly spec: RobotSpec,
     limits?: Pick<Limits, 'vIntake' | 'vFire'>,
     readonly style: Style = DEFAULT_STYLE,
+    zone: ShootZone | null = null,
   ) {
+    this.zone = zoneActive(zone) ? zone : null;
     this.E = effective(spec, true, 0); // intake running: the slower, safe budget
     this.ext = footprintExtents(spec);
     this.ends = bbMouths(spec)
@@ -296,7 +312,7 @@ export class Pilot {
     const solids = [...flowerFeet(), ...BARS];
     const clear = (p: P): boolean =>
       BB.BB_HALF_X - Math.abs(p.x) >= turn && BB.BB_HALF_Y - Math.abs(p.y) >= turn && solids.every((poly) => rectDist(p, poly) >= turn);
-    this.env = envelopeOf(spec);
+    this.env = zonedEnvelope(spec, this.zone);
     this.spots = { north: this.env.spots.north.filter(clear), south: this.env.spots.south.filter(clear) };
     this.vIntake = limits && limits.vIntake < 100 ? Math.max(4, style.vIntakeMargin * limits.vIntake) : Infinity;
     this.vFire = limits && limits.vFire < 100 ? Math.max(0.5, style.vFireMargin * limits.vFire) : Infinity;
@@ -331,6 +347,23 @@ export class Pilot {
     const cell = targetCell(w, a);
     const hx = a === 'blue' ? BB.BB_HIVE_X : -BB.BB_HIVE_X;
     return this.dumpRange(p, { x: hx, y: (cell === 'north' ? 1 : -1) * BB.BB_HIVE_CELL_DY });
+  }
+
+  /** is this pose on its own side of the centre line in AUTO (always true outside AUTO): every
+   * corner HALF_MARGIN clear of the line — at any heading (h null: its turning circle) */
+  halfOk(p: P, h: number | null): boolean {
+    if (!this.fence) return true;
+    if (h === null) return p.x * this.fence >= this.reachR + 1 + HALF_MARGIN;
+    return footprintCorners(this.spec, p, h).every((q) => q.x * this.fence >= HALF_MARGIN);
+  }
+  /** may it hold fire from here: inside the team's shooting zone for the cell its turret aims at
+   * (DSIM releases only a shot that lands; the zone is where the team trusts the real robot to) */
+  mayFire(w: World, r: RobotState): boolean {
+    if (!this.zone) return true;
+    const aim = bbCellSideOf(bbAimTarget(w, r));
+    const blue = r.alliance === 'blue';
+    const m = mir(r.alliance, r.pos);
+    return zoneAllows(this.zone, blue ? aim : flip(aim), m.x, m.y);
   }
 
   /** did a shot from near here just fail for this robot (within 12 in, still banned) */
@@ -493,6 +526,43 @@ export class Pilot {
           }
         }
       }
+    // AUTO, OUR HALF ONLY. Like the frame bars, two dangers: its own MOMENTUM toward the line (the
+    // distance it needs to stop, at the braking the speed law uses, eats the gap, or its motion
+    // puts a corner over within 0.16 s) → stop turning and back away from the line; only the
+    // COMMAND would cross → the same move without the turn if that is clear, else without the part
+    // toward the line (it slides along it). A robot already over (pushed) drives straight back.
+    // LAST, after the traffic rule: sliding round another robot must not slide it over the line.
+    if (this.fence) {
+      const s = this.fence;
+      const low = (px: number, py: number, h: number): number => Math.min(...footprintCorners(this.spec, { x: px, y: py }, h).map((q) => q.x * s));
+      const gap = low(r.pos.x, r.pos.y, r.heading);
+      const vt = -r.vel.x * s; // toward the line
+      // (a tick of latency on top of the braking distance)
+      const stop = vt > 0 ? (vt * vt) / (2 * this.style.brake * E.accel) + vt / 30 : 0;
+      const drift = [0.08, 0.16, 0.25].some((T) => low(r.pos.x + r.vel.x * T, r.pos.y + r.vel.y * T, r.heading + r.angVel * T) < HALF_GUARD);
+      if (gap < HALF_GUARD || gap - stop < HALF_GUARD || drift) {
+        // a spin swinging a corner toward the line (an element's knock spins it too) is braked
+        // actively, not just no longer commanded
+        const swings = Math.abs(r.angVel) > 0.1 && low(r.pos.x, r.pos.y, r.heading + r.angVel * 0.1) < gap;
+        rot = swings ? -Math.sign(r.angVel) * Math.min(1, (3 * Math.abs(r.angVel)) / E.maxTurn) : 0;
+        vx = s * Math.max(vx * s, 20);
+        this.plan = null;
+      } else {
+        vc = Math.hypot(vx, vy);
+        const crosses = (turn: boolean): boolean =>
+          HORIZON.some((T) => {
+            const ahead = vc > 1e-9 ? Math.min(vc * T, leg) / vc : 0;
+            return low(r.pos.x + vx * ahead, r.pos.y + vy * ahead, r.heading + (turn ? turnBy(T) : 0)) < HALF_GUARD;
+          });
+        if (crosses(true)) {
+          if (!crosses(false)) rot = 0;
+          else {
+            if (vx * s < 0) vx = 0;
+            rot = 0;
+          }
+        }
+      }
+    }
     this.blockedTicks = held ? this.blockedTicks + 1 : 0;
     const c = Math.cos(r.heading);
     const s = Math.sin(r.heading);
@@ -538,15 +608,17 @@ export function nearestSpot(w: World, r: RobotState, pilot: Pilot, from: P = r.p
   const a = r.alliance;
   const f = mir(a, from);
   const list = pilot.spots[side];
+  if (!list.length) return { x: from.x, y: from.y }; // (a shooting zone with no spot for this cell: the studio refuses to save one)
   pilot.badSpots = pilot.badSpots.filter((b) => b.until > w.tick);
   const bad = pilot.badSpots.map((b) => mir(a, b));
   const partner = pilot.avoidSpots.map((b) => mir(a, b));
   // a spot another robot stands on (or next to) is not free either: the traffic rule would stop
   // this robot short of it for as long as the other one stays
   const bodies = pilot.others.map((q) => ({ ...mir(a, q.pos), r: pilot.reachR + Math.hypot(footprintExtents(q.spec).front, footprintExtents(q.spec).half) }));
-  let best = list[0];
+  let best = list.find((s) => pilot.halfOk(mir(a, s), null)) ?? list[0];
   let bd = Infinity;
   for (const s of list) {
+    if (!pilot.halfOk(mir(a, s), null)) continue; // AUTO: on our side of the centre line
     if (bad.some((b) => (b.x - s.x) ** 2 + (b.y - s.y) ** 2 < 144)) continue; // within 12 in of a failed spot
     if (partner.some((b) => (b.x - s.x) ** 2 + (b.y - s.y) ** 2 < 324)) continue; // within 18 in of a partner's spot
     if (bodies.some((b) => (b.x - s.x) ** 2 + (b.y - s.y) ** 2 < b.r * b.r)) continue; // taken by a robot
@@ -622,7 +694,7 @@ const hiveCentre = (a: Alliance): P => ({ x: a === 'blue' ? BB.BB_HIVE_X : -BB.B
 /** collectable loose elements in the cycle zone */
 function cycleLoose(w: World, a: Alliance, pilot: Pilot, skip?: Set<number>): Ball[] {
   const c = hiveCentre(a);
-  return w.balls.filter((b) => b.state.kind === 'ground' && pilot.accepts(b.color, a) && !skip?.has(b.id) && dist(b.pos, c) <= CYCLE_R);
+  return w.balls.filter((b) => b.state.kind === 'ground' && pilot.accepts(b.color, a) && !skip?.has(b.id) && dist(b.pos, c) <= CYCLE_R && (!pilot.fence || b.pos.x * pilot.fence > 0));
 }
 
 // ─────────────────────────────── the options available now ───────────────────────────────
@@ -659,7 +731,8 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
   if (free > 0) {
     // GROUPS of loose POLLEN and own NECTAR on the tiles, the 6 the robot reaches first
     const lz = BB.BB_LZ[a];
-    const loose = w.balls.filter((b) => b.state.kind === 'ground' && pilot.accepts(b.color, a) && ok(`b${b.id}`) && !avoid.balls.has(b.id));
+    // (in AUTO only what lies on our side of the centre line)
+    const loose = w.balls.filter((b) => b.state.kind === 'ground' && pilot.accepts(b.color, a) && ok(`b${b.id}`) && !avoid.balls.has(b.id) && (!pilot.fence || b.pos.x * pilot.fence > 0));
     const est = (b: Ball): number => pilot.estTime(r, b.pos, null) + pilot.turnTo(r.pos, r.heading, b.pos);
     let cand: { g: Ball[]; anchor: Ball; t: number }[] = [];
     let close = false;
@@ -701,6 +774,7 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
       if (!bottom || bottom.color !== 'yellow' || !ok(`f${i}`) || avoid.flowers.has(i)) return;
       const pollen = st.filter((id) => w.balls.find((q) => q.id === id)?.color === 'yellow').length;
       const g = flowerGoal(i, pilot, flowerEnd(i, pilot, r.heading));
+      if (!pilot.halfOk(g.pre, g.h) || !pilot.halfOk(g.seat, g.h)) return; // AUTO: a FLOWER on the other side
       out.push({ kind: 'flower', label: `FLOWER ${f.id} (${pollen} POLLEN)`, x: f.x, y: f.y, flower: i, feats: feats('flower', g.pre, g.h, { flowerPollen: pollen, gain: Math.min(free, pollen), sweep: Math.min(free, pollen) * 0.35 }) });
     });
   }
@@ -774,7 +848,7 @@ function positionGoal(w: World, r: RobotState, pilot: Pilot): P & { h: number | 
     const p = { x: hx, y: sy * (BB.BB_HIVE_CELL_DY + BB.BB_CELL_OPEN.d / 2 + pilot.style.spillWait) };
     const dir = Math.atan2(sy * BB.BB_HIVE_CELL_DY - p.y, hx - p.x);
     const h = Pilot.facing(pilot.bestEnd(r.heading, dir), dir);
-    if (placeable(pilot.spec, p, h, 0.5)) return { ...p, h, label: 'wait beside the coming spill' };
+    if (placeable(pilot.spec, p, h, 0.5) && pilot.halfOk(p, h)) return { ...p, h, label: 'wait beside the coming spill' };
   }
   const s = nearestSpot(w, r, pilot);
   return { ...s, h: null, label: `get in position for the ${targetCell(w, a)} CELL` };
@@ -844,7 +918,7 @@ export function approach(pilot: Pilot, r: { pos: P; heading: number }, b: P, clo
         const h = Pilot.facing(e, a + Math.PI);
         const goal = { x: b.x + u.x * off, y: b.y + u.y * off };
         const pre = { x: b.x + u.x * (off + pilot.style.preDist), y: b.y + u.y * (off + pilot.style.preDist) };
-        if (placeable(pilot.spec, goal, h, 0.5) && placeable(pilot.spec, pre, h, 0.5) && clearOfFrame(pilot.spec, goal, h, margin) && clearOfFrame(pilot.spec, pre, h, margin)) return { pre, goal, h, direct: k === 0 };
+        if (placeable(pilot.spec, goal, h, 0.5) && placeable(pilot.spec, pre, h, 0.5) && clearOfFrame(pilot.spec, goal, h, margin) && clearOfFrame(pilot.spec, pre, h, margin) && pilot.halfOk(goal, h) && pilot.halfOk(pre, h)) return { pre, goal, h, direct: k === 0 };
       }
     }
   }

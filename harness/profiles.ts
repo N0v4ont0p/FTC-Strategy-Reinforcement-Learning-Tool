@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { coerce, type RobotSpec } from './dsim';
 import { mulberry32, type Rng } from './rng';
+import type { ShootZone } from '../train/zone';
 
 type Num = number | { min: number; max: number; nominal: number };
 export interface ProfileFile {
@@ -12,6 +13,8 @@ export interface ProfileFile {
   expect: Record<string, unknown>;
   limits: Record<string, Num>;
   perturb: Record<string, Num>;
+  /** where the team lets it shoot from (train/zone.ts; drawn in the studio's Robot tab) */
+  shootZone?: ShootZone | null;
 }
 
 export interface Limits {
@@ -41,6 +44,8 @@ export interface Resolved {
   clamped: string[];
   /** `expect` entries the coerced spec violates — must be empty */
   expectFails: string[];
+  /** the team's shooting zone (null: wherever DSIM scores) */
+  zone: ShootZone | null;
 }
 
 const isRange = (v: unknown): v is { min: number; max: number; nominal: number } =>
@@ -86,7 +91,7 @@ export function resolve(p: ProfileFile, rng?: Rng): Resolved {
   const perturb = {} as Record<string, number>;
   for (const [k, v] of Object.entries(p.perturb)) perturb[k] = pick(`perturb.${k}`, v);
 
-  return { id: p.id, point, spec, limits: limits as unknown as Limits, perturb: perturb as unknown as Perturb, clamped, expectFails: checkExpect(spec, p.expect) };
+  return { id: p.id, point, spec, limits: limits as unknown as Limits, perturb: perturb as unknown as Perturb, clamped, expectFails: checkExpect(spec, p.expect), zone: p.shootZone ?? null };
 }
 
 /** Every way this profile's robot comes out wrong in DSIM, over the whole envelope a run can

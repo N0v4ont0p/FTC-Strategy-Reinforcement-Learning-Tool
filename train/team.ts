@@ -77,7 +77,7 @@ export function partnerProfile(kind: PartnerKind, profilePath: string, seed: num
   if (def.build === 'real') return resolve(file, sample ? mulberry32(seedOf(seed, 'partner-profile')) : undefined);
   const nominal = resolve(file);
   const spec = coerce({ ...BB.BB_PRESETS[def.build] });
-  return { ...nominal, id: `partner:${kind}`, spec, point: {}, clamped: [], expectFails: [] };
+  return { ...nominal, id: `partner:${kind}`, spec, point: {}, clamped: [], expectFails: [], zone: null }; // (our shooting zone is for our robot)
 }
 
 // ─────────────────────────────── starts ───────────────────────────────

@@ -1,26 +1,27 @@
 // TRAINING PLATFORM GATE — everything the studio and the trainer rest on, proven before a real run.
 // Run: npm run check:train   (a few minutes: it plays real DSIM matches)
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { BB, bb, bbEvalStart, coerce, footprintCorners, footprintExtents, init, newMatch, worldResult } from '../harness/dsim';
+import { BB, bb, bbAimTarget, bbCellSideOf, bbEvalStart, coerce, footprintCorners, footprintExtents, init, newMatch, worldResult } from '../harness/dsim';
 import { loadProfile, profileProblems, resolve } from '../harness/profiles';
 import { polysOverlap, rect } from '../harness/geom';
 import { mulberry32 } from '../harness/rng';
 import { fromB64, paramCount, skipOffset, styleOffset, toB64 } from './net';
 import { SHAPE, STYLE, STYLE_DEFAULT_GENES, decodeStyle, optKey } from './policy';
 import { N_OBS } from './obs';
-import { F_CURRENT, F_EST, N_OPT_FEATS, OPTION_KINDS, OPT_FEATS, groupsOf, spawnPose, targetCell } from './skills';
+import { AUTO_RULES, F_CURRENT, F_EST, N_OPT_FEATS, OPTION_KINDS, OPT_FEATS, groupsOf, spawnPose, targetCell } from './skills';
+import { cellCentre, zoneAllows, zoneProblems, type ShootZone } from './zone';
 import { Episode, runEpisode, type EpisodeArgs, type EpisodeResult } from './episode';
 import { STARTS, legalPair, type PartnerKind } from './team';
-import { ensureEnvelopes, envelopeOf } from './envelope';
+import { ensureEnvelopes, envelopeOf, zonedEnvelope } from './envelope';
 import { planPath } from './skills';
 import { Store } from './store';
 import { LABEL, plist } from './service';
 import { AUTO_QUICK, autoArgs, nextChoice, planAuto, playPlan, showPlan, type AutoProblem } from './auto';
-import { Playbook, problems } from './playbook';
+import { Playbook, problems, rulesStamp } from './playbook';
 import { WorkerPool } from '../harness/pool';
 import { Perturber } from '../harness/perturb';
 import { shootingColumn } from '../harness/s1/lab';
@@ -41,7 +42,7 @@ import { entEval, entFit, entGenome, labelRows, learnJob, toLabels } from './ent
 import { Continuous, V2_DIR, examList, sameMistake, sprt, v2Defaults, type AuditEntry } from './continuous';
 import { mineRoutes } from './routes';
 import { OPPONENT_KINDS } from './team';
-import { describeBuild, draftFrom, floorsOf, inspectRobot, listRobots, replayRobots, saveRobot, shapeProblems, specsIn } from './robots';
+import { describeBuild, draftFrom, floorsOf, inspectRobot, listRobots, replayRobots, saveRobot, shapeProblems, specsIn, zoneEmpty } from './robots';
 import { notify } from './notify';
 import { PLAYS, PLAY_QUICK, cross, mutate, playKey, playWords, role as mkRole, searchPlays, type Play } from './teamplay';
 import { TeamPlaybook } from './teamplaybook';
@@ -585,7 +586,11 @@ for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(RO
   const joint = await planAuto({ profile: V1, start: 'F3', partner: 'real', partnerStart: 'BOTTOM_AUD', mode: 'joint', seed: 1 }, pool, AUTO_QUICK);
   const best = await planAuto({ profile: V1, start: 'F3', partner: 'skimmer', partnerStart: 'BOTTOM_AUD', mode: 'best', seed: 1 }, pool, AUTO_QUICK);
   pool.close();
-  check('11 planner: a searched AUTO beats the robot\'s own AUTO on fresh draws (alone, and planned jointly with a second REAL-v1)', solo.nominal.mean > solo.baseline.mean + 5 && joint.nominal.mean > joint.baseline.mean + 5, `alone ${solo.nominal.mean.toFixed(1)} vs ${solo.baseline.mean.toFixed(1)}, joint ${joint.nominal.mean.toFixed(1)} vs ${joint.baseline.mean.toFixed(1)} (quick budget)`);
+  // (joint with a second REAL-v1: since AUTO keeps every robot in its own half, the two robots' own
+  // AUTOs are about as good as a joint plan gets — before, the plans' gain came from the far half —
+  // so what holds there is the planner's promise: never a plan ranked below the robots' own AUTO)
+  const rk = (m: { mean: number; cvar10: number }): number => 0.5 * m.mean + 0.5 * m.cvar10;
+  check('11 planner: a searched AUTO beats the robot\'s own AUTO on fresh draws alone; planned jointly with a second REAL-v1 it never ranks below their own AUTOs (mean and worst tenth)', solo.nominal.mean > solo.baseline.mean + 5 && rk(joint.nominal) >= rk(joint.baseline) - 1e-9, `alone ${solo.nominal.mean.toFixed(1)} vs ${solo.baseline.mean.toFixed(1)}, joint ${joint.nominal.mean.toFixed(1)} (worst tenth ${joint.nominal.cvar10.toFixed(1)}) vs ${joint.baseline.mean.toFixed(1)} (${joint.baseline.cvar10.toFixed(1)}) (quick budget)`);
   check('11 planner: a joint plan plans both robots; a best response only ours (the partner runs its own AUTO)', joint.plan[1].length > 0 && best.plan[1].length === 0 && best.taken.every((q) => q.robot === 0) && joint.taken.some((q) => q.robot === 1));
   check('11 planner: every result carries its worst tenth, robots drawn from the range, and an exact replay of AUTO', [solo, joint, best].every((r) => r.nominal.cvar10 <= r.nominal.mean && r.sampled.n > 0 && !!r.frames && r.frames.f.length > 800 && r.frames.f.every((q) => q.m[0] === 'pre' || q.m[0] === 'auto' || q.m[0] === 'transition')));
   // the playbook: its grid, a build, storage, the studio's endpoints
@@ -926,6 +931,82 @@ const s2a = runEpisode(s2args(null));
   const tj = (await tp.json()) as { library: unknown[] };
   await srv.close();
   check('17 studio: the Team plays page is served with the whole library', tp.status === 200 && tj.library.length === PLAYS.length);
+}
+
+// ---- 18. AUTO in our own half; the team's shooting zone ---------------------------------------------------------
+{
+  // every robot a brain drives (ours, partners of every kind, both opponents) stays in its half in AUTO
+  const deepest = (ep: Episode, phase: string): number => {
+    let over = -Infinity;
+    while (ep.step()) {
+      if (ep.w.match.phase !== phase) continue;
+      for (const r of ep.w.robots) {
+        const sg = r.alliance === 'blue' ? 1 : -1;
+        for (const c of footprintCorners(r.spec, r.pos, r.heading)) over = Math.max(over, -c.x * sg);
+      }
+    }
+    return over;
+  };
+  const cfgs: [string, string][] = [['none', 'none'], ['real', 'mirror'], ['skimmer', 'presets'], ['hauler', 'presets'], ['sniper', 'mirror']];
+  let worst = -Infinity;
+  for (const [partner, opponents] of cfgs)
+    for (const sd of [1, 2, 3]) {
+      const ep = new Episode({ genome: null, profile: V1P, sampleProfile: false, seed: 7100 + sd, stage: 'auto', driver: 'oracle', track: false, record: false, start: 'F3', ...(partner === 'none' ? {} : { partner: { kind: partner as PartnerKind } }), opponents: opponents as EpisodeArgs['opponents'] });
+      worst = Math.max(worst, deepest(ep, 'auto'));
+    }
+  check('18 AUTO: no robot (ours, every partner kind, both opponents) puts a corner over the centre line in AUTO', worst < 0, `closest corner ${(-worst).toFixed(2)} in short of the line (15 AUTOs)`);
+  const tele = Math.max(...[1, 2].map((sd) => deepest(new Episode({ genome: null, profile: V1P, sampleProfile: false, seed: 7200 + sd, stage: 'full', driver: 'oracle', track: false, record: false, start: 'F3' }), 'teleop')));
+  check('18 AUTO: the rule is AUTO only — in TELEOP the robot still works the whole field', tele > 10, `${tele.toFixed(0)} in over the line at its deepest`);
+  // the shooting zone: the spots it goes to, and where it holds fire
+  const zdir = join(ROOT, 'runs', '_check-zone');
+  rmSync(zdir, { recursive: true, force: true });
+  mkdirSync(zdir, { recursive: true });
+  const zone: ShootZone = { maxDist: 36 };
+  writeFileSync(join(zdir, 'zone.json'), JSON.stringify({ ...loadProfile(join(ROOT, V1P)), shootZone: zone }));
+  const ZP = 'runs/_check-zone/zone.json';
+  const spec = resolve(loadProfile(join(ROOT, V1P))).spec;
+  const full = envelopeOf(spec).spots;
+  const zs = zonedEnvelope(spec, zone).spots;
+  const within = (side: 'north' | 'south', p: { x: number; y: number }): number => Math.hypot(p.x - cellCentre(side).x, p.y - cellCentre(side).y);
+  check('18 zone: the envelope is cut to the zone — every kept spot within 36 in of its cell, some kept for each cell, the rest dropped', zs.north.length > 0 && zs.south.length > 0 && zs.north.every((p) => within('north', p) <= 36) && zs.south.every((p) => within('south', p) <= 36) && zs.north.length + zs.south.length < full.north.length + full.south.length, `${zs.north.length + zs.south.length} of ${full.north.length + full.south.length} spots`);
+  const fires = (profile: string, seed: number): { d: number; ok: boolean }[] => {
+    const ep = new Episode({ genome: null, profile, sampleProfile: false, seed, stage: 'full', driver: 'oracle', track: false, record: false, start: 'F3' });
+    const b = ep.brain;
+    const act = b.act.bind(b);
+    const out: { d: number; ok: boolean }[] = [];
+    b.act = (w) => {
+      const m = act(w);
+      const r = w.robots.find((q) => q.id === 0)!;
+      if (m.get(0)?.fire && r.hopper.length) {
+        const aim = bbCellSideOf(bbAimTarget(w, r));
+        out.push({ d: within(aim, r.pos), ok: zoneAllows(zone, aim, r.pos.x, r.pos.y) });
+      }
+      return m;
+    };
+    while (ep.step());
+    return out;
+  };
+  const zf = [7301, 7302].flatMap((sd) => fires(ZP, sd));
+  const nf = [7301, 7302].flatMap((sd) => fires(V1P, sd));
+  check('18 zone: with a zone the robot only holds fire inside it (without one it fires from farther out)', zf.length > 20 && zf.every((f) => f.ok) && nf.some((f) => f.d > 36), `${zf.length} firing ticks, farthest ${Math.max(...zf.map((f) => f.d)).toFixed(0)} in; without a zone up to ${Math.max(...nf.map((f) => f.d)).toFixed(0)} in`);
+  const bad = zoneProblems({ maxDist: -3, area: [{ x: 0, y: 0 }, { x: 200, y: 0 }, { x: 0, y: 5 }] });
+  const empty = zoneEmpty({ ...loadProfile(join(ROOT, V1P)), shootZone: { maxDist: 2 } });
+  let refused = false;
+  try {
+    saveRobot({ ...loadProfile(join(ROOT, V1P)), id: '_check-zone-empty', shootZone: { maxDist: 2 } }, false);
+  } catch {
+    refused = true;
+  }
+  check('18 zone: a bad zone is explained (distances, an area off the field), and one that leaves no scoring spot is not saved', bad.length === 2 && empty.length === 2 && refused && !existsSync(join(ROOT, 'profiles/_check-zone-empty.json')));
+  // what a playbook entry was planned under: another zone (or older rules) makes it outdated
+  const pb = new Playbook(ZP, join(zdir, 'pb'));
+  pb.store.putPlan('auto', 'x', 1, { key: 'x', rules: rulesStamp(V1P) });
+  const st1 = pb.entries()[0].stale;
+  pb.store.putPlan('auto', 'x', 1, { key: 'x', rules: rulesStamp(ZP) });
+  const st2 = pb.entries()[0].stale;
+  pb.store.close();
+  check('18 playbook: an entry planned under other AUTO rules or another shooting zone is outdated (a build plans it again)', st1 === true && st2 === false && rulesStamp(ZP) !== rulesStamp(V1P) && rulesStamp(V1P).startsWith(AUTO_RULES));
+  rmSync(zdir, { recursive: true, force: true });
 }
 
 console.log(fails === 0 ? '\nTRAINING PLATFORM GATE: ALL PASS' : `\nTRAINING PLATFORM GATE: ${fails} FAIL`);

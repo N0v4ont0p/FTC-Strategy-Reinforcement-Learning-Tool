@@ -8,13 +8,15 @@ import { mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { WorkerPool } from '../harness/pool';
 import { ROOT } from './engine';
+import { rulesStamp } from './playbook';
 import { Store } from './store';
 import { PLAY_QUICK, PLAY_SEARCH, playWords, searchPlays, type Play, type PlaySearchResult } from './teamplay';
 import type { PartnerKind } from './team';
 
 export const TEAMPLAY_DIR = join(ROOT, 'outputs', 'teamplays');
 export const TEAM_PARTNERS: (PartnerKind | 'none')[] = ['real', 'skimmer', 'sniper', 'hauler', 'parker', 'none'];
-export type TeamEntry = PlaySearchResult & { words: Record<string, ReturnType<typeof playWords>> };
+/** `rules` / `stale`: as the AUTO playbook's (train/playbook.ts rulesStamp) */
+export type TeamEntry = PlaySearchResult & { words: Record<string, ReturnType<typeof playWords>>; rules?: string; stale?: boolean };
 
 export interface TeamBuildStatus {
   running: boolean;
@@ -50,10 +52,12 @@ export class TeamPlaybook extends EventEmitter {
     this.store = new Store(join(root, `${this.name}.db`));
   }
   entries(): TeamEntry[] {
-    return this.store.plans<TeamEntry>('team');
+    const now = rulesStamp(this.profile);
+    return this.store.plans<TeamEntry>('team').map((e) => ({ ...e, stale: e.rules !== now }));
   }
   entry(partner: string): TeamEntry | null {
-    return this.store.plan<TeamEntry>('team', partner);
+    const e = this.store.plan<TeamEntry>('team', partner);
+    return e ? { ...e, stale: e.rules !== rulesStamp(this.profile) } : null;
   }
   /** the plays worth training in beside a partner: the best few that beat free play (free first if none does) */
   best(partner: string, k = 3): Play[] {
@@ -74,7 +78,8 @@ export class TeamPlaybook extends EventEmitter {
   async build(o: { partners?: (PartnerKind | 'none')[]; budget?: 'quick' | 'full'; redo?: boolean; genome?: string | null; workers?: number; seed?: number } = {}): Promise<void> {
     if (this.status.running) throw new Error('the team-play book is already being built');
     this.stopFlag = false;
-    const have = new Set(this.entries().map((e) => e.partner));
+    const have = new Set(this.entries().filter((e) => !e.stale).map((e) => e.partner));
+    const rules = rulesStamp(this.profile);
     const todo = (o.partners ?? TEAM_PARTNERS).filter((p) => o.redo || !have.has(p));
     const quick = o.budget === 'quick';
     this.status = { running: true, done: 0, total: todo.length, current: null, log: this.status.log, stage: 'starting', matches: 0, matchesTotal: 0, allMatches: 0, startedAt: new Date().toISOString(), partnerAt: null, partnerS: quick ? 40 : 330, estimated: true, beat: new Date().toISOString() };
@@ -102,7 +107,7 @@ export class TeamPlaybook extends EventEmitter {
         Object.assign(this.status, { partnerS: took.reduce((a, b) => a + b, 0) / took.length, estimated: false });
         if (this.stopFlag) break;
         const words = Object.fromEntries(r.ranked.map((x) => [x.play.id, playWords(x.play)]));
-        this.store.putPlan('team', partner, r.ranked[0].mean, { ...r, words } satisfies TeamEntry);
+        this.store.putPlan('team', partner, r.ranked[0].mean, { ...r, words, rules } satisfies TeamEntry);
         this.status.done++;
         const b = r.ranked[0];
         this.say(`beside ${partner}: ${b.play.label} ${b.mean.toFixed(1)} ± ${b.ci95.toFixed(1)} (${b.vsFree >= 0 ? '+' : ''}${b.vsFree.toFixed(1)} over free play), ${r.evaluated} plays scored in ${r.seconds.toFixed(0)} s`);

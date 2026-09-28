@@ -18,10 +18,20 @@ export type TeamEntry = PlaySearchResult & { words: Record<string, ReturnType<ty
 
 export interface TeamBuildStatus {
   running: boolean;
-  done: number;
+  done: number; // partner kinds finished
   total: number;
   current: string | null;
   log: string[];
+  // live progress
+  stage?: string | null;
+  matches?: number; // matches played for the current partner…
+  matchesTotal?: number; // …of about this many
+  allMatches?: number; // the whole search so far
+  startedAt?: string | null;
+  partnerAt?: string | null;
+  partnerS?: number | null; // seconds a partner kind takes (this search's average; before the first: an estimate)
+  estimated?: boolean;
+  beat?: string | null;
 }
 
 export class TeamPlaybook extends EventEmitter {
@@ -66,15 +76,30 @@ export class TeamPlaybook extends EventEmitter {
     this.stopFlag = false;
     const have = new Set(this.entries().map((e) => e.partner));
     const todo = (o.partners ?? TEAM_PARTNERS).filter((p) => o.redo || !have.has(p));
-    this.status = { running: true, done: 0, total: todo.length, current: null, log: this.status.log };
+    const quick = o.budget === 'quick';
+    this.status = { running: true, done: 0, total: todo.length, current: null, log: this.status.log, stage: 'starting', matches: 0, matchesTotal: 0, allMatches: 0, startedAt: new Date().toISOString(), partnerAt: null, partnerS: quick ? 40 : 330, estimated: true, beat: new Date().toISOString() };
     this.emit('status', this.status);
+    const took: number[] = [];
+    let before = 0;
+    let lastEmit = 0;
     const pool = new WorkerPool(o.workers ?? 12);
     try {
       for (const partner of todo) {
         if (this.stopFlag) break;
         this.status.current = partner;
+        Object.assign(this.status, { partnerAt: new Date().toISOString(), matches: 0, matchesTotal: 0 });
         this.say(`searching plays beside ${partner === 'none' ? 'no partner' : partner}`);
-        const r = await searchPlays({ profile: this.profile, partner, genome: o.genome ?? null, seed: o.seed ?? 1 }, pool, o.budget === 'quick' ? PLAY_QUICK : PLAY_SEARCH, (s) => this.say(`  ${s}`), () => this.stopFlag);
+        const tp = Date.now();
+        const r = await searchPlays({ profile: this.profile, partner, genome: o.genome ?? null, seed: o.seed ?? 1 }, pool, quick ? PLAY_QUICK : PLAY_SEARCH, (s) => this.say(`  ${s}`), () => this.stopFlag, (p) => {
+          Object.assign(this.status, { stage: p.stage, matches: p.done, matchesTotal: p.total, allMatches: before + p.done, beat: new Date().toISOString() });
+          if (Date.now() - lastEmit > 500) {
+            lastEmit = Date.now();
+            this.emit('status', this.status);
+          }
+        });
+        before += this.status.matches ?? 0;
+        took.push((Date.now() - tp) / 1000);
+        Object.assign(this.status, { partnerS: took.reduce((a, b) => a + b, 0) / took.length, estimated: false });
         if (this.stopFlag) break;
         const words = Object.fromEntries(r.ranked.map((x) => [x.play.id, playWords(x.play)]));
         this.store.putPlan('team', partner, r.ranked[0].mean, { ...r, words } satisfies TeamEntry);
@@ -87,6 +112,7 @@ export class TeamPlaybook extends EventEmitter {
       pool.close();
       this.status.running = false;
       this.status.current = null;
+      this.status.stage = null;
       this.say(this.stopFlag ? 'team-play search stopped' : 'team-play search finished');
     }
   }

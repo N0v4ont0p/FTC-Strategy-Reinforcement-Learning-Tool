@@ -311,9 +311,19 @@ export async function searchPlays(
   cfg: PlaySearchCfg = PLAY_SEARCH,
   log: (s: string) => void = () => {},
   stop: () => boolean = () => false,
+  progress: (p: { stage: string; done: number; total: number }) => void = () => {},
 ): Promise<PlaySearchResult> {
   const t0 = Date.now();
   const solo = o.partner === 'none';
+  // live progress: matches played out of the matches the search will play (an upper bound: mutants
+  // that play like an earlier play are skipped, and then the total shrinks)
+  let done = 0;
+  let total = 0;
+  let stage = 'starting';
+  const tell = (st: string): void => {
+    stage = st;
+    progress({ stage, done, total });
+  };
   const base = (seed: number, play: Play): EpisodeArgs => ({
     genome: o.genome, profile: o.profile, sampleProfile: true, seed, stage: 'full', driver: 'oracle', track: false, record: false,
     ...(solo ? {} : { partner: { kind: o.partner as PartnerKind, genome: o.partner === 'real' ? o.genome : null } }),
@@ -321,11 +331,18 @@ export async function searchPlays(
   });
   const job = (a: EpisodeArgs): Job => ({ module: '../train/episode.ts', fn: 'runEpisode', args: a });
   const score = async (plays: Play[], seeds: number[]): Promise<number[][]> => {
-    const res = await pool.map<{ reward: number }>(plays.flatMap((p) => seeds.map((s) => job(base(s, p)))));
+    const res = await pool.map<{ reward: number }>(
+      plays.flatMap((p) => seeds.map((s) => job(base(s, p)))),
+      () => {
+        done++;
+        progress({ stage, done, total });
+      },
+    );
     return plays.map((_, i) => res.slice(i * seeds.length, (i + 1) * seeds.length).map((r) => r.reward));
   };
   const seeds = Array.from({ length: cfg.draws }, (_, k) => seedOf(o.seed, 'plays', o.partner, k) % 1_000_000_007);
   const lib = solo ? PLAYS.filter((p) => SOLO_PLAYS.includes(p.id)) : PLAYS;
+  total = lib.length * cfg.draws + cfg.gens * cfg.pop * cfg.draws + (cfg.finalists + 1) * cfg.finalDraws;
   const rnd = mulberry32(seedOf(o.seed, 'mutate', o.partner));
   let evaluated = 0;
   const all = new Map<string, { play: Play; r: number[] }>();
@@ -339,18 +356,21 @@ export async function searchPlays(
       seen.add(k);
       return true;
     });
-    if (!fresh.length) return;
+    total -= (plays.length - fresh.length) * seeds.length; // the same play is scored once
+    if (!fresh.length) return progress({ stage, done, total });
     const r = await score(fresh, seeds);
     fresh.forEach((p, i) => all.set(keyOf(p), { play: p, r: r[i] }));
     evaluated += fresh.length;
   };
   log(`${lib.length} plays beside ${o.partner === 'none' ? 'no partner' : o.partner}, ${cfg.draws} shared luck draws each`);
+  tell(`the library: ${lib.length} plays × ${cfg.draws} matches on shared luck`);
   await add(lib);
   const mean = (v: number[]): number => v.reduce((a, b) => a + b, 0) / v.length;
   const top = (): { play: Play; r: number[] }[] => [...all.values()].sort((a, b) => mean(b.r) - mean(a.r));
   let n = 0;
   for (let g = 0; g < cfg.gens && !stop(); g++) {
     const parents = top().slice(0, cfg.keep).map((x) => x.play);
+    tell(`generation ${g + 1} of ${cfg.gens}: ${cfg.pop} mutants and crossbreeds of the best ${parents.length}`);
     const kids: Play[] = [];
     for (let k = 0; k < cfg.pop; k++) {
       n++;
@@ -366,6 +386,8 @@ export async function searchPlays(
   const fin = [...top().slice(0, cfg.finalists).map((x) => x.play)];
   if (!fin.some((p) => p.id === 'free')) fin.push(free);
   const fresh = Array.from({ length: cfg.finalDraws }, (_, k) => seedOf(o.seed, 'plays-final', o.partner, k) % 1_000_000_007);
+  total = done + fin.length * fresh.length;
+  tell(`finalists: the best ${fin.length - 1} and free play on ${fresh.length} fresh luck draws`);
   const fr = await score(fin, fresh);
   const fi = fin.findIndex((p) => p.id === 'free');
   const ranked: PlayScore[] = fin

@@ -59,7 +59,19 @@ export interface BuildStatus {
   total: number;
   current: string | null;
   log: string[];
+  // live progress (the studio shows it second by second)
+  stage?: string | null; // what the planner is doing now, in words
+  frac?: number; // how far through the current entry (0–1)
+  sims?: number; // AUTOs simulated for the current entry
+  totalSims?: number; // …for the whole build
+  startedAt?: string | null; // the build
+  entryAt?: string | null; // the current entry
+  entryS?: number | null; // seconds an entry takes (this build's average; before the first: an estimate)
+  estimated?: boolean; // entryS is an estimate, not measured yet
+  beat?: string | null; // the last progress report
 }
+/** seconds an entry takes before one is measured (the budgets' typical cost on 12 cores) */
+const ENTRY_GUESS_S = { full: 180, quick: 25 } as const;
 
 export class Playbook extends EventEmitter {
   readonly name: string;
@@ -116,8 +128,19 @@ export class Playbook extends EventEmitter {
     const all = problems(this.profile, o).map((P) => ({ ...P, genome: o.genome ?? null }));
     const have = new Set(this.entries().map((e) => e.key));
     const todo = o.redo ? all : all.filter((P) => !have.has(keyOf(P)));
-    this.status = { running: true, done: 0, total: todo.length, current: null, log: this.status.log };
+    const t0 = Date.now();
+    const took: number[] = [];
+    this.status = { running: true, done: 0, total: todo.length, current: null, log: this.status.log, stage: 'measuring shooting envelopes', frac: 0, sims: 0, totalSims: 0, startedAt: new Date(t0).toISOString(), entryAt: null, entryS: ENTRY_GUESS_S[o.budget === 'quick' ? 'quick' : 'full'], estimated: true, beat: new Date().toISOString() };
     this.emit('status', this.status);
+    let lastEmit = 0;
+    let before = 0;
+    const onProgress = (p: { stage: string; frac: number; sims: number }): void => {
+      Object.assign(this.status, { stage: p.stage, frac: p.frac, sims: p.sims, totalSims: before + p.sims, beat: new Date().toISOString() });
+      if (Date.now() - lastEmit > 500) {
+        lastEmit = Date.now();
+        this.emit('status', this.status);
+      }
+    };
     const pool = new WorkerPool(o.workers ?? 12);
     try {
       // every build the partners bring needs its shooting envelope first
@@ -126,8 +149,13 @@ export class Playbook extends EventEmitter {
         if (this.stopFlag) break;
         const key = keyOf(P);
         this.status.current = key;
+        Object.assign(this.status, { entryAt: new Date().toISOString(), frac: 0, sims: 0, stage: 'starting' });
         this.say(`planning ${describe(P)}`);
-        const r = await planAuto(P, pool, cfg, (s) => this.emit('log', `  ${s}`), () => this.stopFlag);
+        const te = Date.now();
+        const r = await planAuto(P, pool, cfg, (s) => this.say(`  ${s}`), () => this.stopFlag, onProgress);
+        before += this.status.sims ?? 0;
+        took.push((Date.now() - te) / 1000);
+        Object.assign(this.status, { entryS: took.reduce((a, b) => a + b, 0) / took.length, estimated: false });
         if (this.stopFlag) break;
         const { frames, events, ...rest } = r;
         this.store.putPlan('auto', key, rest.nominal.mean, rest);
@@ -140,6 +168,7 @@ export class Playbook extends EventEmitter {
       pool.close();
       this.status.running = false;
       this.status.current = null;
+      this.status.stage = null;
       this.say(this.stopFlag ? 'playbook build stopped' : 'playbook build finished');
     }
   }

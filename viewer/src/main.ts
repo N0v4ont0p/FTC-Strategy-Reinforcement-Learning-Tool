@@ -697,8 +697,8 @@ const pbLabel = (key: string): string => {
   return `us at ${START_SHORT[start] ?? start} · ${PARTNER_LABEL[partner] ?? partner}${pstart !== '-' ? ` at ${START_SHORT[pstart] ?? pstart}` : ''}${m === 'joint' ? ' · joint plan' : ''}`;
 };
 function renderPbStatus(st: PlaybookStatusV): void {
-  $('pbStatus').textContent = st.running ? `building ${st.done}/${st.total}${st.current ? ` · ${pbLabel(st.current)}` : ''}` : st.total ? `${st.done}/${st.total} planned in the last build` : '';
-  ($('pbFill') as HTMLElement).style.width = st.total ? `${(100 * st.done) / st.total}%` : '0%';
+  $('pbStatus').textContent = st.running ? 'building' : PB?.entries.length ? `${PB.entries.length} plans in the playbook` : '';
+  renderJobs();
   $<HTMLButtonElement>('pbBuild').disabled = st.running;
   $<HTMLButtonElement>('pbStop').disabled = !st.running;
 }
@@ -975,7 +975,7 @@ interface TeamEntryV {
 }
 interface TeamV {
   profile: string;
-  status: { running: boolean; done: number; total: number; current: string | null };
+  status: { running: boolean; done: number; total: number; current: string | null; log?: string[]; stage?: string | null; matches?: number; matchesTotal?: number; allMatches?: number; startedAt?: string | null; partnerAt?: string | null; partnerS?: number | null; estimated?: boolean; beat?: string | null };
   entries: TeamEntryV[];
   library: { id: string; label: string; blurb: string; solo: boolean; words: Words }[];
 }
@@ -987,8 +987,8 @@ const PH: [string, string][] = [['auto', 'AUTO'], ['teleop', 'TELEOP'], ['end', 
 function renderTeam(): void {
   if (!TP) return;
   const st = TP.status;
-  $('tpStatus').textContent = st.running ? `searching ${st.done + 1}/${st.total}${st.current ? ` · beside ${st.current}` : ''}` : TP.entries.length ? `${TP.entries.length} partner kinds searched` : '';
-  ($('tpFill') as HTMLElement).style.width = st.total ? `${(100 * st.done) / st.total}%` : '0%';
+  $('tpStatus').textContent = st.running ? 'searching' : TP.entries.length ? `${TP.entries.length} partner kinds searched` : '';
+  renderJobs();
   $<HTMLButtonElement>('tpBuild').disabled = st.running;
   $<HTMLButtonElement>('tpStop').disabled = !st.running;
   $('tpPartners').innerHTML = TP_PARTNERS.map(([k, l]) => {
@@ -1054,6 +1054,94 @@ $('tpWatch').onclick = async () => {
   }
 };
 void loadTeam();
+
+// ─────────────────────────────── live progress of the long searches ───────────────────────────────
+/** 1 h 5 min · 4 min 10 s · 12 s */
+function dur(s: number): string {
+  if (!Number.isFinite(s) || s < 0) return '—';
+  if (s < 60) return `${Math.round(s)} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+const since = (iso?: string | null): number => (iso ? (Date.now() - Date.parse(iso)) / 1000 : NaN);
+interface JobView {
+  running: boolean;
+  now: string; // the headline: which item of how many
+  overall: number; // 0–1
+  item: number; // 0–1 through the current item
+  stage: string;
+  eta: number; // seconds left
+  estimated: boolean;
+  itemElapsed: number;
+  work: string; // simulations done
+  beat: number; // seconds since the last progress report
+  elapsed: number;
+  log: string[];
+}
+function drawJob(x: string, v: JobView | null): void {
+  const el = $(`${x}Prog`);
+  el.hidden = !v?.running;
+  if (!v?.running) return;
+  const pctAll = Math.max(0, Math.min(1, v.overall));
+  ($(`${x}Fill`) as HTMLElement).style.width = `${(100 * pctAll).toFixed(1)}%`;
+  ($(`${x}Fill2`) as HTMLElement).style.width = `${(100 * Math.max(0, Math.min(1, v.item))).toFixed(1)}%`;
+  $(`${x}Bar`).setAttribute('aria-valuenow', (100 * pctAll).toFixed(0));
+  $(`${x}Now`).textContent = v.now;
+  $(`${x}Eta`).textContent = `${(100 * pctAll).toFixed(1)} % · ${v.estimated ? 'about ' : ''}${dur(v.eta)} left`;
+  $(`${x}Stage`).textContent = `${(100 * v.item).toFixed(0)} % of this one · ${v.stage} · ${dur(v.itemElapsed)} on it`;
+  const stale = v.beat > 45;
+  $(`${x}Beat`).className = `jpbeat mono${stale ? ' stale' : ''}`;
+  $(`${x}Beat`).innerHTML = `<i class="pulse${stale ? ' off' : ''}" aria-hidden="true"></i>${stale ? `no progress report for ${dur(v.beat)} — a long step (or check the Log)` : `live · last report ${v.beat < 1.5 ? 'just now' : `${Math.round(v.beat)} s ago`}`} · ${v.work} · running ${dur(v.elapsed)}`;
+  $(`${x}Log`).innerHTML = v.log.slice(-6).map((l) => `<div>${esc(l)}</div>`).join('');
+}
+function renderJobs(): void {
+  const p = PB?.status;
+  if (p) {
+    const frac = p.frac ?? 0;
+    const itemEl = since(p.entryAt);
+    const perEntry = p.entryS ?? 180;
+    // the current entry's own pace once it is well under way, the build's average for the rest
+    const leftNow = frac > 0.15 && itemEl > 20 ? (itemEl / frac) * (1 - frac) : Math.max(0, perEntry - (Number.isFinite(itemEl) ? itemEl : 0));
+    drawJob('pb', {
+      running: p.running,
+      now: `Plan ${Math.min(p.total, p.done + 1)} of ${p.total}${p.current ? ` · ${pbLabel(p.current)}` : ''}`,
+      overall: p.total ? (p.done + frac) / p.total : 0,
+      item: frac,
+      stage: p.stage ?? 'starting',
+      eta: leftNow + Math.max(0, p.total - p.done - 1) * perEntry,
+      estimated: !!p.estimated,
+      itemElapsed: itemEl,
+      work: `${fmt(p.sims ?? 0)} AUTOs simulated for this plan, ${fmt(p.totalSims ?? 0)} in all`,
+      beat: since(p.beat),
+      elapsed: since(p.startedAt),
+      log: p.log ?? [],
+    });
+  }
+  const t = TP?.status;
+  if (t) {
+    const f = t.matchesTotal ? (t.matches ?? 0) / t.matchesTotal : 0;
+    const itemEl = since(t.partnerAt);
+    const per = t.partnerS ?? 330;
+    const leftNow = f > 0.1 && itemEl > 15 ? (itemEl / f) * (1 - f) : Math.max(0, per - (Number.isFinite(itemEl) ? itemEl : 0));
+    const who = TP_PARTNERS.find(([k]) => k === t.current)?.[1] ?? t.current ?? '';
+    drawJob('tp', {
+      running: t.running,
+      now: `Partner ${Math.min(t.total, t.done + 1)} of ${t.total}${t.current ? ` · beside ${who}` : ''}`,
+      overall: t.total ? (t.done + f) / t.total : 0,
+      item: f,
+      stage: t.stage ?? 'starting',
+      eta: leftNow + Math.max(0, t.total - t.done - 1) * per,
+      estimated: !!t.estimated,
+      itemElapsed: itemEl,
+      work: `${fmt(t.matches ?? 0)} of ~${fmt(t.matchesTotal ?? 0)} matches for this partner, ${fmt(t.allMatches ?? 0)} in all`,
+      beat: since(t.beat),
+      elapsed: since(t.startedAt),
+      log: t.log ?? [],
+    });
+  }
+  renderPill();
+}
+window.setInterval(renderJobs, 1000);
 
 // ─────────────────────────────── Mistakes: the audit ───────────────────────────────
 const MK_LABEL: Record<string, string> = { 'empty-trip': 'empty trip', 'blocked-shot': 'blocked shot', idle: 'idle', foul: 'foul', stall: 'stall', crash: 'crash', judgement: 'judgement' };
@@ -1128,9 +1216,18 @@ void loadMistakes();
 function renderPill(): void {
   const s = HOME?.status;
   const ex = s?.champion.exam;
-  const t = !s ? 'nothing training' : `${s.name} · ${s.running ? 'training' : 'paused'}${ex ? ` · exam ${ex.mean.toFixed(1)}` : ''}${s.champion.learned ? ` · champion #${s.champion.id}` : ''}`;
+  // a long search in the background shows here too, wherever you are in the studio
+  const pb = PB?.status;
+  const tp = TP?.status;
+  const job = pb?.running
+    ? `AUTO playbook ${pb.done}/${pb.total} · ${((100 * (pb.done + (pb.frac ?? 0))) / Math.max(1, pb.total)).toFixed(0)} %`
+    : tp?.running
+      ? `team plays ${tp.done}/${tp.total} · ${((100 * (tp.done + (tp.matchesTotal ? (tp.matches ?? 0) / tp.matchesTotal : 0))) / Math.max(1, tp.total)).toFixed(0)} %`
+      : '';
+  const t = job || (!s ? 'nothing training' : `${s.name} · ${s.running ? 'training' : 'paused'}${ex ? ` · exam ${ex.mean.toFixed(1)}` : ''}${s.champion.learned ? ` · champion #${s.champion.id}` : ''}`);
   $('v2PillText').textContent = t;
-  $('v2Pill').className = `v2pill${s?.running ? ' on' : ''}`;
+  $('v2Pill').className = `v2pill${s?.running || job ? ' on' : ''}`;
+  $('v2Pill').onclick = () => document.querySelector<HTMLButtonElement>(`[data-tab="${pb?.running ? 'playbook' : tp?.running ? 'plays' : 'home'}"]`)!.click();
 }
 $('v2Pill').onclick = () => document.querySelector<HTMLButtonElement>('[data-tab="home"]')!.click();
 $('btnV1').onclick = () => setV1(!v1On);

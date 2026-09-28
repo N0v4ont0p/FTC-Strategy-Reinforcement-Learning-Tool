@@ -185,6 +185,15 @@ export interface PlaybookStatusV {
   total: number;
   current: string | null;
   log: string[];
+  stage?: string | null;
+  frac?: number;
+  sims?: number;
+  totalSims?: number;
+  startedAt?: string | null;
+  entryAt?: string | null;
+  entryS?: number | null;
+  estimated?: boolean;
+  beat?: string | null;
 }
 export interface PlaybookV {
   profile: string;

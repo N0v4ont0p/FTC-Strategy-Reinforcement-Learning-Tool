@@ -217,7 +217,13 @@
               <label>Our start <select id="pbStart"><option value="">every start</option><option value="F3">F3 (our start)</option><option value="TOP_REAR">top, rear wall</option><option value="BOTTOM_AUD">bottom, audience wall</option><option value="TOP_SIDE">top, side wall</option><option value="BOTTOM_SIDE">bottom, side wall</option></select></label>
             </div>
             <div class="row"><button id="pbBuild" type="button">Build playbook</button><button id="pbStop" type="button" class="quiet">Stop</button><span class="grow"></span><a id="pbPrint" class="btnlink" href="./print.html" target="_blank">Print / PDF</a></div>
-            <div class="livebar" aria-hidden="true"><div id="pbFill"></div></div>
+<div class="jobprog" id="pbProg" hidden>
+              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="pbBar"><div class="jpfill" id="pbFill"></div></div>
+              <div class="jphead"><b id="pbNow"></b><span id="pbEta" class="mono"></span></div>
+              <div class="jpsub"><div class="jpmini"><div id="pbFill2"></div></div><span id="pbStage"></span></div>
+              <div class="jpbeat mono" id="pbBeat"></div>
+              <div class="jplog mono" id="pbLog" aria-live="polite"></div>
+            </div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Entries</h2><label class="hint">Partner <select id="pbFilter"><option value="">every partner</option></select></label></div>
@@ -271,7 +277,13 @@
             <div class="cardhead"><h2>Team plays</h2><span class="hint mono" id="tpStatus"></span></div>
             <p class="hint">The alliance plays <b>together</b>: a play gives each robot a role for AUTO, TELEOP and the last 30 s — FLOWERs · ground, each robot one side of the HIVE, both on the target side, tip cycle · support, joint volleys, who parks early… The search scores every play beside each kind of partner in DSIM on shared luck, then <b>mutates and crosses</b> the best (a zone line moves, the robots swap, a preference grows, a phase takes another's role) to discover plays nobody drew up. Finalists are re-scored on fresh luck. Training plays inside the winners.</p>
             <div class="row"><label class="hint">Budget <select id="tpBudget"><option value="full">Full (a few minutes per partner)</option><option value="quick">Quick look</option></select></label><button id="tpBuild" type="button">Search plays</button><button id="tpStop" type="button" class="quiet">Stop</button></div>
-            <div class="livebar" aria-hidden="true"><div id="tpFill"></div></div>
+<div class="jobprog" id="tpProg" hidden>
+              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="tpBar"><div class="jpfill" id="tpFill"></div></div>
+              <div class="jphead"><b id="tpNow"></b><span id="tpEta" class="mono"></span></div>
+              <div class="jpsub"><div class="jpmini"><div id="tpFill2"></div></div><span id="tpStage"></span></div>
+              <div class="jpbeat mono" id="tpBeat"></div>
+              <div class="jplog mono" id="tpLog" aria-live="polite"></div>
+            </div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Beside</h2><span class="sub">best play · gain over free play</span></div>

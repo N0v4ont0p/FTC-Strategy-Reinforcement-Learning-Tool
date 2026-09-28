@@ -95,6 +95,13 @@ drawn from the profile's whole range, the **timing sheet** (who does what, when)
 plans what is missing); *Quick look* is about 15 s an entry. The playbook needs every core, so it is
 refused while training runs. Stored in `outputs/playbook/<robot>.db` and `outputs/playbook/<robot>/`.
 
+**Progress is live**: which plan of how many, how far through it (beam search step, finalists,
+skill tuning), AUTOs simulated, time on it, the time left (measured from this build's own pace after
+the first plan; an estimate before), a heartbeat ("last report 2 s ago" — a step can take a while,
+but reports come every few seconds) and the log. The header pill shows it from any tab. The Team plays
+search shows the same: which partner of how many, matches played of about how many, the stage
+(library, generation, finalists).
+
 Measured (quick budget, our start F3): alone 51.7 ± 4.4 AUTO points against 31.6 for the robot's own
 AUTO; planned jointly with a second REAL-v1, 72.8 against 53.6.
 

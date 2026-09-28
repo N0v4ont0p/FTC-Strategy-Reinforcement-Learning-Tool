@@ -146,8 +146,28 @@ interface Node {
   v: number; // mean reward on the search draws
 }
 
-export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = AUTO_CFG, log: (s: string) => void = () => {}, stop: () => boolean = () => false): Promise<AutoResult> {
+/** where a plan search is: its stage in words, how far through the entry (0–1), AUTOs simulated */
+export interface AutoProgress {
+  stage: string;
+  frac: number;
+  sims: number;
+}
+export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = AUTO_CFG, log: (s: string) => void = () => {}, stop: () => boolean = () => false, progress: (p: AutoProgress) => void = () => {}): Promise<AutoResult> {
   const t0 = performance.now();
+  // live progress: every finished job adds its simulated AUTOs; the stage and share are set per step
+  let sims = 0;
+  let stage = 'starting';
+  let frac = 0;
+  const tell = (st: string, f: number): void => {
+    stage = st;
+    frac = f;
+    progress({ stage, frac, sims });
+  };
+  const map = <T>(jobs: { module: string; fn: string; args: unknown }[], per: number): Promise<T[]> =>
+    pool.map<T>(jobs, () => {
+      sims += per;
+      progress({ stage, frac, sims });
+    });
   const robots = plannedRobots(P);
   const nRob = P.partner === 'none' ? 1 : 2;
   const empty = (): (PlanStep[] | null)[] => Array.from({ length: nRob }, (_, i) => (robots.includes(i) ? [] : null));
@@ -159,7 +179,9 @@ export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = 
   let frontier: Node[] = [{ plans: empty(), v: -Infinity }];
   const complete: Node[] = [];
   for (let depth = 0; depth < cfg.maxDepth && frontier.length && !stop(); depth++) {
-    const nexts = await pool.map<ReturnType<typeof nextChoice>>(frontier.map((n) => job('nextChoice', { args: ref, plans: n.plans })));
+    // (the beam ends when every plan is complete: its share grows toward 55 % as it goes deeper)
+    tell(`beam search · step ${depth + 1}: listing each plan's next choices`, 0.55 * (1 - 0.82 ** depth));
+    const nexts = await map<ReturnType<typeof nextChoice>>(frontier.map((n) => job('nextChoice', { args: ref, plans: n.plans })), 1);
     const children: Node[] = [];
     frontier.forEach((n, i) => {
       const nx = nexts[i];
@@ -182,7 +204,8 @@ export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = 
       seen.add(id);
       return true;
     });
-    const vals = await pool.map<number[]>(uniq.map((c) => job('playPlan', { args: draws, plans: c.plans })));
+    tell(`beam search · step ${depth + 1}: scoring ${uniq.length} plans on ${cfg.draws} luck draws`, 0.55 * (1 - 0.82 ** (depth + 0.5)));
+    const vals = await map<number[]>(uniq.map((c) => job('playPlan', { args: draws, plans: c.plans })), cfg.draws);
     explored += uniq.length;
     uniq.forEach((c, i) => (c.v = vals[i].reduce((a, b) => a + b, 0) / vals[i].length));
     uniq.sort((a, b) => b.v - a.v);
@@ -197,15 +220,17 @@ export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = 
   const sampled = Array.from({ length: cfg.sampledDraws }, (_, k) => autoArgs(P, 9000 + k, true));
   const chunk = <T>(a: T[], n: number): T[][] => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, (i + 1) * n));
   const score = async (plans: (PlanStep[] | null)[], args: EpisodeArgs[], style?: number[] | null): Promise<number[]> =>
-    (await pool.map<number[]>(chunk(args, 4).map((c) => job('playPlan', { args: c, plans, style })))).flat();
+    (await map<number[]>(chunk(args, 4).map((c) => job('playPlan', { args: c, plans, style })), 4)).flat();
+  tell(`finalists: no plan (every robot its own AUTO) on ${cfg.finalDraws} fresh draws`, 0.56);
   // "no plan" (every robot its own brain) is a finalist too: the playbook never recommends a plan
   // that is not better than the robot's own AUTO (an empty plan then says exactly that)
   const noPlan = await score(empty().map(() => null), finals);
   const baseline = mt(noPlan);
   let best: Node = { plans: empty(), v: -Infinity };
   let bestNom = baseline;
-  for (const n of byV) {
+  for (const [fi, n] of byV.entries()) {
     if (stop()) break;
+    tell(`finalists: plan ${fi + 1} of ${byV.length} on ${cfg.finalDraws} fresh draws`, 0.56 + (0.24 * (fi + 1)) / (byV.length + 1));
     const m = mt(await score(n.plans, finals));
     if (rank(m) > rank(bestNom)) {
       best = n;
@@ -224,8 +249,8 @@ export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = 
     let bestF = mt(await score(best.plans, cd)).mean;
     for (let it = 0; it < cfg.cma.iters && !stop(); it++) {
       const { x } = cmaAsk(S, cfg.cma.pop);
-      // every candidate's draws in ONE batch (the pool balances it; it is not built for parallel calls)
-      const res = await pool.map<number[]>(x.map((g) => job('playPlan', { args: cd, plans: best.plans, style: g })));
+      tell(`tuning skill settings (CMA-ES): round ${it + 1} of ${cfg.cma.iters}, ${cfg.cma.pop} settings × ${cfg.cma.draws} draws`, 0.8 + (0.15 * it) / cfg.cma.iters);
+      const res = await map<number[]>(x.map((g) => job('playPlan', { args: cd, plans: best.plans, style: g })), cfg.cma.draws);
       const f = res.map((r) => r.reduce((a, b) => a + b, 0) / r.length);
       f.forEach((v, i) => {
         if (v > bestF) {
@@ -244,8 +269,10 @@ export async function planAuto(P: AutoProblem, pool: WorkerPool, cfg: AutoCfg = 
       }
     }
   }
+  tell(`the winner on ${cfg.sampledDraws} robots drawn from the profile's range, then its replay`, 0.96);
   const samp = mt(await score(best.plans, sampled, style));
-  const show = (await pool.map<ReturnType<typeof showPlan>>([job('showPlan', { args: ref, plans: best.plans, style })]))[0];
+  const show = (await map<ReturnType<typeof showPlan>>([job('showPlan', { args: ref, plans: best.plans, style })], 1))[0];
+  tell('done', 1);
   return {
     problem: P,
     plan: best.plans.map((p) => p ?? []),

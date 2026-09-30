@@ -46,6 +46,8 @@ function prune(): void {
 /** something could be watched live */
 export const liveAvailable = (): boolean => !!newest() || !!S.live?.stream;
 export const following = (): boolean => stageMode() === 'stream';
+/** the streamed match on the field now (its job id), if any */
+export const shownId = (): number | null => (following() && shown ? shown.id : null);
 
 // ─────────────────────────────── following ───────────────────────────────
 /** follow training on the field (Watch live) */
@@ -140,6 +142,11 @@ export function onLive(m: LiveMsg): void {
     const last = st.f.length ? st.f[st.f.length - 1].t : -1;
     const fresh = m.f.filter((q) => q.t > last);
     for (const q of fresh) st.f.push(q);
+    // frames coming in: it is being played (a lost connection had marked it over)
+    if (fresh.length && st.end) {
+      st.end = null;
+      if (st === shown) renderCaption();
+    }
     if (!following()) autoFollow();
     else if (st === shown) view.pushFrames(fresh);
     else if (!shown && ready(st)) show(st);
@@ -161,6 +168,7 @@ export function onLive(m: LiveMsg): void {
   }
   if (st === shown) {
     syncThink(true);
+    if (p.at === 'start' && !$('think').hidden) dodge();
     renderTransport();
   }
 }
@@ -173,13 +181,21 @@ export function joinSnapshot(sn: StreamSnap | null): void {
     streams.set(sn.id, st);
     prune();
   }
+  const key = sn.key;
   if (!st.head) {
     // the key holds everything up to its tick; frames that came in meanwhile continue it
     st.head = sn.head;
     st.label = sn.label;
-    const key = sn.key;
     if (key) st.f = [key, ...st.f.filter((q) => q.t > key.t)];
     if (sn.think) st.think = { ...sn.think, since: performance.now() };
+  } else if (key && key.t > (st.f[st.f.length - 1]?.t ?? -1)) {
+    // reconnected: the frames sent meanwhile were missed, and the key carries every element's state
+    st.f.push(key);
+    if (st === shown && following()) view.pushFrames([key]);
+  }
+  if (st.end) {
+    st.end = null; // (it is still being played)
+    if (st === shown) renderCaption();
   }
   autoFollow();
 }
@@ -187,11 +203,16 @@ export function joinSnapshot(sn: StreamSnap | null): void {
 bus.on('train', () => {
   const t = S.live;
   if (!t?.running) {
-    // paused: nothing more will come for the matches in flight
+    // paused (or the studio is out of reach): nothing more comes for the matches in flight
     for (const st of streams.values()) st.end ??= { reward: null, score: null };
+    if (shown && following()) {
+      renderCaption();
+      maybeSwitch();
+    }
   }
   $('btnWatchLive').hidden = !t?.running;
   $<HTMLButtonElement>('btnWatchLive').disabled = !liveAvailable();
+  $('btnWatchChamp').classList.toggle('quiet', !!t?.running); // (one primary button: the live one)
   if (following() && !shown) waiting();
   else autoFollow();
   renderTransport();
@@ -234,22 +255,15 @@ function renderTransport(): void {
   $('streamFill').style.transform = `scaleX(${st ? frac(view.tick) : 0})`;
   $('streamBuf').style.transform = `scaleX(${st ? frac(view.endTick) : 0})`;
   setText($('streamClock'), st ? clock(view.tick) : '–:––');
-  const lagS = view.lag / 60;
   const thinking = !!st?.think && st.think.at !== 'end' && view.lag === 0;
-  const word = !st
-    ? 'waiting'
-    : st.end && view.lag === 0
-      ? 'match over'
-      : thinking
-        ? 'thinking ahead'
-        : lagS > 1.5
-          ? `×${Math.round(view.speed)} catching up`
-          : 'live';
+  const over = !!st?.end && view.lag === 0;
+  const ff = !!st && view.lag > 90 && view.speed >= 1.5;
+  const word = !st ? 'waiting' : over ? 'match over' : thinking ? 'thinking ahead' : ff ? `×${view.speed < 10 ? view.speed.toFixed(1) : Math.round(view.speed)} catching up` : 'live';
   if (word !== paceWord) {
     paceWord = word;
     setText($('streamPace'), word);
-    $('streamPace').className = `pace${thinking ? ' think' : st?.end ? ' over' : lagS > 1.5 ? ' ff' : ''}`;
-    $('transportStream').classList.toggle('over', !!st?.end && view.lag === 0);
+    $('streamPace').className = `pace${thinking ? ' p-think' : over ? ' p-over' : ff ? ' p-ff' : ''}`;
+    $('transportStream').classList.toggle('over', over);
   }
 }
 
@@ -264,7 +278,27 @@ function syncThink(render: boolean): void {
   const was = !$('think').hidden;
   $('think').hidden = !on;
   if (on && (render || !was)) renderThink();
+  if (on && !was) dodge();
   if (on) tickLater();
+}
+/** the panel takes the corner of the field clear of our robot (it stands still while it thinks):
+ * lower left, lower right, upper left, upper right, in that order */
+function dodge(): void {
+  const el = $('think');
+  const p = view.robotOnScreen();
+  const W = el.offsetWidth;
+  const H = el.offsetHeight;
+  const cw = $('field').clientWidth;
+  const ch = $('field').clientHeight;
+  const M = 10;
+  const corners: [string, number, number][] = [
+    ['bl', M, ch - M - H],
+    ['br', cw - M - W, ch - M - H],
+    ['tl', M, M],
+    ['tr', cw - M - W, M],
+  ];
+  const clear = ([, x, y]: [string, number, number]): boolean => !p || p.x < x - 36 || p.x > x + W + 36 || p.y < y - 36 || p.y > y + H + 36;
+  el.dataset.at = (corners.find(clear) ?? corners[0])[0];
 }
 /** the seconds counter moves and the verdict goes, even while the field waits at the live edge */
 let thinkTimer = 0;
@@ -289,13 +323,13 @@ function renderThink(): void {
   const pick = done ? (T.best ?? -1) : lead;
   // the options, best first; the ones dropped in earlier rounds after the ones still in
   const order = opts.map((_, i) => i).sort((a, b) => Number(alive.has(b)) - Number(alive.has(a)) || (q[b] ?? -Infinity) - (q[a] ?? -Infinity));
-  const MAX = 7;
+  const MAX = 5;
   const rows = order.slice(0, MAX).map((i) => {
     const [kind, label] = opts[i];
     const v = q[i];
     const w = v === null || v === undefined ? 0 : hi > lo ? 0.12 + (0.88 * (v - lo)) / (hi - lo) : 1;
     const cls = [alive.has(i) || done ? '' : 'out', i === pick ? 'lead' : ''].filter(Boolean).join(' ');
-    return `<li class="${cls}"><i style="background:${OPTIONS[kind]?.color ?? '#8a8176'}"></i><span class="l">${esc(label)}</span><span class="bar"><b style="transform:scaleX(${w.toFixed(3)})"></b></span><span class="q">${v === null || v === undefined ? '…' : v.toFixed(1)}</span><span class="tag">${i === T.net ? 'NET' : ''}</span></li>`;
+    return `<li class="${cls}"><i style="background:${OPTIONS[kind]?.color ?? '#8a8176'}"></i><span class="l">${esc(label)}</span><span class="bar"><b style="transform:scaleX(${w.toFixed(3)})"></b></span><span class="q">${v === null || v === undefined ? '…' : v.toFixed(1)}</span><span class="tag"${i === T.net ? ' title="the network’s own pick: what it does without thinking ahead"' : ''}>${i === T.net ? 'NET' : ''}</span></li>`;
   });
   const more = order.length - MAX;
   const who = T.robot === 1 ? 'Its partner (our network)' : 'Our robot';

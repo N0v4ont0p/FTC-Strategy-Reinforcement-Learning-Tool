@@ -72,6 +72,7 @@ const seed7 = (...p: (number | string)[]): number => seedOf(...p) % 1_000_000_00
 const BESIDE: Record<string, string> = { none: 'alone', real: 'beside a second REAL-v1', sniper: 'beside a Sniper', hauler: 'beside a Hauler', skimmer: 'beside a Skimmer', parker: 'beside a parker', idle: 'beside an idle robot' };
 const AGAINST: Record<string, string> = { none: 'no opponents', presets: 'vs Skimmer + Sniper', mirror: 'vs two copies of itself', defense: 'vs a defender' };
 const vs = (partner: string, opponents: string): string => `${BESIDE[partner] ?? partner} · ${AGAINST[opponents] ?? opponents}`;
+const MISTAKE_WORDS: Record<string, string> = { 'empty-trip': 'an empty trip', 'blocked-shot': 'a blocked shot', idle: 'an idle spell', foul: 'a foul', stall: 'a stall', crash: 'a crash', judgement: 'a judgement mistake' };
 const now = (): string => new Date().toISOString();
 
 export interface V2Config {
@@ -463,7 +464,7 @@ export class Continuous extends EventEmitter {
       time: Date.now(),
       workers: s.config.workers,
       cpu: this.active ? this.busy : 0,
-      jobs: [...this.jobs.values()].sort((a, b) => a.since - b.since),
+      jobs: [...this.jobs.values()].sort((a, b) => a.since - b.since).map((j) => ({ ...j, think: j.think && { ...j.think } })), // (copies: the picture stays as it was taken)
       queued,
       base: this.baseLive ? { ...this.baseLive } : null,
       exam,
@@ -660,7 +661,7 @@ export class Continuous extends EventEmitter {
           });
       const dArgs = args as EpisodeArgs & { partner?: { kind: string }; opponents?: string };
       const label = drill
-        ? `Drill · a ${drill.tag.replace('drill:', '').replace('-', ' ')} from an exam match, 3 s before it · ${vs(dArgs.partner?.kind ?? 'none', dArgs.opponents ?? 'none')}`
+        ? `Drill · ${MISTAKE_WORDS[drill.tag.slice(6)] ?? drill.tag.slice(6)} from an exam match, just before it · ${vs(dArgs.partner?.kind ?? 'none', dArgs.opponents ?? 'none')}`
         : `Match ${(n + 1).toLocaleString('en-US')} · ${vs(partner, opponents)}${play.id !== PLAYS[0].id ? ` · play: ${play.label}` : ''}`;
       this.run<EpisodeResult>(this.job(args), PRI.actor, { kind: drill ? 'drill' : 'actor', label })
         .then((r) => {

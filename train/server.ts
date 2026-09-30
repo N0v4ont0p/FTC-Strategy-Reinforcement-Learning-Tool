@@ -155,6 +155,11 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
   const simulate = async <T,>(args: object, rid: unknown, label: string): Promise<T> => {
     if (watchIdle) clearTimeout(watchIdle);
     watchIdle = null;
+    // a worker lost (it crashed) is never handed a job again: a fresh pool rather than a queue that waits forever
+    if (watchPool && watchPool.load.size < 2) {
+      watchPool.close();
+      watchPool = null;
+    }
     watchPool ??= new WorkerPool(2);
     const pool = watchPool;
     const id = typeof rid === 'string' && /^[\w-]{1,40}$/.test(rid) ? rid : null;

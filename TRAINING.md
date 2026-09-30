@@ -236,6 +236,33 @@ round.
   problem in training, a studio crash. Each can be switched off; **Send a test** shows one now.
   Settings in `runs/.notify.json`.
 
+### Watching training live (2026-09-30)
+
+- **The status strip** under the top bar, on every page, while anything runs: where training is
+  (the no-learning robot's exam, *playing · 312 of 400 lessons toward candidate #4*, learning with its
+  epoch, a candidate's exam with the way the evidence leans), and the other long jobs (the AUTO
+  playbook, the team-play search, an envelope being measured, a match played in DSIM for the field),
+  each with its progress. Click one for its page; **Watch live** puts training on the field.
+- **Training on the field**: one match training is playing is streamed as DSIM plays it (the first
+  match to start while none is streamed: an actor's match, a drill, an exam match). The field follows
+  it by itself while it shows nothing else; a replay you open takes over, **Watch live** brings it back,
+  **Leave** stops following. The bar under it: red where the field is, lighter where DSIM has got to.
+  Behind the live edge the playback catches up (up to 16×, and a jump when more than 40 s behind: an
+  exam match runs about 30× faster than real time).
+- **Thinking ahead, as it happens**: at each decision in the searched window the match stops while
+  the robot thinks, and a panel over the field (in the corner clear of the robot) shows every option
+  with its value so far, the network's own pick (**NET**), the rounds of halving and the what-ifs
+  played, then the verdict: *keeps the network's choice* or *overrules the network* (a lesson). A
+  decision takes 15–35 s of thinking on a busy machine.
+- **Home → Right now** (while it trains): the loop as tracks side by side (lessons toward the next
+  candidate with an ETA, learning, the exam with its evidence meter from *not better* to *better*),
+  then one tile per core: what it plays (beside whom, against whom), its match clock and score or its
+  thinking round, the learner's epoch and loss. The streamed match's tile says **LIVE**: click it.
+- **Watch** on any page (an exam match, a route, a mistake, a team play) shows the match being played
+  in DSIM over the field, with its progress, before it replays.
+- A studio opened mid-match joins it from a snapshot (`GET /api/train/live`); the events are `train`
+  (the picture, twice a second), `live` (frames and the search), `sim` and `measure` on `/api/events`.
+
 ## Team plays (the alliance plays together)
 
 Two robots should not each do their own thing. A **team play** (`train/teamplay.ts`) gives each

@@ -1,8 +1,7 @@
 // Shapes the server sends, and small helpers. Types come from the engine itself (type-only import).
 import type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo } from '../../train/engine';
-import type { Death, Frames, Inspected, Mistakes, Parts } from '../../train/episode';
+import type { Death, Frame, Frames, Inspected, Mistakes, Parts } from '../../train/episode';
 import type { GapRow } from '../../train/gap';
-import type { Frame } from '../../train/episode';
 import type { JobKind, LearnProgress, LiveHead, LiveJob, LiveMsg, MatchProgress, StreamSnap, ThinkProgress, TrainLive } from '../../train/live';
 export type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo, Death, Frame, Frames, Inspected, Mistakes, Parts, GapRow };
 export type { JobKind, LearnProgress, LiveHead, LiveJob, LiveMsg, MatchProgress, StreamSnap, ThinkProgress, TrainLive };

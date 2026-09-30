@@ -206,14 +206,28 @@ export async function loadExamSheet(): Promise<void> {
     const keep = sel.value;
     setHTML(sel, rows.length ? rows.map((r) => `<option value="${r.i}">Match ${r.i + 1} · ${esc(PARTNER_LABEL[r.partner] ?? r.partner)} · ${esc(OPP_LABEL[r.opponents] ?? r.opponents)}${r.champion !== null ? ` · ${r.champion.toFixed(0)} pts` : ''}</option>`).join('') : '<option value="">After the first exam</option>');
     if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
-    const ready = !!rows.length && rows[0].champion !== null;
-    $<HTMLButtonElement>('watchGo').disabled = !ready;
-    $('btnWatchChamp').hidden = !ready;
-    setText($('stageEmptyText'), ready ? 'Watch the champion play an exam match, a playbook plan, a route or a mistake, exactly as DSIM played it.' : 'Matches play here exactly as DSIM played them: the champion’s exam, a playbook plan, a route, a mistake. The first exam runs when you press Train.');
+    examReady = !!rows.length && rows[0].champion !== null;
+    $<HTMLButtonElement>('watchGo').disabled = !examReady;
+    $('btnWatchChamp').hidden = !examReady;
+    renderStageEmpty();
   } catch {
     /* no run yet */
   }
 }
+/** what the empty field offers: training live while it trains, the champion's matches once examined */
+let examReady = false;
+function renderStageEmpty(): void {
+  const live = !!S.live?.running;
+  setText(
+    $('stageEmptyText'),
+    live
+      ? `Training is playing right now: watch its match live, thinking ahead at each decision${examReady ? ', or the champion’s exam matches, playbook plans, routes and mistakes, exactly as DSIM played them' : ''}.`
+      : examReady
+        ? 'Watch the champion play an exam match, a playbook plan, a route or a mistake, exactly as DSIM played it.'
+        : 'Matches play here exactly as DSIM played them: the champion’s exam, a playbook plan, a route, a mistake. The first exam runs when you press Train.',
+  );
+}
+bus.on('train', renderStageEmpty);
 async function watchExam(match: number): Promise<void> {
   try {
     const f = await simulate<{ frames: Frames; events: [number, string][]; reward: number }>('/api/home/watch', { profile: S.home?.profile, match }, `exam match ${match + 1}`);

@@ -468,15 +468,17 @@ dialog::backdrop { background: rgba(5, 7, 10, 0.65); backdrop-filter: blur(2px);
 .transport.stream.over .liveb { color: var(--dust); }
 .transport.stream.over .liveb i { background: var(--dust); animation: none; }
 .transport .pace { font: 600 11.5px/1 var(--f-mono); color: var(--mist); min-width: 118px; text-align: right; white-space: nowrap; }
-.transport .pace.think { color: var(--pollen); }
-.transport .pace.ff { color: #8fb8ff; }
-.transport .pace.over { color: var(--dust); }
+.transport .pace.p-think { color: var(--pollen); }
+.transport .pace.p-ff { color: #8fb8ff; }
+.transport .pace.p-over { color: var(--dust); }
 .row.center { justify-content: center; }
 
 /* THINKING AHEAD (stream.ts): a broadcast graphic on the field's lower left while it decides */
-.think { position: absolute; left: 10px; bottom: 10px; width: min(372px, calc(100% - 20px)); background: rgba(10, 13, 18, 0.88); border: 1px solid var(--rule-2); border-left: 3px solid var(--pollen); border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(8px); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45); pointer-events: none; animation: thinkIn 0.22s ease-out; }
+.think { position: absolute; left: 10px; bottom: 10px; width: min(340px, calc(100% - 20px)); background: rgba(10, 13, 18, 0.88); border: 1px solid var(--rule-2); border-left: 3px solid var(--pollen); border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(8px); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45); animation: thinkIn 0.22s ease-out; }
 @keyframes thinkIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .think.done { border-left-color: var(--leaf); }
+.think[data-at='br'], .think[data-at='tr'] { left: auto; right: 10px; }
+.think[data-at='tl'], .think[data-at='tr'] { bottom: auto; top: 10px; }
 .thead { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .thead .tk { font: 700 13.5px/1 var(--f-display); letter-spacing: 0.14em; color: var(--pollen); flex: none; }
 .think.done .thead .tk { color: var(--leaf); }
@@ -487,13 +489,13 @@ dialog::backdrop { background: rgba(5, 7, 10, 0.65); backdrop-filter: blur(2px);
 .think.done .tprog > div { background: var(--leaf); }
 .tsub { display: flex; justify-content: space-between; gap: 8px; font: 11px var(--f-mono); color: var(--dust); margin-bottom: 7px; }
 .topts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.topts li { display: grid; grid-template-columns: 9px minmax(0, 1fr) 78px 40px 26px; gap: 8px; align-items: center; font-size: 12px; color: var(--chalk); transition: opacity 0.3s; }
+.topts li { display: grid; grid-template-columns: 9px minmax(0, 1fr) 70px 38px 26px; gap: 8px; align-items: center; font-size: 12px; color: var(--chalk); transition: opacity 0.3s; }
 .topts li i { width: 9px; height: 9px; border-radius: 2px; }
 .topts .l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topts .bar { height: 6px; background: var(--rule); border-radius: 6px; overflow: hidden; }
 .topts .bar b { display: block; height: 100%; background: var(--dust); transform-origin: left; transition: transform 0.35s ease; }
 .topts .q { font: 600 11.5px/1 var(--f-mono); text-align: right; color: var(--mist); }
-.topts .tag { font: 700 10px/1 var(--f-display); letter-spacing: 0.1em; color: #8fb8ff; }
+.topts .tag { font: 700 10px/1 var(--f-display); letter-spacing: 0.1em; color: #8fb8ff; cursor: help; }
 .topts li.lead .l { font-weight: 600; }
 .topts li.lead .bar b { background: var(--pollen); }
 .think.done .topts li.lead .bar b { background: var(--leaf); }
@@ -562,7 +564,7 @@ dialog::backdrop { background: rgba(5, 7, 10, 0.65); backdrop-filter: blur(2px);
 /* ─────────────────────────────── narrow screens ─────────────────────────────── */
 @media (max-width: 1100px) {
   body { overflow: auto; }
-  .app { grid-template-columns: 1fr; flex: none; }
+  .app { grid-template-columns: minmax(0, 1fr); flex: none; } /* (a wide child must not widen the page) */
   .stage { border-right: 0; border-bottom: 1px solid var(--rule); height: min(78vh, 100vw + 170px); }
   .pages { overflow: visible; padding: 18px 16px 60px; }
   .nav { order: 3; }
@@ -575,6 +577,9 @@ dialog::backdrop { background: rgba(5, 7, 10, 0.65); backdrop-filter: blur(2px);
   .act-train .k { display: none; }
   .tracks li { grid-template-columns: 1fr; }
   .think { left: 6px; bottom: 6px; width: calc(100% - 12px); }
+  .think[data-at='br'], .think[data-at='tr'] { right: 6px; }
+  .think[data-at='tl'], .think[data-at='tr'] { top: 6px; }
+  .topts li { grid-template-columns: 9px minmax(0, 1fr) 52px 36px 26px; }
   .transport .pace { min-width: 0; }
   .brand .w2 { display: none; }
   .pill { max-width: 36vw; }
@@ -584,6 +589,10 @@ dialog::backdrop { background: rgba(5, 7, 10, 0.65); backdrop-filter: blur(2px);
   .hero { grid-template-columns: 1fr; }
   .hero .score { font-size: 60px; }
   .board .hop { display: none; }
+  /* the rail in two rows: phase, score and tips, then what the robot is doing across the full width */
+  .board { grid-auto-flow: row; grid-template-columns: auto auto minmax(0, 1fr); }
+  .board .job { order: 9; grid-column: 1 / -1; border-right: 0; border-top: 1px solid var(--rule); flex-direction: row; align-items: center; gap: 10px; }
+  .board .tips { border-right: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

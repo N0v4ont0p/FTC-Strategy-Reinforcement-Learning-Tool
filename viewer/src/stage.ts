@@ -44,6 +44,7 @@ export function setMode(m: StageMode): void {
   $('inspector').hidden = m !== 'champion';
   view.loop = m === 'live';
   if (m !== 'live' && m !== 'stream') view.speed = speed; // (both pace themselves)
+  if (m === 'idle') resetBoard();
   syncEmpty();
   syncPlay();
   hooks.modeChanged(m);
@@ -163,6 +164,16 @@ function renderBoard(f: FrameInfo): void {
   const hop = [...(f.hopper ?? '')];
   ($('bHop').parentElement as HTMLElement).hidden = false;
   setHTML($('bHop'), hop.length ? hop.map((c) => `<i class="dot ${c}"></i>`).join('') : '<span class="sub">empty</span>');
+}
+/** nothing on the field: the rail as it starts (not the last match's numbers) */
+function resetBoard(): void {
+  setText($('bPhaseK'), 'match');
+  setText($('bClock'), '0:00');
+  setText($('bScore'), '—');
+  setText($('bJobK'), 'doing');
+  setHTML($('bJob'), '—');
+  setHTML($('bTips'), '');
+  ($('bHop').parentElement as HTMLElement).hidden = true;
 }
 view.onFrame = (f: FrameInfo) => {
   const lo = view.startTick;

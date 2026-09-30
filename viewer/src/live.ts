@@ -7,11 +7,10 @@
 import { fmt, type JobKind, type LiveJob, type TrainLive } from './data';
 import { $, PARTNER_LABEL, dur, on, setHTML, setText, sgn } from './ui';
 import { S, bus } from './state';
-import { follow, following, liveAvailable } from './stream';
+import { follow, following, liveAvailable, shownId } from './stream';
 
 // ─────────────────────────────── the stage training is at ───────────────────────────────
 interface Stage {
-  word: string; // the strip's label
   text: string; // what it is doing, in words
   short: string; // the same, for Home's State tile
   frac: number | null; // how far (null: no measure)
@@ -23,16 +22,15 @@ function leaning(e: NonNullable<TrainLive['exam']>): string {
   return ` · ${e.llr >= 0 ? 'leaning better' : 'leaning not better'} (${sgn(e.mean)} pts a match)`;
 }
 export function trainStage(t: TrainLive): Stage {
-  if (t.base) return { word: 'First exam', text: `The no-learning robot’s exam · ${t.base.done} of ${t.base.total} matches`, short: `no-learning exam ${t.base.done}/${t.base.total}`, frac: t.base.done / Math.max(1, t.base.total) };
-  if (t.exam) return { word: 'Exam', text: `Candidate #${t.exam.id}’s exam · ${t.exam.done} of ${t.exam.total} matches${leaning(t.exam)}`, short: `exam of #${t.exam.id} ${t.exam.done}/${t.exam.total}`, frac: t.exam.done / Math.max(1, t.exam.total) };
+  if (t.base) return { text: `The no-learning robot’s exam · ${t.base.done} of ${t.base.total} matches`, short: `no-learning exam ${t.base.done}/${t.base.total}`, frac: t.base.done / Math.max(1, t.base.total) };
+  if (t.exam) return { text: `Candidate #${t.exam.id}’s exam · ${t.exam.done} of ${t.exam.total} matches${leaning(t.exam)}`, short: `exam of #${t.exam.id} ${t.exam.done}/${t.exam.total}`, frac: t.exam.done / Math.max(1, t.exam.total) };
   if (t.learning) {
     const p = learnerOf(t)?.p;
     const L = p?.k === 'learn' ? p : null;
-    return { word: 'Learning', text: `Learning candidate #${t.next} from its lessons${L ? ` · epoch ${L.epoch + 1} of ${L.epochs}, rate ${L.lr + 1} of ${L.lrs}` : ''}`, short: `learning #${t.next}${L ? ` · ${Math.round(100 * L.frac)} %` : ''}`, frac: L ? L.frac : null };
+    return { text: `Learning candidate #${t.next} from its lessons${L ? ` · epoch ${L.epoch + 1} of ${L.epochs}, rate ${L.lr + 1} of ${L.lrs}` : ''}`, short: `learning #${t.next}${L ? ` · ${Math.round(100 * L.frac)} %` : ''}`, frac: L ? L.frac : null };
   }
   const { have, need } = t.lessons;
   return {
-    word: 'Playing',
     text: have >= need ? `Playing and thinking ahead · ${fmt(have)} lessons: candidate #${t.next} is learned next` : `Playing and thinking ahead · ${fmt(have)} of ${fmt(need)} lessons toward candidate #${t.next}`,
     short: `playing · ${fmt(Math.min(have, need))}/${fmt(need)} lessons`,
     frac: Math.min(1, have / Math.max(1, need)),
@@ -77,7 +75,7 @@ export function renderActivity(): void {
   if (t?.running) {
     const st = trainStage(t);
     const el = item('train', 'home');
-    fill(el, st.word, st.text, st.frac, `${t.name} is training · ${t.jobs.length} of ${t.workers} cores busy${t.matchesPerHour ? ` · ${fmt(t.matchesPerHour)} matches an hour` : ''} · open Home`);
+    fill(el, 'Training', st.text, st.frac, `${t.name} is training · ${t.jobs.length} of ${t.workers} cores busy${t.matchesPerHour ? ` · ${fmt(t.matchesPerHour)} matches an hour` : ''} · open Home`);
     lead = st.frac;
   } else drop('train');
   const pb = S.pbStatus;
@@ -127,7 +125,7 @@ function mmss(s: number): string {
   const v = Math.max(0, Math.ceil(s));
   return `${Math.floor(v / 60)}:${String(v % 60).padStart(2, '0')}`;
 }
-const bar = (f: number | null, cls = ''): string => `<span class="lbar ${cls}"><b style="transform:scaleX(${Math.max(0, Math.min(1, f ?? 0)).toFixed(3)})"></b></span>`;
+const bar = (f: number | null): string => `<span class="lbar"><b style="transform:scaleX(${Math.max(0, Math.min(1, f ?? 0)).toFixed(3)})"></b></span>`;
 
 /** the training loop's tracks: they run side by side (lessons keep coming while it learns and while a
  * candidate sits its exam) */
@@ -144,9 +142,10 @@ function tracks(t: TrainLive): string {
   const { have, need, perHour } = t.lessons;
   const left = Math.max(0, need - have);
   const eta = left > 0 && perHour ? ` · about ${dur((3600 * left) / perHour)}` : '';
-  row(have >= need ? 'done' : 'on', `Lessons toward candidate #${t.next}`, 'every decision it thinks through in a match is one', have / Math.max(1, need), have >= need ? `${fmt(have)} · enough${t.exam ? ': learns after this exam' : ''}` : `${fmt(have)} of ${fmt(need)}${eta}`);
+  // (while #next is being learned, the lessons count toward the one after it)
+  row(have >= need ? 'done' : 'on', `Lessons toward candidate #${t.learning ? t.next + 1 : t.next}`, 'every decision it thinks through in a match is one', have / Math.max(1, need), have >= need ? `${fmt(have)} · enough${t.exam ? ': learns after this exam' : ''}` : `${fmt(have)} of ${fmt(need)}${eta}`);
   const L = learnerOf(t)?.p;
-  if (t.learning) row('on', `Learning candidate #${t.next}`, 'three learning rates side by side: the best on held-out decisions goes on', L?.k === 'learn' ? L.frac : null, L?.k === 'learn' ? `rate ${L.lr + 1} of ${L.lrs} · epoch ${L.epoch + 1} of ${L.epochs}${L.loss !== null ? ` · loss ${L.loss.toFixed(3)}` : ''}` : 'starting');
+  if (t.learning) row('on', `Learning candidate #${t.next}`, 'one fit per learning rate: the best on held-out decisions becomes the candidate', L?.k === 'learn' ? L.frac : null, L?.k === 'learn' ? `rate ${L.lr + 1} of ${L.lrs} · epoch ${L.epoch + 1} of ${L.epochs}${L.loss !== null ? ` · loss ${L.loss.toFixed(3)}` : ''}` : 'starting');
   else row('wait', `Learning candidate #${t.next}`, `starts at ${fmt(need)} lessons${t.exam ? ', after the exam in progress' : ''}`, null, '');
   const E = t.exam;
   if (E) {
@@ -218,9 +217,10 @@ function renderTiles(t: TrainLive): void {
     }
     const p = j.p;
     const thinking = !!j.think;
-    T.el.className = `tile k-${j.kind}${j.live ? ' live' : ''}${thinking ? ' thinking' : ''}${j.live && following() ? ' watched' : ''}`;
+    const onField = j.live && shownId() === j.id;
+    T.el.className = `tile k-${j.kind}${j.live ? ' live' : ''}${thinking ? ' thinking' : ''}${onField ? ' watched' : ''}`;
     setText(T.kind, KIND[j.kind]);
-    setText(T.lv, j.live && following() ? 'ON THE FIELD' : 'LIVE · WATCH');
+    setText(T.lv, onField ? 'ON THE FIELD' : 'LIVE · WATCH');
     setText(T.el2, j.since ? dur((t.time - j.since) / 1000) : '');
     const [title, ...rest] = j.label.split(' · ');
     setText(T.ttl, title);
@@ -230,9 +230,10 @@ function renderTiles(t: TrainLive): void {
       setText(T.ph, `rate ${p.lr + 1} of ${p.lrs} · epoch ${p.epoch + 1} of ${p.epochs}`);
       setText(T.sc, p.loss !== null ? `loss ${p.loss.toFixed(3)}` : '');
     } else if (thinking) {
+      // (the match stands still while it thinks: what-ifs played, not its score)
       const k = j.think!;
-      setText(T.ph, `thinking ahead · round ${Math.min(k.rounds, k.r + 1)} of ${k.rounds}${k.total ? ` · ${k.done}/${k.total} what-ifs` : ''}`);
-      setText(T.sc, p?.k === 'match' ? `${p.score} pts` : '');
+      setText(T.ph, `thinking ahead · round ${Math.min(k.rounds, k.r + 1)} of ${k.rounds}`);
+      setText(T.sc, k.total ? `${k.done}/${k.total}` : '');
     } else if (p?.k === 'match') {
       setText(T.ph, `${PHASE[p.phase] ?? p.phase} ${mmss(p.left)}${p.searched ? ` · ${p.searched} thought through` : ''}`);
       setText(T.sc, `${p.score} pts`);
@@ -240,7 +241,7 @@ function renderTiles(t: TrainLive): void {
       setText(T.ph, 'starting');
       setText(T.sc, '');
     }
-    const tip = j.live ? (following() ? 'This match is on the field' : 'Watch this match on the field') : '';
+    const tip = `${j.label}${j.think ? ` · thinking ahead at a decision: round ${Math.min(j.think.rounds, j.think.r + 1)} of ${j.think.rounds}, ${j.think.done} of ${j.think.total} what-ifs played` : ''}${j.live ? (onField ? ' · on the field now' : ' · click to watch it on the field') : ''}`;
     if (T.el.title !== tip) T.el.title = tip;
   }
   for (let i = n; i < tiles.length; i++) tiles[i].el.hidden = true;

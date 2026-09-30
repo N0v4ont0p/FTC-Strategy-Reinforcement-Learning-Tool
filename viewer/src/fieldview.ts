@@ -291,6 +291,17 @@ export class FieldView {
       this.kick();
     }
   }
+  /** where a point of the field is on the canvas (CSS px from its top left): DSIM's camera, as drawn */
+  screenOf(x: number, y: number): { x: number; y: number } {
+    const c = Math.cos(VIEW);
+    const s = Math.sin(VIEW);
+    return { x: this.w / 2 + this.scale * (x * c - y * s), y: this.h / 2 - this.scale * (x * s + y * c) };
+  }
+  /** our robot on the canvas now (a match shown), else null */
+  robotOnScreen(): { x: number; y: number } | null {
+    const r = this.mode === 'focus' && !this.empty && this.fi >= 0 ? this.fw?.robots[0] : null;
+    return r ? this.screenOf(r.pos.x, r.pos.y) : null;
+  }
   /** match ticks between the playback and the newest frame (a stream's lag) */
   get lag(): number {
     return Math.max(0, this.endTick - this.tick);

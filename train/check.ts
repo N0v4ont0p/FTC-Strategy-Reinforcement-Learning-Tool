@@ -46,6 +46,9 @@ import { describeBuild, draftFrom, floorsOf, inspectRobot, listRobots, replayRob
 import { notify } from './notify';
 import { PLAYS, PLAY_QUICK, cross, mutate, playKey, playWords, role as mkRole, searchPlays, type Play } from './teamplay';
 import { TeamPlaybook } from './teamplaybook';
+import { setProgressSink } from '../harness/progress';
+import type { Frame } from './episode';
+import type { FramesProgress, JobProgress, LiveMsg, MatchProgress, ThinkProgress, TrainLive } from './live';
 
 process.env.BIOBUZZ_NO_NOTIFY = '1'; // the gate never posts macOS notifications
 let fails = 0;
@@ -735,6 +738,11 @@ const s2a = runEpisode(s2args(null));
   const c = new Continuous(name, cfg);
   const t0 = Date.now();
   let peak = 0;
+  // the live picture on the way (the studio's status strip, Home's Right now, the field's stream)
+  const pics: TrainLive[] = [];
+  const lives: LiveMsg[] = [];
+  c.on('train', (x: TrainLive) => pics.push(x));
+  c.on('live', (m: LiveMsg) => lives.push(m));
   c.start();
   while (!c.st.candidates.length && Date.now() - t0 < 400_000) {
     await new Promise((res) => setTimeout(res, 1000));
@@ -745,6 +753,26 @@ const s2a = runEpisode(s2args(null));
   const c2 = new Continuous(name);
   check('13 continuous: the no-learning robot takes the exam first, actors store searched decisions, the learner makes a candidate, the evaluator gives a verdict', !!c.st.base && c.st.base.length === 2 && c.st.totals.labels >= 12 && c.st.candidates.length >= 1 && c.st.candidates[0].n >= 2 && c.problems.length === 0, `${((Date.now() - t0) / 1000).toFixed(0)} s, ${c.st.totals.labels} labels, verdict ${c.st.candidates[0]?.verdict}${c.problems.length ? `, problems: ${c.problems.join(' | ')}` : ''}`);
   check('13 continuous: every worker kept busy with actors between exams; paused, it reopens where it was (not training)', peak === cfg.workers && !c2.st.running && c2.st.candidates.length === c.st.candidates.length && c2.st.totals.labels === c.st.totals.labels && sNow.champion.exam !== null);
+  const heads = new Set(lives.filter((m) => m.k === 'frames' && m.head).map((m) => m.id));
+  const ends = new Set(lives.filter((m) => m.k === 'end').map((m) => m.id));
+  // one match at a time: a stream starts only once the one before it has ended
+  let open: number | null = null;
+  let oneAtATime = true;
+  for (const m of lives) {
+    if (m.k === 'frames' && m.head) {
+      oneAtATime &&= open === null;
+      open = m.id;
+    } else if (m.k === 'end' && m.id === open) open = null;
+  }
+  check(
+    '13 live: the picture shows every stage as it happens (the first exam counted, matches with their clocks, the learner\'s epochs, the candidate\'s exam with its evidence), and one match at a time streams to the field from its first frame to its end',
+    pics.some((p) => p.base !== null && p.base.done > 0) &&
+      pics.some((p) => p.jobs.some((j) => (j.kind === 'actor' || j.kind === 'drill') && j.p?.k === 'match' && j.p.frac > 0)) &&
+      pics.some((p) => p.learning && p.jobs.some((j) => j.kind === 'learner' && j.p?.k === 'learn')) &&
+      pics.some((p) => p.exam !== null && p.exam.done > 0 && p.exam.lo < 0 && p.exam.hi > 0) &&
+      heads.size > 0 && [...heads].every((id) => ends.has(id)) && oneAtATime && pics.at(-1)!.running === false && pics.at(-1)!.jobs.length === 0,
+    `${pics.length} pictures, ${heads.size} matches streamed`,
+  );
   c.store.close();
   c2.store.close();
   rmSync(join(V2_DIR, name), { recursive: true, force: true });
@@ -839,8 +867,9 @@ const s2a = runEpisode(s2args(null));
   rmSync(join(V2_DIR, name), { recursive: true, force: true });
   const srv = startServer(4795, undefined, { noResume: true });
   const mk = await fetch('http://127.0.0.1:4795/api/mistakes');
+  const mkj = (await mk.json()) as object; // (the whole body before the server closes: a trained run's audit is large)
   await srv.close();
-  check('15 studio: the Mistakes page is served', mk.status === 200 && 'audit' in ((await mk.json()) as object));
+  check('15 studio: the Mistakes page is served', mk.status === 200 && 'audit' in mkj);
 }
 
 // ---- 16. the robot lab, notifications, the printable playbook ----------------------------------------------------
@@ -1015,6 +1044,72 @@ const s2a = runEpisode(s2args(null));
   pb.store.close();
   check('18 playbook: an entry planned under other AUTO rules or another shooting zone is outdated (a build plans it again)', st1 === true && st2 === false && rulesStamp(ZP) !== rulesStamp(V1P) && rulesStamp(V1P).startsWith(AUTO_RULES));
   rmSync(zdir, { recursive: true, force: true });
+}
+
+// ---- 19. watching training live: a match streamed as it is played, its clock, its search -------------------------
+{
+  const msgs: JobProgress[] = [];
+  setProgressSink((p) => msgs.push(p as JobProgress));
+  const W: [number, number] = [240 + 600, 240 + 1200]; // AUTO's 10th to 20th second is thought through
+  let r: EpisodeResult;
+  try {
+    r = runEpisode({ genome: null, profile: V1P, sampleProfile: false, seed: 1901, stage: 'full', driver: 'oracle', track: false, record: false, frames: true, progress: true, live: true, search2: QUICK2, searchWindow: W });
+  } finally {
+    setProgressSink(null);
+  }
+  const fm = msgs.filter((m): m is FramesProgress => m.k === 'frames');
+  const streamed = fm.flatMap((m) => m.f);
+  // every element's state and the game state rebuilt from each sequence of deltas: at every tick the
+  // stream sends, the field shows exactly what the recorded match shows
+  const rebuild = (f: Frame[]): Map<number, string> => {
+    const st: string[] = [];
+    let g = '';
+    const out = new Map<number, string>();
+    for (const q of f) {
+      for (const [i, x] of q.s ?? []) st[i] = JSON.stringify(x);
+      if (q.g !== undefined) g = JSON.stringify(q.g);
+      out.set(q.t, JSON.stringify([q.r, q.h, q.b, q.m, q.o ?? null, q.p ?? null, st, g]));
+    }
+    return out;
+  };
+  const rec = rebuild(r.frames!.f);
+  const str = rebuild(streamed);
+  let same = 0;
+  for (const [t, v] of str) if (rec.get(t) === v) same++;
+  check('19 live: a streamed match rebuilds exactly as recorded at every frame it sends (every element, the HIVE, the score); its first frame carries every element', !!fm[0]?.head && (fm[0].f[0].s?.length ?? 0) === fm[0].head.meta.length && fm.slice(1).every((m) => !m.head) && str.size > 100 && same === str.size, `${same} of ${str.size} frames`);
+  const inW = streamed.filter((q) => q.t >= W[0] && q.t < W[1]);
+  const gaps = (f: Frame[]): Set<number> => new Set(f.slice(1).map((q, i) => q.t - f[i].t));
+  const before = streamed.filter((q) => q.t < W[0]);
+  const after = streamed.filter((q) => q.t >= W[1]);
+  check('19 live: every other tick where it thinks ahead, every 12th elsewhere (the studio fast-forwards there)', inW.length > 100 && [...gaps(inW)].join() === '2' && [...gaps(before)].join() === '12' && [...gaps(after)].join() === '12', `in the window ${[...gaps(inW)]}, before ${[...gaps(before)]}, after ${[...gaps(after)]}`);
+  const clk = msgs.filter((m): m is MatchProgress => m.k === 'match');
+  check('19 live: the match clock is reported as it goes, in order, to the end, and says when it stops to think', clk.length > 3 && clk.every((x, i) => i === 0 || x.t >= clk[i - 1].t) && clk[clk.length - 1].frac === 1 && clk.some((x) => x.thinking) && clk[clk.length - 1].searched === r.searched!.n, `${clk.length} reports`);
+  const th = msgs.filter((m): m is ThinkProgress => m.k === 'think');
+  let cur: ThinkProgress | null = null;
+  let rounds = 0;
+  let inOrder = true;
+  for (const m of th) {
+    if (m.at === 'start') {
+      inOrder &&= !cur;
+      cur = m;
+      rounds = 0;
+      continue;
+    }
+    if (!cur || m.tick !== cur.tick) {
+      inOrder = false;
+      continue;
+    }
+    if (m.at === 'round') rounds++;
+    if (m.at === 'end') {
+      inOrder &&= rounds === QUICK2.rounds.length && m.best !== undefined && m.best >= 0 && m.best < (cur.opts?.length ?? 0);
+      cur = null;
+    }
+  }
+  const starts = th.filter((m) => m.at === 'start');
+  check('19 live: the search at each decision is reported as it goes — its options, every round, its verdict (the panel over the field)', starts.length > 0 && starts.length === r.searched!.n && inOrder && !cur && starts.every((m) => m.tick >= W[0] && m.tick < W[1] && (m.opts?.length ?? 0) >= 1 && m.rounds === QUICK2.rounds.length), `${starts.length} decisions`);
+  // nobody listening (a check, a direct call): the same match, nothing reported, nothing different
+  const quiet = runEpisode({ genome: null, profile: V1P, sampleProfile: false, seed: 1901, stage: 'full', driver: 'oracle', track: false, record: false, frames: true, search2: QUICK2, searchWindow: W });
+  check('19 live: streaming changes nothing in the match (same reward, same frames)', quiet.reward === r.reward && JSON.stringify(quiet.frames!.f) === JSON.stringify(r.frames!.f));
 }
 
 console.log(fails === 0 ? '\nTRAINING PLATFORM GATE: ALL PASS' : `\nTRAINING PLATFORM GATE: ${fails} FAIL`);

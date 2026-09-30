@@ -1,7 +1,7 @@
 // TEAM PLAYS — the alliance plays together (train/teamplay.ts, train/teamplaybook.ts): search the
 // plays beside every kind of partner, read the winners' roles, watch one on the field.
 import { getJSON, post, type Frames } from '../data';
-import { watch } from '../stage';
+import { simulate, watch } from '../stage';
 import { $, PARTNER_LABEL, act, esc, on, setHTML, setText, sgn, toast } from '../ui';
 import { S, profileQuery, type TeamStatusV } from '../state';
 import { renderJobs } from './jobs';
@@ -110,8 +110,8 @@ $('tpWatch').onclick = async () => {
   const r = e?.ranked[sel];
   if (!r || !TP) return;
   try {
-    toast('Playing it in DSIM…');
-    const f = await post<{ frames: Frames; events: [number, string][]; reward: number }>('/api/teamplays/watch', { profile: TP.profile, partner, play: r.play });
+    const f = await simulate<{ frames: Frames; events: [number, string][]; reward: number }>('/api/teamplays/watch', { profile: TP.profile, partner, play: r.play }, `the play “${r.play.label}”`);
+    if (!f) return;
     watch(f, `Team play · ${r.play.label} · ${(PARTNER_LABEL[partner] ?? partner).toLowerCase()} · ${f.reward} points`);
   } catch (err) {
     toast((err as Error).message, true);

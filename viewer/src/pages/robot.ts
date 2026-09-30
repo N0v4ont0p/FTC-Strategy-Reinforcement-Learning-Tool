@@ -6,8 +6,8 @@ import { BB_HALF_X } from '../../../dsim-main/src/games/biobuzz/config';
 import { getJSON, post } from '../data';
 import { drawBuild, drawEnvelope, drawZone } from '../plandiagram';
 import { cellCentre, zoneActive, zoneSpots, type ShootZone } from '../../../train/zone';
-import { $, act, dialog, esc, on, setHTML, setText, shown, toast } from '../ui';
-import { S } from '../state';
+import { $, act, dialog, dur, esc, on, setHTML, setText, shown, toast } from '../ui';
+import { S, bus, type MeasureV } from '../state';
 
 type Rng = { min: number; max: number; nominal: number; unit?: string };
 interface RobotRow {
@@ -389,7 +389,27 @@ async function saveRobotAs(asNew: boolean): Promise<void> {
 }
 $('rbSave').onclick = () => void saveRobotAs(false);
 $('rbSaveAs').onclick = () => void saveRobotAs(true);
-$('rbMeasure').onclick = () => RE && void act(post('/api/robots/measure', { profile: RE.p }), 'Measuring its envelope in DSIM (a few minutes on every core)…');
+$('rbMeasure').onclick = () => RE && void act(post('/api/robots/measure', { profile: RE.p }));
+/** an envelope being measured (SSE `measure`): its progress here and in the status strip */
+let measStart = 0;
+export function measureProgress(m: MeasureV): void {
+  S.measure = m.running ? m : null;
+  bus.emit('activity');
+  $('rbMeasProg').hidden = !m.running;
+  $<HTMLButtonElement>('rbMeasure').disabled = m.running;
+  if (!m.running) {
+    measStart = 0;
+    return;
+  }
+  measStart ||= Date.now();
+  const f = m.total ? Math.min(1, (m.done ?? 0) / m.total) : 0;
+  const el = (Date.now() - measStart) / 1000;
+  const left = f > 0.04 && el > 5 ? (el / f) * (1 - f) : NaN;
+  setText($('rbMeasNow'), `Measuring ${m.build ?? 'the robot'}’s shooting envelope in DSIM`);
+  setText($('rbMeasEta'), `${Math.round(100 * f)} %${Number.isFinite(left) ? ` · about ${dur(left)} left` : ''}`);
+  $('rbMeasFill').style.transform = `scaleX(${f.toFixed(4)})`;
+  $('rbMeasBar').setAttribute('aria-valuenow', String(Math.round(100 * f)));
+}
 $('rbImportBtn').onclick = () => {
   $('rbImport').hidden = !$('rbImport').hidden;
   if (!$('rbImport').hidden) $('rbPaste').focus();

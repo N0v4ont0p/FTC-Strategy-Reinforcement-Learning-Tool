@@ -8,7 +8,7 @@ import { extname, join, normalize } from 'node:path';
 import { createBiobuzzWorldForViewer } from './field';
 import { Engine, NAME_RE, PRESETS, RUNS, ROOT, SEARCH, checkRun, confStats, defaultConfig, deleteRun, listRuns, renameRun, type Champ, type RunConfig } from './engine';
 import { DATA_DIR, currentKey, dataFiles, excluded, greedyReport, hasSet, imitationReport, setExcluded, valueReport } from './imitate';
-import { runPool } from '../harness/pool';
+import { WorkerPool, runPool } from '../harness/pool';
 import { STYLE, decodeStyle } from './policy';
 import { fromB64, styleOffset } from './net';
 import { SHAPE } from './policy';
@@ -140,7 +140,49 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     c.on('routes', () => send('routes', { profile: c.st.config.profile }));
     c.on('audit', () => send('mistakes', { profile: c.st.config.profile }));
     c.on('log', (l: string) => send('log', `training: ${l}`));
+    // the live picture (the status bar, Home's live panel) and the match streamed to the field
+    c.on('train', (x: unknown) => send('train', x));
+    c.on('live', (m: unknown) => send('live', m));
     return c;
+  };
+
+  // WATCHING a match again in DSIM (an exam match, a route, a mistake, a team play): two workers kept
+  // warm while they are used (a fresh worker costs a second or two to start), closed after two idle
+  // minutes; the match reports its clock on the way, so the field shows how far it is (SSE `sim`)
+  let watchPool: WorkerPool | null = null;
+  let watchIdle: NodeJS.Timeout | null = null;
+  let watching = 0;
+  const simulate = async <T,>(args: object, rid: unknown, label: string): Promise<T> => {
+    if (watchIdle) clearTimeout(watchIdle);
+    watchIdle = null;
+    watchPool ??= new WorkerPool(2);
+    const pool = watchPool;
+    const id = typeof rid === 'string' && /^[\w-]{1,40}$/.test(rid) ? rid : null;
+    let last = 0;
+    const tell = (x: object): void => {
+      if (id) send('sim', { rid: id, label, ...x });
+    };
+    tell({ frac: 0 });
+    watching++;
+    try {
+      return await pool.submit<T>({ module: '../train/episode.ts', fn: 'runEpisode', args: { ...args, progress: true } }, 0, {
+        onProgress: (p) => {
+          const m = p as { k?: string; frac?: number; t?: number };
+          if (m.k !== 'match' || Date.now() - last < 150) return;
+          last = Date.now();
+          tell({ frac: m.frac ?? 0, t: m.t ?? 0 });
+        },
+      });
+    } finally {
+      watching--;
+      tell({ done: true });
+      if (!watching && watchPool === pool)
+        watchIdle = setTimeout(() => {
+          if (watching) return;
+          watchPool?.close();
+          watchPool = null;
+        }, 120_000);
+    }
   };
   const home = (profile?: string) => {
     const profiles = readdirSync(join(ROOT, 'profiles')).filter((f) => f.endsWith('.json')).map((f) => `profiles/${f}`);
@@ -361,9 +403,11 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       } catch (err) {
         throw bad(err);
       }
-      const [r] = await runPool<{ frames: unknown; events: unknown; reward: number }>([{ module: '../train/episode.ts', fn: 'runEpisode', args }], 1);
+      const r = await simulate<{ frames: unknown; events: unknown; reward: number }>(args, b.rid, `exam match ${Number(b.match) + 1}`);
       return json(res, 200, { frames: r.frames, events: r.events, reward: r.reward });
     }
+    // the live picture now (a studio opening mid-training joins the streamed match from here)
+    if (p === '/api/train/live' && !post) return json(res, 200, { train: coach ? coach.live() : null, stream: coach ? coach.liveSnapshot() : null });
     if (p === '/api/export/v2-champion.json') {
       const c = coachFor(url.searchParams.get('profile') ?? coach?.st.config.profile ?? 'profiles/real-v1.json');
       res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${c.name}-champion-${c.st.champion.id}.json"` });
@@ -464,10 +508,20 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
         throw bad(err);
       }
       measuring = true;
-      ensureEnvelopes([spec], (l) => say(`envelope: ${l}`))
+      let told = 0;
+      const tell = (x: object): void => send('measure', x);
+      tell({ running: true, build: spec.name ?? 'the robot', done: 0, total: 1 });
+      ensureEnvelopes([spec], (l) => say(`envelope: ${l}`), 12, (e) => {
+        if (Date.now() - told < 250 && e.done < e.total) return;
+        told = Date.now();
+        tell({ running: true, ...e });
+      })
         .then(() => send('robots', { measured: true }))
         .catch((err: Error) => say(`envelope measurement failed: ${err.message}`))
-        .finally(() => (measuring = false));
+        .finally(() => {
+          measuring = false;
+          tell({ running: false });
+        });
       return json(res, 200, { ok: true });
     }
 
@@ -501,7 +555,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       if (!/^profiles\/[A-Za-z0-9_.-]+\.json$/.test(profile) || !existsSync(join(ROOT, profile))) throw new HttpError(400, 'unknown profile');
       const genome = championOf(profile);
       const args = { genome, profile, sampleProfile: false, seed: Number(b.seed ?? 4242) >>> 0, stage: 'full', driver: 'oracle', track: false, record: false, frames: true, routes: true, play, ...(partner !== 'none' ? { partner: { kind: partner, genome: partner === 'real' ? genome : null } } : {}) };
-      const [r] = await runPool<{ frames: unknown; events: unknown; reward: number; parts: unknown; partner?: { parts: unknown } }>([{ module: '../train/episode.ts', fn: 'runEpisode', args }], 1);
+      const r = await simulate<{ frames: unknown; events: unknown; reward: number }>(args, b.rid, `the play ${play.label ?? play.id}`);
       return json(res, 200, { frames: r.frames, events: r.events, reward: r.reward });
     }
 
@@ -520,7 +574,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       } catch (err) {
         throw bad(err);
       }
-      const [r] = await runPool<{ frames: unknown; events: unknown }>([{ module: '../train/episode.ts', fn: 'runEpisode', args }], 1);
+      const r = await simulate<{ frames: unknown; events: unknown }>(args, b.rid, `exam match ${Number(b.match) + 1}`);
       return json(res, 200, { frames: r.frames, events: r.events });
     }
 
@@ -541,7 +595,7 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
       } catch (err) {
         throw bad(err);
       }
-      const [r] = await runPool<{ frames: unknown; events: unknown }>([{ module: '../train/episode.ts', fn: 'runEpisode', args: m.args }], 1);
+      const r = await simulate<{ frames: unknown; events: unknown }>(m.args, b.rid, 'the exam match of that mistake');
       return json(res, 200, { frames: r.frames, events: r.events, tick: m.tick });
     }
 
@@ -872,6 +926,8 @@ export function startServer(port: number, first?: Engine, opts: { onQuit?: () =>
     engine: () => engine,
     open,
     close: async () => {
+      if (watchIdle) clearTimeout(watchIdle);
+      watchPool?.close();
       coach?.close();
       team?.stop();
       playbook?.stop();

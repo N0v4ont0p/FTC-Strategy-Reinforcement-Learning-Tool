@@ -1,8 +1,8 @@
 // MISTAKES — every champion's exam matches audited (train/continuous.ts): the counts by champion,
 // repeats, drills, and each mistake to watch from 3 s before.
 import { LineChart } from '../charts';
-import { AUTO_START, fmt, getJSON, post, type AuditPointV, type AuditV, type Frames } from '../data';
-import { watch } from '../stage';
+import { AUTO_START, fmt, getJSON, type AuditPointV, type AuditV, type Frames } from '../data';
+import { simulate, watch } from '../stage';
 import { $, esc, on, setHTML, setText, toast } from '../ui';
 import { profileQuery } from '../state';
 
@@ -71,8 +71,8 @@ async function watchMistake(i: number): Promise<void> {
   const it = MK?.audit?.items[i];
   if (!it || !MK) return;
   try {
-    toast('Replaying that exam match in DSIM…');
-    const f = await post<{ frames: Frames; events: [number, string][]; tick: number }>('/api/mistakes/watch', { profile: MK.profile, i });
+    const f = await simulate<{ frames: Frames; events: [number, string][]; tick: number }>('/api/mistakes/watch', { profile: MK.profile, i }, `exam match ${it.match + 1}`);
+    if (!f) return;
     watch(f, `Mistake · ${LABEL[it.kind]}: ${it.detail} · exam match ${it.match + 1} at ${((it.tick - AUTO_START) / 60).toFixed(1)} s (from 3 s before)`, { seek: Math.max(0, f.tick - 180) });
   } catch (e) {
     toast((e as Error).message, true);

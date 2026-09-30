@@ -49,6 +49,8 @@ import { Store } from './store';
 import { entGenome, labelRows, type EntFitReport, type LearnArgs, type LearnResult } from './entlearn';
 import { ENT_PREFIX } from './policy';
 import type { OpponentKind, PartnerKind } from './team';
+import type { Frame } from './episode';
+import type { JobKind, JobProgress, LiveHead, LiveJob, LiveMsg, StreamSnap, ThinkProgress, TrainLive } from './live';
 
 export const V2_DIR = join(RUNS, '.v2');
 export const V2_VERSION = 4; // 2: the exam brings opponents; 3: team plays (the entity network reads each option's role); 4: DSIM Act 2 (every match in DSIM's 3D solve)
@@ -66,6 +68,10 @@ const STORE_KEEP = 300_000;
 const REPEAT_TICKS = 300; // a repeat: the same kind of mistake in the same exam match within 5 s …
 const REPEAT_IN = 24; // … and 24 in
 const seed7 = (...p: (number | string)[]): number => seedOf(...p) % 1_000_000_007;
+/** who a match is beside and against, in words (the studio's live view) */
+const BESIDE: Record<string, string> = { none: 'alone', real: 'beside a second REAL-v1', sniper: 'beside a Sniper', hauler: 'beside a Hauler', skimmer: 'beside a Skimmer', parker: 'beside a parker', idle: 'beside an idle robot' };
+const AGAINST: Record<string, string> = { none: 'no opponents', presets: 'vs Skimmer + Sniper', mirror: 'vs two copies of itself', defense: 'vs a defender' };
+const vs = (partner: string, opponents: string): string => `${BESIDE[partner] ?? partner} · ${AGAINST[opponents] ?? opponents}`;
 const now = (): string => new Date().toISOString();
 
 export interface V2Config {
@@ -173,14 +179,22 @@ export interface AuditPoint {
  * condition: the network alone reaches the search): this many solo exam matches, at most this often */
 const SEARCH_EXAM = { n: 6, everyHours: 6 };
 
+/** the SPRT's evidence on paired differences: the log-likelihood ratio of "better by delta" over
+ * "not better", and the bounds where it decides (lo: not better, hi: better) */
+export function sprtEvidence(d: number[], s: V2Config['sprt']): { llr: number; lo: number; hi: number } {
+  const lo = Math.log(s.beta / (1 - s.alpha));
+  const hi = Math.log((1 - s.beta) / s.alpha);
+  if (d.length < 2) return { llr: 0, lo, hi };
+  const m = d.reduce((a, b) => a + b, 0) / d.length;
+  const sd = Math.max(s.sigmaFloor, Math.sqrt(d.reduce((a, b) => a + (b - m) ** 2, 0) / (d.length - 1)));
+  return { llr: (s.delta / sd ** 2) * d.reduce((a, x) => a + (x - s.delta / 2), 0), lo, hi };
+}
 /** Gaussian SPRT on paired differences (Wald): 'H1' = better by delta, 'H0' = not better, null = go on */
 export function sprt(d: number[], s: V2Config['sprt']): 'H1' | 'H0' | null {
   if (d.length < s.minN) return null;
-  const m = d.reduce((a, b) => a + b, 0) / d.length;
-  const sd = Math.max(s.sigmaFloor, Math.sqrt(d.reduce((a, b) => a + (b - m) ** 2, 0) / (d.length - 1)));
-  const llr = (s.delta / sd ** 2) * d.reduce((a, x) => a + (x - s.delta / 2), 0);
-  if (llr >= Math.log((1 - s.beta) / s.alpha)) return 'H1';
-  if (llr <= Math.log(s.beta / (1 - s.alpha))) return 'H0';
+  const { llr, lo, hi } = sprtEvidence(d, s);
+  if (llr >= hi) return 'H1';
+  if (llr <= lo) return 'H0';
   return null;
 }
 /** mean of the worst tenth */
@@ -249,6 +263,17 @@ export class Continuous extends EventEmitter {
   private recent: string[] = [];
   private awake: ChildProcess | null = null; // caffeinate: the Mac stays awake while it trains
   problems: string[] = [];
+  // ── the live picture (the studio's status bar and live view: train/live.ts) ──
+  private jobSeq = 0;
+  private queued = new Map<number, JobKind>(); // submitted, waiting for a worker
+  private jobs = new Map<number, LiveJob>(); // a worker has them
+  private baseLive: { done: number; total: number } | null = null;
+  private examLive: { id: number; done: number; total: number; diffs: number[] } | null = null;
+  private searchLive: { champion: number; done: number; total: number } | null = null;
+  private streaming = false; // a match is being streamed to the studio's field
+  private stream: { id: number; label: string; head: LiveHead | null; states: unknown[]; bb: unknown; last: Frame | null; think: ThinkProgress | null } | null = null;
+  private liveAt = 0;
+  private liveTimer: NodeJS.Timeout | null = null;
 
   /** open (or create) the run for a robot profile */
   constructor(name: string, config?: V2Config) {
@@ -324,11 +349,132 @@ export class Continuous extends EventEmitter {
   private job(a: EpisodeArgs): Job {
     return { module: '../train/episode.ts', fn: 'runEpisode', args: a };
   }
-  private async run<T>(job: Job, pri: number): Promise<T> {
+  /** one job on the pool, followed by the live picture: queued, taken by a worker, its reports, done.
+   * A match that starts while no match is streamed is streamed to the studio's field (the args are
+   * sent to the worker just after onStart, so it can still ask the match to stream) */
+  private async run<T>(job: Job, pri: number, meta: { kind: JobKind; label: string }): Promise<T> {
     const t0 = Date.now();
-    const r = await this.pool!.submit<T>(job, pri);
-    this.st.totals.busySeconds += (Date.now() - t0) / 1000;
-    return r;
+    const id = ++this.jobSeq;
+    const J: LiveJob = { id, kind: meta.kind, label: meta.label, since: 0, p: null, think: null, live: false };
+    this.queued.set(id, meta.kind);
+    this.changed();
+    let result: T | null = null;
+    try {
+      result = await this.pool!.submit<T>(job, pri, {
+        onStart: () => {
+          this.queued.delete(id);
+          J.since = Date.now();
+          if (meta.kind !== 'learner' && !this.streaming) {
+            this.streaming = J.live = true;
+            (job.args as EpisodeArgs).live = true;
+          }
+          this.jobs.set(id, J);
+          this.changed();
+        },
+        onProgress: (p) => this.onProgress(J, p as JobProgress),
+      });
+      this.st.totals.busySeconds += (Date.now() - t0) / 1000;
+      return result;
+    } finally {
+      this.queued.delete(id);
+      this.jobs.delete(id);
+      if (J.live) {
+        this.streaming = false;
+        const r = result as { reward?: number; score?: number } | null;
+        this.endStream(id, r?.reward ?? null, r?.score ?? null);
+      }
+      this.changed();
+    }
+  }
+
+  // ─────────────────────────────── the live picture ───────────────────────────────
+  private onProgress(J: LiveJob, p: JobProgress): void {
+    if (p.k === 'frames') return this.streamFrames(J, p);
+    if (p.k === 'think') {
+      // the worker tile: which decision, which round
+      if (p.at === 'start') J.think = { tick: p.tick, opts: p.opts?.length ?? 0, rounds: p.rounds ?? 0, r: 0, done: 0, total: 0 };
+      else if (p.at === 'end') J.think = null;
+      else if (J.think) {
+        J.think.r = p.r ?? J.think.r;
+        if (p.at === 'play') {
+          J.think.done = p.done ?? 0;
+          J.think.total = p.total ?? 0;
+        }
+      }
+      this.streamThink(J, p);
+    } else J.p = p;
+    this.changed();
+  }
+  private streamFrames(J: LiveJob, p: Extract<JobProgress, { k: 'frames' }>): void {
+    if (!J.live) return;
+    let S = this.stream;
+    if (!S || S.id !== J.id) S = this.stream = { id: J.id, label: J.label, head: null, states: [], bb: null, last: null, think: null };
+    if (p.head) S.head = p.head;
+    for (const f of p.f) {
+      for (const [i, st] of f.s ?? []) S.states[i] = st;
+      if (f.g) S.bb = f.g;
+      S.last = f;
+    }
+    this.emit('live', { ...p, id: J.id, label: J.label } satisfies LiveMsg);
+  }
+  private streamThink(J: LiveJob, p: ThinkProgress): void {
+    const S = this.stream;
+    if (!J.live || !S || S.id !== J.id) return;
+    if (p.at === 'start') S.think = { ...p };
+    else if (p.at === 'end') S.think = null;
+    else if (S.think) S.think = { ...S.think, r: p.r ?? S.think.r, ...(p.alive ? { alive: p.alive } : {}), ...(p.q ? { q: p.q } : {}), ...(p.at === 'play' ? { done: p.done, total: p.total } : {}) };
+    this.emit('live', { ...p, id: J.id } satisfies LiveMsg);
+  }
+  private endStream(id: number, reward: number | null, score: number | null): void {
+    if (this.stream?.id === id) this.stream = null;
+    this.emit('live', { k: 'end', id, reward, score } satisfies LiveMsg);
+  }
+  /** a studio opening now joins the streamed match here: its builds, and its state as a keyframe */
+  liveSnapshot(): StreamSnap | null {
+    const S = this.stream;
+    if (!S?.head || !S.last) return null;
+    return { id: S.id, label: S.label, head: S.head, key: { ...S.last, s: S.states.map((st, i) => [i, st] as [number, unknown]).filter(([, st]) => st !== undefined), g: S.bb ?? undefined }, think: S.think };
+  }
+  /** the live picture changed: tell the studio, twice a second at most */
+  private changed(): void {
+    if (this.liveTimer) return;
+    this.liveTimer = setTimeout(() => {
+      this.liveTimer = null;
+      this.liveAt = Date.now();
+      this.emit('train', this.live());
+    }, Math.max(0, 500 - (Date.now() - this.liveAt)));
+  }
+  /** everything in flight (train/live.ts TrainLive) */
+  live(): TrainLive {
+    const s = this.st;
+    const hours = s.totals.wallSeconds / 3600 + (this.active ? (Date.now() - this.startedAt) / 3.6e6 : 0);
+    const queued: Partial<Record<JobKind, number>> = {};
+    for (const k of this.queued.values()) queued[k] = (queued[k] ?? 0) + 1;
+    const E = this.examLive;
+    let exam: TrainLive['exam'] = null;
+    if (E) {
+      const d = E.diffs.filter((x) => Number.isFinite(x));
+      exam = { id: E.id, done: E.done, total: E.total, mean: d.length ? d.reduce((a, b) => a + b, 0) / d.length : null, ...sprtEvidence(d, s.config.sprt) };
+    }
+    return {
+      name: s.name,
+      profile: s.config.profile,
+      running: this.active,
+      time: Date.now(),
+      workers: s.config.workers,
+      cpu: this.active ? this.busy : 0,
+      jobs: [...this.jobs.values()].sort((a, b) => a.since - b.since),
+      queued,
+      base: this.baseLive ? { ...this.baseLive } : null,
+      exam,
+      searchExam: this.searchLive ? { ...this.searchLive } : null,
+      learning: this.learning,
+      lessons: { have: Math.max(0, s.totals.labels - s.labelsAtLearn), need: s.config.learnEvery, perHour: hours > 0.01 ? s.totals.labels / hours : null },
+      matchesPerHour: hours > 0.01 ? s.totals.matches / hours : null,
+      champion: s.champion.id,
+      next: s.nextId,
+      stream: this.stream ? { id: this.stream.id, label: this.stream.label } : null,
+    };
   }
 
   // ─────────────────────────────── control ───────────────────────────────
@@ -382,9 +528,23 @@ export class Continuous extends EventEmitter {
     this.actorsInFlight = 0;
     this.learning = false;
     this.evaluating = null;
+    this.clearLive();
     this.save();
     this.say(`training ${why}`);
     this.emit('state');
+  }
+  /** nothing in flight any more (paused, or a fresh pool after a fault) */
+  private clearLive(): void {
+    this.queued.clear();
+    this.jobs.clear();
+    this.baseLive = null;
+    this.examLive = null;
+    this.searchLive = null;
+    this.streaming = false;
+    if (this.stream) this.endStream(this.stream.id, null, null);
+    if (this.liveTimer) clearTimeout(this.liveTimer);
+    this.liveTimer = null;
+    this.emit('train', this.live());
   }
   /** the studio is closing (a signal, a reboot): keep `running` so it carries on next time */
   close(): void {
@@ -413,7 +573,16 @@ export class Continuous extends EventEmitter {
     const champ = s.champion;
     this.searchExamRunning = true;
     this.say(`thinking-ahead exam: champion #${champ.id} with search on ${idx.length} solo exam matches`);
-    Promise.all(idx.map((i) => this.run<EpisodeResult>(this.job(this.examArgs(champ.genome, list[i], { search2: s.config.search, keepSearched: true, routes: false, audit: false })), PRI.learner)))
+    const SL = (this.searchLive = { champion: champ.id, done: 0, total: idx.length });
+    Promise.all(
+      idx.map((i, k) =>
+        this.run<EpisodeResult>(this.job(this.examArgs(champ.genome, list[i], { search2: s.config.search, keepSearched: true, routes: false, audit: false, progress: true })), PRI.learner, { kind: 'search-exam', label: `Thinking-ahead exam of champion #${champ.id} · match ${k + 1} of ${idx.length} · alone` }).then((r) => {
+          SL.done++;
+          this.changed();
+          return r;
+        }),
+      ),
+    )
       .then((res) => {
         if (pool !== this.pool || champ !== this.st.champion) return;
         // its searched decisions are lessons too (whole matches, every job start)
@@ -432,7 +601,11 @@ export class Continuous extends EventEmitter {
         this.save();
       })
       .catch((e) => pool === this.pool && this.fault(e))
-      .finally(() => (this.searchExamRunning = false));
+      .finally(() => {
+        this.searchExamRunning = false;
+        if (this.searchLive === SL) this.searchLive = null;
+        this.changed();
+      });
   }
   /** a worker lost: a fresh pool, and on; five in a row is a bug, not bad luck — stop and say so */
   private fault(e: unknown): void {
@@ -450,6 +623,7 @@ export class Continuous extends EventEmitter {
     this.actorsInFlight = 0;
     this.learning = false;
     this.evaluating = null;
+    this.clearLive();
     setTimeout(() => void this.begin(), 3000);
   }
 
@@ -472,7 +646,7 @@ export class Continuous extends EventEmitter {
       // a DRILL: a mistake's moment, replayed exactly, handed over to the champion, thought through
       const drill = n % DRILL_EVERY === DRILL_EVERY - 1 ? this.store.pickState('drill:') : null;
       const args: EpisodeArgs = drill
-        ? { ...(drill.args as EpisodeArgs), forces: drill.forces, handover: { tick: drill.tick, genome }, search2: c.search, keepSearched: true, searchWindow: [drill.tick, drill.tick + c.window] }
+        ? { ...(drill.args as EpisodeArgs), forces: drill.forces, handover: { tick: drill.tick, genome }, search2: c.search, keepSearched: true, searchWindow: [drill.tick, drill.tick + c.window], progress: true }
         : // copies of our robot on red carry the champion too: self-play
           this.args(genome, seed, partner, {
             search2: c.search,
@@ -482,8 +656,13 @@ export class Continuous extends EventEmitter {
             // a second REAL-v1 is our robot too: the champion's network, thinking ahead with us
             ...(partner === 'real' ? { partner: { kind: 'real' as const, genome }, searchPartner: true } : {}),
             ...(opponents !== 'none' ? { opponents, opponentGenome: genome } : {}),
+            progress: true,
           });
-      this.run<EpisodeResult>(this.job(args), PRI.actor)
+      const dArgs = args as EpisodeArgs & { partner?: { kind: string }; opponents?: string };
+      const label = drill
+        ? `Drill · a ${drill.tag.replace('drill:', '').replace('-', ' ')} from an exam match, 3 s before it · ${vs(dArgs.partner?.kind ?? 'none', dArgs.opponents ?? 'none')}`
+        : `Match ${(n + 1).toLocaleString('en-US')} · ${vs(partner, opponents)}${play.id !== PLAYS[0].id ? ` · play: ${play.label}` : ''}`;
+      this.run<EpisodeResult>(this.job(args), PRI.actor, { kind: drill ? 'drill' : 'actor', label })
         .then((r) => {
           if (pool !== this.pool) return;
           const id = drill
@@ -537,7 +716,7 @@ export class Continuous extends EventEmitter {
     const args: LearnArgs = { store: join(this.dir, 'store.db'), start: L.genome, lrs: [L.lr / 2, L.lr, L.lr * 2], epochs: c.epochs, window: c.learnWindow, seed: seedOf(this.st.name, 'learn', L.runs), maxSeconds: 900 };
     this.st.labelsAtLearn = this.st.totals.labels;
     this.say(`learning from the newest ${Math.min(c.learnWindow, this.st.totals.labels)} decisions`);
-    this.run<LearnResult>({ module: '../train/entlearn.ts', fn: 'learnJob', args }, PRI.learner)
+    this.run<LearnResult>({ module: '../train/entlearn.ts', fn: 'learnJob', args }, PRI.learner, { kind: 'learner', label: `Learning candidate #${this.st.nextId} from the newest ${Math.min(c.learnWindow, this.st.totals.labels).toLocaleString('en-US')} decisions` })
       .then((r) => {
         if (pool !== this.pool) return;
         L.genome = r.genome;
@@ -566,7 +745,22 @@ export class Continuous extends EventEmitter {
     const list = examList(this.st.config);
     this.say(`exam: the no-learning robot on ${list.length} matches (every partner kind)`);
     const pool = this.pool!;
-    const res = await Promise.all(list.map((e) => this.run<EpisodeResult>(this.job(this.examArgs(null, e)), PRI.exam)));
+    const BL = (this.baseLive = { done: 0, total: list.length });
+    this.changed();
+    let res: EpisodeResult[];
+    try {
+      res = await Promise.all(
+        list.map((e, k) =>
+          this.run<EpisodeResult>(this.job(this.examArgs(null, e, { progress: true })), PRI.exam, { kind: 'base-exam', label: `Exam of the no-learning robot · match ${k + 1} of ${list.length} · ${vs(e.partner, e.opponents)}` }).then((r) => {
+            BL.done++;
+            this.changed();
+            return r;
+          }),
+        ),
+      );
+    } finally {
+      if (this.baseLive === BL) this.baseLive = null;
+    }
     if (pool !== this.pool) return;
     this.st.base = res.map((r) => r.reward);
     this.st.totals.examMatches += res.length;
@@ -591,11 +785,21 @@ export class Continuous extends EventEmitter {
     const got: number[] = [];
     const played: EpisodeResult[] = [];
     this.evaluating = { id: cand.id, done: 0, total: list.length };
+    const EL = (this.examLive = { id: cand.id, done: 0, total: list.length, diffs: new Array<number>(list.length).fill(NaN) });
+    this.changed();
+    // one exam match: paired with the champion's own on the same seed (the live evidence as they come in)
+    const play = (e: ExamEntry, k: number): Promise<EpisodeResult> =>
+      this.run<EpisodeResult>(this.job(this.examArgs(cand.genome, e, { progress: true })), PRI.exam, { kind: 'exam', label: `Exam of candidate #${cand.id} · match ${k + 1} of ${list.length} · ${vs(e.partner, e.opponents)}` }).then((r) => {
+        EL.done++;
+        EL.diffs[k] = r.reward - champ.exam[k];
+        this.changed();
+        return r;
+      });
     let verdict: 'H1' | 'H0' | null = null;
     try {
       for (let i = 0; i < list.length && verdict === null; i += c.sprt.chunk) {
         const part = list.slice(i, i + c.sprt.chunk);
-        const res = await Promise.all(part.map((e) => this.run<EpisodeResult>(this.job(this.examArgs(cand.genome, e)), PRI.exam)));
+        const res = await Promise.all(part.map((e, j) => play(e, i + j)));
         if (pool !== this.pool) return;
         got.push(...res.map((r) => r.reward));
         played.push(...res);
@@ -612,7 +816,8 @@ export class Continuous extends EventEmitter {
       if (promote && got.length < list.length) {
         // a champion's exam is always the whole list (the next candidate is paired with all of it)
         const rest = list.slice(got.length);
-        const res = await Promise.all(rest.map((e) => this.run<EpisodeResult>(this.job(this.examArgs(cand.genome, e)), PRI.exam)));
+        const from = got.length;
+        const res = await Promise.all(rest.map((e, j) => play(e, from + j)));
         if (pool !== this.pool) return;
         got.push(...res.map((r) => r.reward));
         played.push(...res);
@@ -636,6 +841,8 @@ export class Continuous extends EventEmitter {
     } catch (e) {
       this.fault(e);
     } finally {
+      if (this.examLive === EL) this.examLive = null;
+      this.changed();
       if (pool === this.pool) {
         this.evaluating = null;
         this.pending = null;

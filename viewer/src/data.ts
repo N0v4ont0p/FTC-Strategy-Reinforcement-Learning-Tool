@@ -2,7 +2,10 @@
 import type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo } from '../../train/engine';
 import type { Death, Frames, Inspected, Mistakes, Parts } from '../../train/episode';
 import type { GapRow } from '../../train/gap';
-export type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo, Death, Frames, Inspected, Mistakes, Parts, GapRow };
+import type { Frame } from '../../train/episode';
+import type { JobKind, LearnProgress, LiveHead, LiveJob, LiveMsg, MatchProgress, StreamSnap, ThinkProgress, TrainLive } from '../../train/live';
+export type { ArenaEntry, CheckpointMeta, EvalResult, ExamResult, GenSummary, Lineage, MeanCi, Preset, RunConfig, RunInfo, Death, Frame, Frames, Inspected, Mistakes, Parts, GapRow };
+export type { JobKind, LearnProgress, LiveHead, LiveJob, LiveMsg, MatchProgress, StreamSnap, ThinkProgress, TrainLive };
 
 export type RunSummary = RunInfo;
 export interface RunData {
@@ -130,6 +133,7 @@ export const bytes = (n: number): string => (n < 1e6 ? `${Math.max(1, Math.round
 export const TRACK_STRIDE = 3; // ticks between swarm samples (train/episode.ts)
 export const TRACK_FIELDS = 7; // x, y, heading, turret, turret2, hopper, option kind
 export const AUTO_START = 240; // DSIM's 4 s pre-match countdown, in ticks
+export const PLAY_TICKS = (30 + 8 + 120) * 60; // AUTO, the transition and TELEOP, in ticks
 
 /** what the robot chose to do — the six options (train/skills.ts OPTION_KINDS order), each with a
  * colour from the validated dark categorical palette (dataviz check: all pass on #1d1813) */

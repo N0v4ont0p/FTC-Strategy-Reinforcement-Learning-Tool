@@ -22,16 +22,23 @@ interface Slot {
   /** exited or failed to start: never handed another job */
   dead: boolean;
 }
+/** what the submitter hears while its job runs: when a worker takes it, and what it reports on
+ * its way (harness/progress.ts) */
+export interface JobHooks {
+  onStart?: () => void;
+  onProgress?: (p: unknown) => void;
+}
 interface Queued {
   job: Job;
   pri: number;
+  hooks?: JobHooks;
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
 }
 
 export class WorkerPool {
   private slots: Slot[] = [];
-  private waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; onProgress?: (p: unknown) => void }>();
   /** jobs waiting for a free worker: highest priority first, then first come */
   private queue: Queued[] = [];
   private nextId = 0;
@@ -58,7 +65,7 @@ export class WorkerPool {
     p.on('error', (e) => fail(`worker could not run: ${e.message}`));
     p.stdin!.on('error', (e) => fail(`worker stopped taking jobs: ${e.message}`)); // EPIPE: it died
     createInterface({ input: p.stdout! }).on('line', (line) => {
-      let msg: { ready?: boolean; id: number; ok: boolean; result?: unknown; error?: string };
+      let msg: { ready?: boolean; id: number; ok: boolean; result?: unknown; error?: string; progress?: unknown };
       try {
         msg = JSON.parse(line);
       } catch {
@@ -71,6 +78,15 @@ export class WorkerPool {
         return this.pump();
       }
       const w = this.waiting.get(msg.id);
+      if ('progress' in msg) {
+        // a report on the way, not the result: the job goes on
+        try {
+          w?.onProgress?.(msg.progress);
+        } catch (e) {
+          process.stderr.write(`[pool] progress hook: ${(e as Error).message}\n`);
+        }
+        return;
+      }
       this.waiting.delete(msg.id);
       slot.busy = false;
       if (!w) return;
@@ -82,24 +98,29 @@ export class WorkerPool {
     return slot;
   }
 
-  private run<T>(slot: Slot, job: Job): Promise<T> {
+  private run<T>(slot: Slot, job: Job, hooks?: JobHooks): Promise<T> {
     const id = this.nextId++;
     slot.busy = true;
     return new Promise<T>((resolve, reject) => {
       if (slot.dead) return reject(new Error('worker exited'));
-      this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject, onProgress: hooks?.onProgress });
+      try {
+        hooks?.onStart?.();
+      } catch (e) {
+        process.stderr.write(`[pool] start hook: ${(e as Error).message}\n`);
+      }
       slot.p.stdin!.write(JSON.stringify({ id, ...job }) + '\n');
     });
   }
 
   /** one job, run by the next free worker; higher `priority` jumps the queue (the continuous engine's
    * evaluator and learner ahead of its actors). Several callers can share the pool at once */
-  submit<T>(job: Job, priority = 0): Promise<T> {
+  submit<T>(job: Job, priority = 0, hooks?: JobHooks): Promise<T> {
     if (this.closed) return Promise.reject(new Error('aborted'));
     return new Promise<T>((resolve, reject) => {
       let i = this.queue.length;
       while (i > 0 && this.queue[i - 1].pri < priority) i--;
-      this.queue.splice(i, 0, { job, pri: priority, resolve: resolve as (v: unknown) => void, reject });
+      this.queue.splice(i, 0, { job, pri: priority, hooks, resolve: resolve as (v: unknown) => void, reject });
       this.pump();
     });
   }
@@ -108,7 +129,7 @@ export class WorkerPool {
       if (!this.queue.length || this.closed) return;
       if (slot.busy || slot.dead || !slot.up) continue;
       const q = this.queue.shift()!;
-      this.run(slot, q.job).then(q.resolve, q.reject).finally(() => this.pump());
+      this.run(slot, q.job, q.hooks).then(q.resolve, q.reject).finally(() => this.pump());
     }
   }
   /** jobs running and waiting (the continuous engine's CPU gauge) */

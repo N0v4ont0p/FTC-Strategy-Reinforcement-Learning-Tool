@@ -154,7 +154,9 @@ export class Playbook extends EventEmitter {
     const pool = new WorkerPool(o.workers ?? 12);
     try {
       // every build the partners bring needs its shooting envelope first
-      await ensureEnvelopes([resolve(loadProfile(join(ROOT, this.profile))).spec, ...PLAYBOOK_PARTNERS.map((k) => partnerProfile(k, join(ROOT, this.profile), 1, false).spec)], (s) => this.say(s));
+      await ensureEnvelopes([resolve(loadProfile(join(ROOT, this.profile))).spec, ...PLAYBOOK_PARTNERS.map((k) => partnerProfile(k, join(ROOT, this.profile), 1, false).spec)], (s) => this.say(s), 12, (e) =>
+        onProgress({ stage: `measuring the shooting envelope of ${e.build} (${Math.round((100 * e.done) / Math.max(1, e.total))} % of the builds to measure)`, frac: 0, sims: 0 }),
+      );
       for (const P of todo) {
         if (this.stopFlag) break;
         const key = keyOf(P);

@@ -3,7 +3,8 @@
 // the candidates, the log and the notifications.
 import { LineChart } from '../charts';
 import { fmt, getJSON, post, type Frames, type HomeStatusV, type HomeV } from '../data';
-import { watch } from '../stage';
+import { simulate, watch } from '../stage';
+import { trainStage } from '../live';
 import { $, OPP_LABEL, PARTNER_LABEL, act, ago, esc, on, pct, profileName, setHTML, setText, sgn, toast } from '../ui';
 import { S, bus, profileQuery } from '../state';
 
@@ -41,7 +42,8 @@ export function renderHome(): void {
   setText($('homeState'), !s ? 'Idle' : s.running ? (s.improving === 'flat' ? 'Flat' : 'Training') : 'Paused');
   $('homeState').className = `v${s?.running ? ' on' : ''}`;
   const a = s?.activity;
-  setText($('homeDoing'), !s?.running ? (s ? 'press Train to carry on' : ' ') : a?.evaluating ? `exam of candidate #${a.evaluating.id}: ${a.evaluating.done}/${a.evaluating.total}` : a?.learning ? 'learning a new candidate' : `playing · next lesson in ${fmt(s.nextLearnIn)}`);
+  // (while it trains, the live picture says exactly what it is doing: live.ts keeps this current)
+  setText($('homeDoing'), !s?.running ? (s ? 'press Train to carry on' : ' ') : S.live?.running ? trainStage(S.live).short : a?.evaluating ? `exam of #${a.evaluating.id} ${a.evaluating.done}/${a.evaluating.total}` : a?.learning ? 'learning a new candidate' : `playing · ${fmt(s.nextLearnIn)} lessons to the next candidate`);
   setText($('homeCpu'), s?.running ? pct(s.cpu) : '—');
   setText($('homeHours'), s ? `${s.totals.hours.toFixed(1)} h · ${fmt(s.totals.matches)} matches` : ' ');
   setText($('homeLabels'), s ? fmt(s.totals.labels) : '0');
@@ -214,8 +216,8 @@ export async function loadExamSheet(): Promise<void> {
 }
 async function watchExam(match: number): Promise<void> {
   try {
-    toast('Playing that exam match in DSIM…');
-    const f = await post<{ frames: Frames; events: [number, string][]; reward: number }>('/api/home/watch', { profile: S.home?.profile, match });
+    const f = await simulate<{ frames: Frames; events: [number, string][]; reward: number }>('/api/home/watch', { profile: S.home?.profile, match }, `exam match ${match + 1}`);
+    if (!f) return; // (a newer Watch replaced it)
     const c = S.home?.status?.champion;
     watch(f, `${c?.learned ? `Champion #${c.id}` : 'The no-learning robot'} · exam match ${match + 1} · ${f.reward} points`);
   } catch (e) {

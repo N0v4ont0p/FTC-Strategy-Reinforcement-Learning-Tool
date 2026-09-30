@@ -18,6 +18,15 @@
         "cd \"/Users/georgehu/Downloads/FTC/FTC Sim autonomous\" && exec \"/Users/georgehu/Downloads/FTC/FTC Sim autonomous/dsim-main/node_modules/.bin/tsx\" train/studio.ts --no-open --no-dsim --port 4747"
       ],
       "port": 4747
+    },
+    {
+      "name": "mock-live",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd \"/Users/georgehu/Downloads/FTC/FTC Sim autonomous\" && CAP=\"/private/tmp/claude-501/-Users-georgehu-Downloads-FTC-FTC-Sim-autonomous/745bb334-7964-4296-86ab-480e36f22c29/scratchpad/livecap.json\" SPEED=${SPEED:-1} exec \"/Users/georgehu/Downloads/FTC/FTC Sim autonomous/dsim-main/node_modules/.bin/tsx\" scratch-tmp/_mock.ts"
+      ],
+      "port": 4848
     }
   ]
 }

@@ -3,18 +3,26 @@
 // the HIVE's tips as honeycomb cells, the hopper, the job the robot is on).
 //
 // Every page that shows a match on the field goes through `watch` (a champion's exam match, a
-// playbook plan, a route, a mistake, a team play). The older generational trainer adds its own modes
-// (legacy.ts) through `setMode` and the frame hook.
+// playbook plan, a route, a mistake, a team play), and `simulate` plays it in DSIM first with its
+// progress over the field. Training's live match comes in through stream.ts (mode 'stream'); the
+// older generational trainer adds its own modes (legacy.ts) through `setMode` and the frame hook.
 import type { World } from '../../dsim-main/src/types';
-import { AUTO_START, OPTIONS, type FocusFile, type Frames } from './data';
+import { AUTO_START, OPTIONS, PLAY_TICKS, post, type FocusFile, type Frames } from './data';
 import { FieldView, type FrameInfo } from './fieldview';
 import { $, esc, setHTML, setText } from './ui';
+import { S, bus, type SimV } from './state';
 
-export type StageMode = 'idle' | 'replay' | 'live' | 'best' | 'champion';
+export type StageMode = 'idle' | 'replay' | 'live' | 'best' | 'champion' | 'stream';
 export const view = new FieldView($<HTMLCanvasElement>('field'));
 let mode: StageMode = 'idle';
-/** set by legacy.ts: its own frame work (the LIVE bar, the decision inspector) */
-export const hooks: { frame: (f: FrameInfo) => void; loop: () => void; v1Empty: () => boolean } = { frame: () => {}, loop: () => {}, v1Empty: () => false };
+/** set by legacy.ts (its LIVE bar, the decision inspector) and stream.ts (training's live match) */
+export const hooks: { frame: (f: FrameInfo) => void; stream: (f: FrameInfo) => void; loop: () => void; v1Empty: () => boolean; modeChanged: (m: StageMode) => void } = {
+  frame: () => {},
+  stream: () => {},
+  loop: () => {},
+  v1Empty: () => false,
+  modeChanged: () => {},
+};
 
 let speed = 1;
 try {
@@ -32,11 +40,13 @@ export function setMode(m: StageMode): void {
   const replaying = m === 'replay' || m === 'best' || m === 'champion';
   $('transport').hidden = !replaying;
   $('transportLive').hidden = m !== 'live';
+  $('transportStream').hidden = m !== 'stream';
   $('inspector').hidden = m !== 'champion';
   view.loop = m === 'live';
-  if (m !== 'live') view.speed = speed;
+  if (m !== 'live' && m !== 'stream') view.speed = speed; // (both pace themselves)
   syncEmpty();
   syncPlay();
+  hooks.modeChanged(m);
 }
 export function syncEmpty(): void {
   const v1 = hooks.v1Empty();
@@ -74,7 +84,7 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('#transport [data-s
       /* not remembered */
     }
     for (const o of document.querySelectorAll<HTMLButtonElement>('#transport [data-speed]')) o.setAttribute('aria-checked', String(o === b));
-    if (mode !== 'live') view.speed = speed;
+    if (mode !== 'live' && mode !== 'stream') view.speed = speed;
   };
 }
 $('play').onclick = () => {
@@ -103,7 +113,7 @@ export const clock = (t: number): string => {
 // keyboard: space plays/pauses, ← → step 5 s (not while typing)
 document.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement;
-  if (e.metaKey || e.ctrlKey || e.altKey || view.empty || mode === 'idle' || mode === 'live') return;
+  if (e.metaKey || e.ctrlKey || e.altKey || view.empty || mode === 'idle' || mode === 'live' || mode === 'stream') return;
   if (t.closest('textarea, select, [contenteditable], dialog') || (t.closest('input') && !t.matches('input[type=range]'))) return;
   // a button or the scrubber focused from the KEYBOARD keeps its keys (Space presses it); one the
   // mouse left focused does not — Space after "Watch it" pauses instead of starting it again
@@ -157,9 +167,10 @@ function renderBoard(f: FrameInfo): void {
 view.onFrame = (f: FrameInfo) => {
   const lo = view.startTick;
   const frac = (f.tick - lo) / Math.max(1, f.end - lo);
-  if (mode !== 'live' && document.activeElement !== scrub) scrub.value = String(Math.round(1000 * frac));
+  if (mode !== 'live' && mode !== 'stream' && document.activeElement !== scrub) scrub.value = String(Math.round(1000 * frac));
   setText($('clock'), clock(f.tick));
   hooks.frame(f);
+  if (mode === 'stream') hooks.stream(f);
   // the rail at ~12 Hz and only what changed (the canvas runs at 60)
   const now = performance.now();
   if (now - boardAt < 80 && view.playing) return;
@@ -167,6 +178,44 @@ view.onFrame = (f: FrameInfo) => {
   renderBoard(f);
 };
 view.onLoop = () => hooks.loop();
+
+// ─────────────────────────────── playing a match in DSIM to watch it ───────────────────────────────
+/** a match played again in DSIM (Watch on any page: an exam match, a route, a mistake, a team play):
+ * the server reports its clock on the way (SSE `sim`, by request id) and the field shows how far it
+ * is. The newest request wins: an older one that finishes later is not shown over it. */
+let simRid = '';
+export async function simulate<T>(url: string, body: Record<string, unknown>, label: string): Promise<T | null> {
+  const rid = Math.random().toString(36).slice(2, 10);
+  simRid = rid;
+  S.sim = { rid, label, frac: 0 };
+  renderSim();
+  try {
+    const r = await post<T>(url, { ...body, rid });
+    return rid === simRid ? r : null;
+  } finally {
+    if (rid === simRid) {
+      S.sim = null;
+      renderSim();
+    }
+  }
+}
+/** the server's report on a match it is playing (SSE `sim`) */
+export function simProgress(d: SimV): void {
+  if (d.rid !== simRid || !S.sim) return;
+  if (d.done) return; // (the request itself ends it)
+  S.sim = { ...S.sim, frac: d.frac, t: d.t };
+  renderSim();
+}
+function renderSim(): void {
+  const s = S.sim;
+  $('simProg').hidden = !s;
+  bus.emit('activity');
+  if (!s) return;
+  setText($('simLabel'), `Playing ${s.label} in DSIM`);
+  $('simFill').style.transform = `scaleX(${Math.max(0.02, Math.min(1, s.frac)).toFixed(3)})`;
+  $('simProg').querySelector('.jpbar')!.setAttribute('aria-valuenow', String(Math.round(100 * s.frac)));
+  setText($('simSub'), s.t === undefined ? 'starting DSIM…' : `${Math.round(100 * s.frac)} % · ${clock(Math.min(s.t, AUTO_START + PLAY_TICKS))} of ${clock(AUTO_START + PLAY_TICKS)} · every tick in the 3D solve`);
+}
 
 /** the legend: what each job colour means */
 export function renderLegend(): void {

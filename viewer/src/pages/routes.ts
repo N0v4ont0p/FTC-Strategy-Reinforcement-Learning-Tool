@@ -1,6 +1,6 @@
 // ROUTES — how the champion scores, cycle by cycle (train/routes.ts), and the openings of TELEOP.
-import { AUTO_START, getJSON, post, type Frames, type RouteLibraryV } from '../data';
-import { watch } from '../stage';
+import { AUTO_START, getJSON, type Frames, type RouteLibraryV } from '../data';
+import { simulate, watch } from '../stage';
 import { $, OPP_LABEL, PARTNER_LABEL, esc, on, pct, setHTML, setText, toast } from '../ui';
 import { profileQuery } from '../state';
 
@@ -69,8 +69,8 @@ $('rtWatch').onclick = async () => {
   const r = RT?.library?.routes.filter((q) => q.n >= 3)[sel];
   if (!r || !RT) return;
   try {
-    toast('Playing that exam match in DSIM…');
-    const f = await post<{ frames: Frames; events: [number, string][] }>('/api/routes/watch', { profile: RT.profile, match: r.example.match });
+    const f = await simulate<{ frames: Frames; events: [number, string][] }>('/api/routes/watch', { profile: RT.profile, match: r.example.match }, `exam match ${r.example.match + 1}`);
+    if (!f) return;
     watch(f, `Route · ${r.sig} · the champion’s exam match ${r.example.match + 1}`, { seek: r.example.t0 });
   } catch (e) {
     toast((e as Error).message, true);

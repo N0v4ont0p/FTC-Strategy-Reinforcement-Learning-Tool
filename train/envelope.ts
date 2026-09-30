@@ -110,7 +110,7 @@ const HEADINGS = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
 export const column = (a: { spec: RobotSpec; side: Side; x: number; heading: number }): ShotCell[] => shootingColumn({ spec: a.spec, side: a.side, x: a.x, ys: GRID, heading: a.heading });
 
 /** measure every build not measured yet (the pool, ~1 min a build on 12 cores) */
-export async function ensureEnvelopes(specs: RobotSpec[], log: (s: string) => void = () => {}, workers = 12): Promise<void> {
+export async function ensureEnvelopes(specs: RobotSpec[], log: (s: string) => void = () => {}, workers = 12, onProgress?: (p: { build: string; done: number; total: number }) => void): Promise<void> {
   mkdirSync(ENV_DIR, { recursive: true });
   const idxF = join(ENV_DIR, 'index.json');
   const idx = existsSync(idxF) ? (JSON.parse(readFileSync(idxF, 'utf8')) as { key: string; family: string; L: number; W: number }[]) : [];
@@ -119,12 +119,18 @@ export async function ensureEnvelopes(specs: RobotSpec[], log: (s: string) => vo
     const k = familyKey(s);
     if (!existsSync(join(ENV_DIR, `${k}.json`))) todo.set(k, s);
   }
+  // progress: columns measured, over every build still to measure
+  const perBuild = 2 * HEADINGS.length * GRID.length;
+  const total = todo.size * perBuild;
+  let done = 0;
   for (const [key, spec] of todo) {
     const t = performance.now();
     const spots: Record<Side, Spot[]> = { north: [], south: [] };
+    const build = spec.name ?? key;
+    onProgress?.({ build, done, total });
     for (const side of ['north', 'south'] as const) {
       const jobs = HEADINGS.flatMap((heading) => GRID.map((x) => ({ module: '../train/envelope.ts', fn: 'column', args: { spec, side, x, heading } })));
-      const cols = await runPool<ShotCell[]>(jobs, workers);
+      const cols = await runPool<ShotCell[]>(jobs, workers, () => onProgress?.({ build, done: ++done, total }));
       const hits = new Map<string, number>();
       for (const c of cols.flat()) if (c.entered) hits.set(`${c.x},${c.y}`, (hits.get(`${c.x},${c.y}`) ?? 0) + 1);
       spots[side] = [...hits].filter(([, n]) => n === HEADINGS.length).map(([k]) => {

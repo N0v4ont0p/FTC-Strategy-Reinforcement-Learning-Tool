@@ -10,6 +10,8 @@
 // choice is the search's, and the points its choice gives away on the search's first round.
 // Plain CPU, one worker, deterministic for a seed.
 import { mulberry32, seedOf } from '../harness/rng';
+import { progress } from '../harness/progress';
+import type { LearnProgress } from './live';
 import { EntAdam, EntNet, entInit, type EntInput } from './entnet';
 import { ENT_PREFIX, ENT_SHAPE, STYLE_DEFAULT_GENES, decodeGenome } from './policy';
 import { toB64 } from './net';
@@ -163,6 +165,8 @@ export interface FitOpts {
   batch: number;
   seed: number;
   maxSeconds?: number;
+  /** how far it is (epoch, share of the fit 0–1, the last epoch's training loss), a few times a second */
+  onProgress?: (epoch: number, frac: number, loss: number | null) => void;
 }
 /** Adam over the training labels from `start` */
 export function entFit(start: Float32Array, train: EntLabel[], test: EntLabel[], o: FitOpts): { p: Float32Array; report: EntFitReport } {
@@ -175,6 +179,8 @@ export function entFit(start: Float32Array, train: EntLabel[], test: EntLabel[],
   const rnd = mulberry32(seedOf(o.seed, 'entfit'));
   const idx = train.map((_, i) => i);
   let lossTrain = 0;
+  let beat = 0;
+  let lastLoss: number | null = null;
   for (let ep = 0; ep < o.epochs; ep++) {
     for (let i = idx.length - 1; i > 0; i--) {
       const j = Math.floor(rnd() * (i + 1));
@@ -186,8 +192,13 @@ export function entFit(start: Float32Array, train: EntLabel[], test: EntLabel[],
       const end = Math.min(idx.length, b + o.batch);
       for (let i = b; i < end; i++) sum += lossOf(net, train[idx[i]], g).q;
       opt.step(p, g, 1 / (end - b), style);
+      if (o.onProgress && performance.now() - beat > 400) {
+        beat = performance.now();
+        o.onProgress(ep, (ep + end / Math.max(1, idx.length)) / o.epochs, lastLoss);
+      }
     }
     lossTrain = sum / Math.max(1, idx.length);
+    lastLoss = lossTrain;
     if (o.maxSeconds && (performance.now() - t0) / 1000 > o.maxSeconds) break;
   }
   const ev = entEval(p, test);
@@ -234,8 +245,12 @@ export function learnJob(a: LearnArgs): LearnResult {
   const before = entEval(start.ent, test);
   let best: { p: Float32Array; lr: number; report: EntFitReport } | null = null;
   const tried: LearnResult['tried'] = [];
-  for (const lr of a.lrs) {
-    const r = entFit(start.ent, train, test, { epochs: a.epochs, lr, batch: 32, seed: a.seed, maxSeconds: a.maxSeconds ? a.maxSeconds / a.lrs.length : undefined });
+  for (const [li, lr] of a.lrs.entries()) {
+    // (the studio shows the learner's progress: which learning rate, which epoch)
+    const onProgress = (epoch: number, frac: number, loss: number | null): void =>
+      progress({ k: 'learn', lr: li, lrs: a.lrs.length, epoch, epochs: a.epochs, frac: (li + frac) / a.lrs.length, loss } satisfies LearnProgress);
+    onProgress(0, 0, null);
+    const r = entFit(start.ent, train, test, { epochs: a.epochs, lr, batch: 32, seed: a.seed, maxSeconds: a.maxSeconds ? a.maxSeconds / a.lrs.length : undefined, onProgress });
     tried.push({ lr, lossTest: r.report.lossTest, agree: r.report.agree, regret: r.report.regret });
     if (!best || r.report.regret < best.report.regret - 1e-9 || (Math.abs(r.report.regret - best.report.regret) <= 1e-9 && r.report.lossTest < best.report.lossTest)) best = { ...r, lr };
   }

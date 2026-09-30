@@ -58,7 +58,6 @@ export function setV1(on2: boolean): void {
   } catch {
     /* private window */
   }
-  document.documentElement.style.setProperty('--v1h', on2 ? `${$('v1bar').offsetHeight + ($('v1prog').offsetHeight || 0)}px` : '0px');
   if (!on2 && ['overview', 'race', 'report', 'runs', 'checkpoints', 'settings', 'data', 'evaluate'].includes(document.querySelector<HTMLElement>('.page:not([hidden])')?.dataset.page ?? '')) bus.emit('go', 'home');
   // hidden, its own field views go with it (LIVE, a generation's best, its champion)
   const m = stageMode();

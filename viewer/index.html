@@ -32,6 +32,14 @@
       </div>
     </header>
 
+    <!-- what is running now, on every page (live.ts): training's stage, the long searches, a match
+         being played in DSIM; the line along its foot is the first one's progress -->
+    <div id="activity" class="activity" hidden>
+      <div class="acts" id="acts" role="status" aria-live="off" aria-label="Running now"></div>
+      <button id="actWatch" type="button" class="small" hidden><i class="rec" aria-hidden="true"></i>Watch live</button>
+      <div class="actline" aria-hidden="true"><div id="actFill"></div></div>
+    </div>
+
     <!-- the older generational trainer (shown on demand, or while one of its runs trains) -->
     <div id="v1bar" class="v1bar" hidden>
       <span class="tag">GENERATIONAL</span>
@@ -83,7 +91,17 @@
             <div>
               <p class="t">THE FIELD</p>
               <p id="stageEmptyText">Watch the champion play an exam match, a playbook plan, a route or a mistake, exactly as DSIM played it.</p>
-              <button id="btnWatchChamp" type="button">Watch the champion</button>
+              <div class="row center"><button id="btnWatchLive" type="button" hidden><i class="rec" aria-hidden="true"></i>Watch training live</button><button id="btnWatchChamp" type="button">Watch the champion</button></div>
+            </div>
+          </div>
+          <!-- training thinking ahead at a decision of the match on the field (stream.ts) -->
+          <div class="think" id="think" hidden aria-live="polite"><div id="thinkBody"></div></div>
+          <!-- a match being played in DSIM to watch it (stage.ts simulate) -->
+          <div class="simprog" id="simProg" hidden>
+            <div>
+              <p class="t" id="simLabel">Playing in DSIM</p>
+              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="simLabel"><div id="simFill"></div></div>
+              <p class="sub" id="simSub"></p>
             </div>
           </div>
           <div class="stageempty" id="stageEmptyV1" hidden>
@@ -109,6 +127,14 @@
           <span class="liveb"><i aria-hidden="true"></i>LIVE</span>
           <div class="livebar" aria-hidden="true"><div id="liveFill"></div></div>
           <span id="clockLive" class="clock">0:00</span>
+        </div>
+        <!-- training's match, as it is played: the red part is where the field is, the lighter part how far DSIM has played -->
+        <div class="transport stream" id="transportStream" hidden>
+          <span class="liveb"><i aria-hidden="true"></i>LIVE</span>
+          <div class="streambar" aria-hidden="true"><div id="streamBuf"></div><div id="streamFill"></div></div>
+          <span id="streamClock" class="clock">0:00</span>
+          <span id="streamPace" class="pace">live</span>
+          <button id="streamLeave" type="button" class="quiet small" title="Stop following training on the field">Leave</button>
         </div>
         <div class="stagecap" id="stageCap"></div>
         <div class="inspector" id="inspector" hidden>
@@ -143,6 +169,13 @@
             </div>
           </div>
           <div class="notice bad" id="homeProblems" role="alert" hidden></div>
+          <!-- what training is doing this second (live.ts) -->
+          <div class="card rightnow" id="homeLive" hidden>
+            <div class="cardhead"><h2><i class="rec" aria-hidden="true"></i>Right now</h2><span class="sub" id="lvRates"></span></div>
+            <ol class="tracks" id="lvTracks"></ol>
+            <div class="tiles" id="lvTiles" aria-label="Every core and what it is playing"></div>
+            <p class="hint" id="lvQueue"></p>
+          </div>
           <div class="stats">
             <div class="stat"><div class="k">State</div><div class="v" id="homeState">idle</div><div class="s" id="homeDoing">&nbsp;</div></div>
             <div class="stat"><div class="k">Cores busy</div><div class="v" id="homeCpu">—</div><div class="s" id="homeHours">&nbsp;</div></div>
@@ -220,6 +253,11 @@
               <figure><canvas id="rbEnvelope"></canvas><figcaption id="rbEnvCap">where it scores from</figcaption></figure>
             </div>
             <div class="row"><span id="rbEnvQ" class="sub grow"></span><button id="rbMeasure" type="button" class="quiet small">Measure its envelope</button></div>
+            <div class="jobprog" id="rbMeasProg" hidden>
+              <div class="jphead"><b id="rbMeasNow"></b><span id="rbMeasEta"></span></div>
+              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="rbMeasNow" id="rbMeasBar"><div id="rbMeasFill"></div></div>
+              <p class="hint">Every spot of a grid, at both cells, from four headings: a spot counts only when the full load of 4 settles in the cell from all four. It uses every core.</p>
+            </div>
             <div id="rbProblems" class="notice bad problems"></div>
             <section class="zone" aria-labelledby="rbZoneH">
               <div class="cardhead"><h3 id="rbZoneH">Shooting zone</h3><span id="rbZoneSum" class="badge"></span></div>

@@ -5,6 +5,8 @@
 //   · focus: ONE life redrawn EXACTLY as it was trained — every element, the HIVE, the score —
 //     from frames recorded inside the training episode itself (so forced misses are shown as they
 //     happened; a DSIM replay can differ there)
+//   · a stream: the same, for a match training is playing now (frames arrive as it is played; the
+//     playback holds at the newest one, the live edge)
 import type { Artifact, RobotState, Vec2, World } from '../../dsim-main/src/types';
 import { drawBiobuzzField, drawHiveCanopy } from '../../dsim-main/src/games/biobuzz/drawField';
 import { drawBiobuzzRobot } from '../../dsim-main/src/games/biobuzz/drawRobot';
@@ -12,7 +14,7 @@ import { drawBiobuzzBalls } from '../../dsim-main/src/games/biobuzz/draw';
 import { viewAngleOf } from '../../dsim-main/src/sim/field';
 import { rot } from '../../dsim-main/src/math';
 import { BB_HALF_X } from '../../dsim-main/src/games/biobuzz/config';
-import { AUTO_START, OPTIONS, TRACK_FIELDS, TRACK_STRIDE, decodeTrack, type FocusFile, type Frames, type GenFile, type Individual } from './data';
+import { AUTO_START, OPTIONS, TRACK_FIELDS, TRACK_STRIDE, decodeTrack, type FocusFile, type Frame, type Frames, type GenFile, type Individual, type LiveHead } from './data';
 import { color as css } from './ui';
 
 const VIEW = viewAngleOf('blue');
@@ -79,7 +81,9 @@ export class FieldView {
   private fw: World | null = null;
   private fi = -1; // index of the last applied frame
   private fr: Frames | null = null;
-  private tipsAt: number[] = [];
+  /** a stream: frames still arriving; playback holds at the newest (atEdge) instead of ending */
+  live = false;
+  private atEdge = false;
   onFrame: (info: FrameInfo) => void = () => {};
   /** a replay reached its end and loops — the place to switch generations */
   onLoop: () => void = () => {};
@@ -112,7 +116,8 @@ export class FieldView {
       this.dirty = false;
       this.draw();
     }
-    if (this._playing) this.kick();
+    // (waiting at a stream's live edge: nothing moves until more frames arrive)
+    if (this._playing && !this.atEdge) this.kick();
     else this.last = 0;
   }
 
@@ -158,6 +163,7 @@ export class FieldView {
   loadGeneration(g: GenFile): void {
     this.gen = g;
     this.mode = 'swarm';
+    this.live = this.atEdge = false;
     const base = this.template!;
     this.ghosts = g.individuals.map((ind) => {
       const spec = { ...base.spec };
@@ -175,7 +181,7 @@ export class FieldView {
     this.focus = f;
     this.fr = f.frames;
     this.mode = 'focus';
-    this.tipsAt = f.events.filter((e) => e[1] === 'tip').map((e) => e[0]);
+    this.live = this.atEdge = false;
     this.resetFocus();
     this.tick = f.frames.f[0]?.t ?? 0;
     this.endTick = f.frames.f[f.frames.f.length - 1]?.t ?? 0;
@@ -251,6 +257,45 @@ export class FieldView {
     }
   }
 
+  // ─────────────────────────────── a match streamed from training ───────────────────────────────
+  /** start showing a streamed match: its builds, and its state now (`key`: a frame with every
+   * element's state); the frames played after it follow with pushFrames */
+  startStream(head: LiveHead, key: Frame | null): void {
+    this.fr = { stride: 2, spec: head.spec, spec2: head.spec2, oppSpecs: head.oppSpecs, alliance: head.alliance, meta: head.meta, f: key ? [key] : [] };
+    this.focus = null;
+    this.gen = null;
+    this.mode = 'focus';
+    this.live = true;
+    this.atEdge = false;
+    this.acc = 0;
+    this.resetFocus();
+    this.tick = this.endTick = key?.t ?? 0;
+    this.empty = !key;
+    if (key) this.seekFocus(this.tick);
+    this.requestDraw();
+  }
+  /** frames played since: the live edge moves on, and a playback waiting there goes on */
+  pushFrames(f: Frame[]): void {
+    const fr = this.fr;
+    if (!this.live || !fr || !f.length) return;
+    for (const q of f) fr.f.push(q);
+    this.endTick = fr.f[fr.f.length - 1].t;
+    if (this.empty) {
+      this.empty = false;
+      this.tick = fr.f[0].t;
+      this.seekFocus(this.tick);
+      this.requestDraw();
+    }
+    if (this.atEdge) {
+      this.atEdge = false;
+      this.kick();
+    }
+  }
+  /** match ticks between the playback and the newest frame (a stream's lag) */
+  get lag(): number {
+    return Math.max(0, this.endTick - this.tick);
+  }
+
   /** jump to a tick */
   seek(t: number): void {
     this.tick = Math.max(0, Math.min(this.endTick, t));
@@ -272,7 +317,10 @@ export class FieldView {
     if (ticks < 1) return;
     this.acc -= ticks;
     this.tick += ticks;
-    if (this.tick > this.endTick) {
+    if (this.tick >= this.endTick && this.live) {
+      this.tick = this.endTick;
+      this.atEdge = true;
+    } else if (this.tick > this.endTick) {
       if (this.loop) {
         this.tick = this.startTick;
         if (this.mode === 'focus') this.resetFocus();
@@ -484,7 +532,7 @@ export class FieldView {
       hopper: q.h,
       option: q.o?.[1],
       optionKind: q.o?.[0],
-      tips: this.tipsAt.filter((t) => t <= q.t).length,
+      tips: (w as unknown as { biobuzz?: { hives?: Record<string, { tips: number }> } }).biobuzz?.hives?.[fr.alliance]?.tips ?? 0,
     });
   }
 }

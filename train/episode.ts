@@ -33,6 +33,8 @@ import { Tally, type Activity, type Loads, type Parts } from './gap';
 import { AllianceBoard, OPPONENTS, OPP_FIRST_START, PARTNERS, defaultPartnerStart, legalPair, partnerProfile, seatStart, type OpponentKind, type PartnerKind, type StartId } from './team';
 import type { OptionKind } from './skills';
 import { playById, type Play } from './teamplay';
+import { progress } from '../harness/progress';
+import type { FramesProgress, LiveHead, MatchProgress, ThinkProgress } from './live';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -45,6 +47,8 @@ export type Death = 'survived' | 'crash' | 'stall';
 export const STALL_S = 20;
 export const TRACK_STRIDE = 3; // ticks between swarm samples (20 per second)
 export const FRAME_STRIDE = 2; // ticks between exact frames (30 per second)
+const PRE_TICKS = Math.round(C.PRE_COUNTDOWN / DT); // the match clock: AUTO starts here …
+const PLAY_TICKS = Math.round((C.AUTO_DURATION + C.TRANSITION_DURATION + C.TELEOP_DURATION) / DT); // … and the play lasts this long
 /** a swarm sample: x, y, heading, turret 1, turret 2, hopper count, option kind (-1 = none) */
 export const TRACK_FIELDS = 7;
 
@@ -84,6 +88,8 @@ export interface EpisodeArgs {
   routes?: boolean; // record our robot's scoring cycles (the route library, train/routes.ts)
   audit?: boolean; // record every mistake with its moment (the mistake audit, MASTERPLAN §7)
   forces?: [number, string][]; // (tick, option key): choices made for our robot on the way (a Store state's recipe: a search's changes)
+  progress?: boolean; // report the match's clock a few times a second (harness/progress.ts: the studio shows it)
+  live?: boolean; // stream the match to the studio's field as it is played, and every search at its decisions (implies progress)
 }
 /** THE MISTAKE AUDIT (phase 6): what went wrong in a match, when and where, and what it cost */
 export type MistakeKind = 'empty-trip' | 'blocked-shot' | 'idle' | 'foul' | 'stall' | 'crash' | 'judgement';
@@ -305,6 +311,8 @@ interface Outputs {
   inspect: Inspected[] | null;
   route: RouteRec | null; // routes: our robot's cycles
   audit: AuditRec | null; // audit: our robot's mistakes
+  prog: { at: number; thinking: boolean; searched: number } | null; // progress: when the clock was last reported
+  live: { at: number; buf: Frame[]; lastState: string[]; lastBb: string; head: boolean } | null; // live: frames not sent yet, and what was
 }
 
 export class Episode {
@@ -348,6 +356,8 @@ export class Episode {
       inspect: a.inspect ? [] : null,
       route: a.routes ? { out: [], cur: null, shooting: false, from: AUTO_TICK, mark: 0, pending: [] } : null,
       audit: a.audit ? { items: [], still: -1, stillJob: '', lastAct: 0, rules: {} } : null,
+      prog: a.progress || a.live ? { at: 0, thinking: false, searched: 0 } : null,
+      live: a.live ? { at: 0, buf: [], lastState: [], lastBb: '', head: false } : null,
     };
     this.out = o;
     this.start = a.start ?? 'F3';
@@ -494,6 +504,8 @@ export class Episode {
     if (this.partnerTally) this.partnerTally.observe(w, w.robots.find((q) => q.id === 1)!);
     if (o?.path && t % TRACK_STRIDE === 0) o.path.push(r.pos.x, r.pos.y, r.heading, r.turretHeading ?? r.heading, r.bbTurret2Heading ?? r.heading + Math.PI, r.hopper.length, kindIdx(this.brain.current()?.kind));
     if (o?.frames && t % FRAME_STRIDE === 0) this.frame(w, intake);
+    if (o?.live && t % this.liveStride(t) === 0) this.liveFrame(w, intake);
+    if (o?.prog) this.clock(w, false);
     if (o?.values && t % this.a.returns! === 0 && (w.match.phase === 'auto' || w.match.phase === 'teleop')) {
       const obs = new Float32Array(N_OBS);
       encode(w, r, this.prof, obs);
@@ -614,24 +626,33 @@ export class Episode {
   private frame(w: World, intake = false): void {
     const o = this.out!;
     const fr = o.frames!;
+    if (!fr.spec) Object.assign(fr, this.head(w));
+    else if (fr.meta.length !== w.balls.length) fr.meta = this.head(w).meta;
+    fr.f.push(this.buildFrame(w, intake, o));
+  }
+  /** the builds and the element list (a frame's fixed part) */
+  private head(w: World): LiveHead {
     const r = w.robots.find((q) => q.id === 0)!;
     const p2 = w.robots.find((q) => q.id === 1);
     const reds = w.robots.filter((q) => q.alliance !== r.alliance);
-    if (!fr.spec) {
-      fr.spec = r.spec;
-      fr.alliance = r.alliance;
-      if (p2) fr.spec2 = p2.spec;
-      if (reds.length) fr.oppSpecs = reds.map((x) => x.spec);
-    }
-    if (fr.meta.length !== w.balls.length) fr.meta = w.balls.map((b) => [b.id, b.color, (b as { r?: number }).r ?? null]);
+    const h: LiveHead = { spec: r.spec, alliance: r.alliance, meta: w.balls.map((b) => [b.id, b.color, (b as { r?: number }).r ?? null]) };
+    if (p2) h.spec2 = p2.spec;
+    if (reds.length) h.oppSpecs = reds.map((x) => x.spec);
+    return h;
+  }
+  /** one exact frame; element states and the game state only where they changed since `mem` saw them */
+  private buildFrame(w: World, intake: boolean, mem: { lastState: string[]; lastBb: string }): Frame {
+    const r = w.robots.find((q) => q.id === 0)!;
+    const p2 = w.robots.find((q) => q.id === 1);
+    const reds = w.robots.filter((q) => q.alliance !== r.alliance);
     const q = (v: number): number => Math.round(v * 100) / 100;
     const s: [number, unknown][] = [];
     const b: number[] = [];
     w.balls.forEach((x, i) => {
       b.push(q(x.pos.x), q(x.pos.y), q(x.z ?? 0));
       const st = JSON.stringify(x.state);
-      if (st !== o.lastState[i]) {
-        o.lastState[i] = st;
+      if (st !== mem.lastState[i]) {
+        mem.lastState[i] = st;
         s.push([i, x.state]);
       }
     });
@@ -645,8 +666,8 @@ export class Episode {
       m: [w.match.phase, w.match.phaseTimeLeft, w.match.scores[r.alliance].total, w.match.scores[r.alliance === 'blue' ? 'red' : 'blue'].foulPoints],
     };
     if (s.length) f.s = s;
-    if (g !== o.lastBb) {
-      o.lastBb = g;
+    if (g !== mem.lastBb) {
+      mem.lastBb = g;
       f.g = JSON.parse(g);
     }
     if (cur) f.o = [kindIdx(cur.kind), cur.label, q(cur.x), q(cur.y)];
@@ -658,7 +679,50 @@ export class Episode {
       f.opp = reds.map((x) => [q(x.pos.x), q(x.pos.y), x.heading, x.turretHeading ?? x.heading, x.bbTurret2Heading ?? x.heading + Math.PI, x.bbTurretPitch ?? 0, x.bbTurret2Pitch ?? 0]);
       f.oh = reds.map((x) => x.hopper.map((c) => c[0]).join(''));
     }
-    fr.f.push(f);
+    return f;
+  }
+
+  // ─────────────────────────────── live: the studio watching ───────────────────────────────
+  /** a streamed match sends every frame where it thinks ahead (the stretch worth watching) and every
+   * 12th tick elsewhere (the studio fast-forwards there: an exam match, an actor's match outside its
+   * searched window) */
+  private liveStride(t: number): number {
+    const w = this.a.searchWindow;
+    return this.a.search2 && (!w || (t >= w[0] && t < w[1])) ? FRAME_STRIDE : 12;
+  }
+  private liveFrame(w: World, intake: boolean): void {
+    const L = this.out!.live!;
+    L.buf.push(this.buildFrame(w, intake, L));
+    this.liveFlush(false);
+  }
+  /** send the frames not sent yet: ten times a second at most (a burst of fast simulation is one message) */
+  private liveFlush(force: boolean): void {
+    const L = this.out?.live;
+    if (!L || !L.buf.length) return;
+    const now = performance.now();
+    if (!force && now - L.at < 100 && L.buf.length < 120) return;
+    L.at = now;
+    const msg: FramesProgress = { k: 'frames', f: L.buf };
+    if (!L.head) {
+      L.head = true;
+      msg.head = this.head(this.w);
+    }
+    L.buf = [];
+    progress(msg);
+  }
+  /** the match's clock (a few times a second, and at once when a search starts or ends) */
+  private clock(w: World, force: boolean): void {
+    const P = this.out!.prog!;
+    const now = performance.now();
+    if (!force && now - P.at < 300) return;
+    P.at = now;
+    const r = w.robots.find((q) => q.id === 0)!;
+    const msg: MatchProgress = { k: 'match', t: w.tick, frac: Math.max(0, Math.min(1, (w.tick - PRE_TICKS) / PLAY_TICKS)), phase: w.match.phase, left: Math.round(w.match.phaseTimeLeft * 10) / 10, score: w.match.scores[r.alliance].total, thinking: P.thinking, searched: P.searched };
+    progress(msg);
+  }
+  /** a search's progress, for the studio's live view (only a streamed match) */
+  private think(m: Omit<ThinkProgress, 'k'>): void {
+    if (this.out?.live) progress({ k: 'think', ...m } satisfies ThinkProgress);
   }
 
   // ─────────────────────────────── what-if ───────────────────────────────
@@ -713,6 +777,17 @@ export class Episode {
   /** SEQUENTIAL HALVING (Search2Spec) over decision `d` taken on tick d.tick from this state */
   searchHalving(d: DecisionPoint, S: Search2Spec, value: Mlp | null, luckBase: number, who = 0): Searched {
     const m = d.opts.length;
+    // the studio watching: the frames up to this moment, then the search as it goes
+    const P = this.out?.prog;
+    if (P) {
+      P.thinking = true;
+      P.searched++;
+      this.liveFlush(true);
+      this.clock(this.w, true);
+    }
+    this.think({ at: 'start', tick: d.tick, robot: who, opts: d.opts.map((o) => [kindIdx(o.kind), o.label]), net: d.chosen, rounds: S.rounds.length });
+    let beat = performance.now();
+    const r1 = (v: number | null): number | null => (v === null ? null : Math.round(v * 10) / 10);
     const q: (number | null)[] = new Array(m).fill(null);
     const se: (number | null)[] = new Array(m).fill(null);
     const n = new Array<number>(m).fill(0);
@@ -723,9 +798,17 @@ export class Episode {
     for (let r = 0; r < S.rounds.length && alive.length; r++) {
       const R = S.rounds[r];
       const vals = alive.map(() => [] as number[]);
+      let played = 0;
       for (let k = 0; k < R.draws; k++) {
         const luck = seedOf(luckBase, d.tick, r, k);
-        alive.forEach((i, j) => vals[j].push(this.whatIf(optKey(d.opts[i]), d.tick, luck, R.horizon, value, false, who)));
+        alive.forEach((i, j) => {
+          vals[j].push(this.whatIf(optKey(d.opts[i]), d.tick, luck, R.horizon, value, false, who));
+          played++;
+          if (performance.now() - beat > 250) {
+            beat = performance.now();
+            this.think({ at: 'play', tick: d.tick, robot: who, r, done: played, total: alive.length * R.draws });
+          }
+        });
       }
       rq.push(new Array(m).fill(null));
       alive.forEach((i, j) => {
@@ -739,6 +822,7 @@ export class Episode {
         depth[i] = r;
       });
       last = vals;
+      this.think({ at: 'round', tick: d.tick, robot: who, r, alive: [...alive], q: q.map(r1) });
       if (r === S.rounds.length - 1) break; // the final comparison is on this round's draws
       if (alive.length <= 2) continue; // two left: both go on to the longer, better-sampled round
       // the better half go on; the network's own choice always does (it is what gets overruled)
@@ -760,6 +844,11 @@ export class Episode {
         const z = sdd > 0 ? md / (sdd / Math.sqrt(diff.length)) : md > 0 ? Infinity : 0;
         if (md > S.margin && z > S.z && (best === d.chosen || q[i]! > q[best]!)) best = i;
       }
+    }
+    this.think({ at: 'end', tick: d.tick, robot: who, best, net: d.chosen, changed: best !== d.chosen, q: q.map(r1) });
+    if (P) {
+      P.thinking = false;
+      this.clock(this.w, true);
     }
     return { tick: d.tick, at: d.at, chosen: best, net: d.chosen, robot: who, q, se, n, depth, rq };
   }
@@ -859,6 +948,8 @@ export class Episode {
       }
       if (!this.step()) break;
     }
+    this.liveFlush(true);
+    if (this.out?.prog) this.clock(this.w, true);
     const res = this.result(searched, changed);
     if (a.keepSearched) res.labels = labels;
     return res;

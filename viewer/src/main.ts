@@ -1,12 +1,14 @@
 // BIOBUZZ STUDIO — the entry: the pages and their router (#home, #robot, …), the pill at the top,
 // the menu, the live event stream from the server, and quitting.
 import type { World } from '../../dsim-main/src/types';
-import { getJSON, post, type CheckpointMeta, type EvalResult, type GenSummary, type HomeStatusV, type PlaybookStatusV, type Progress, type RunState, type State, type Status } from './data';
-import { initStage } from './stage';
+import { getJSON, post, type CheckpointMeta, type EvalResult, type GenSummary, type HomeStatusV, type LiveMsg, type PlaybookStatusV, type Progress, type RunState, type State, type Status, type TrainLive } from './data';
+import { initStage, simProgress } from './stage';
+import { loadLive, onLive } from './stream';
+import './live';
 import { $, ask, esc, setText, toast } from './ui';
-import { S, bus, type TeamStatusV } from './state';
+import { S, bus, type MeasureV, type SimV, type TeamStatusV } from './state';
 import { homeStatus, loadExamSheet, loadHome, loadNotify, loadSetup } from './pages/home';
-import { inspectNow, loadRobots, renderRobotList, showRobot } from './pages/robot';
+import { inspectNow, loadRobots, measureProgress, renderRobotList, showRobot } from './pages/robot';
 import { loadPlaybook, playbookStatus, showPlaybook } from './pages/playbook';
 import { loadTeam, renderTeam, teamStatus } from './pages/plays';
 import { loadRoutes, renderRoutes } from './pages/routes';
@@ -148,6 +150,15 @@ function connect(): void {
     void inspectNow();
     void loadSetup(true);
   });
+  // what is running now: the trainer's live picture, the match it streams to the field, a match
+  // played again in DSIM to watch it, an envelope being measured
+  on<TrainLive | null>('train', (t) => {
+    S.live = t;
+    bus.emit('train');
+  });
+  on<LiveMsg>('live', (m) => onLive(m));
+  on<SimV>('sim', (d) => simProgress(d));
+  on<MeasureV>('measure', (m) => measureProgress(m));
   es.addEventListener('quit', () => {
     es.close();
     showClosed();
@@ -155,12 +166,16 @@ function connect(): void {
   es.onopen = () => {
     v1.onConnected();
     renderPill();
+    void loadLive(); // (a studio opening mid-match joins the streamed match here)
   };
   es.onerror = () => {
     if (closed) return es.close();
     v1.onReconnecting();
     setText($('pillText'), 'Reconnecting to the studio…');
     $('pill').className = 'pill';
+    // nothing live is known until it answers again
+    S.live = null;
+    bus.emit('train');
   };
 }
 

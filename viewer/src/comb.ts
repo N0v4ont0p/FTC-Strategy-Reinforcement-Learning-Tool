@@ -4,7 +4,7 @@
 import { hideTip, showTip } from './charts';
 import type { GenSummary } from './data';
 
-const RAMP = ['#7a3f0b', '#b86b16', '#e9a23b', '#f6d38a']; // validated: monotone, one hue, light end ≥ 2:1
+const RAMP = ['#4a3810', '#8c6a15', '#d9ab2c', '#ffdb7a']; // the POLLEN hue: monotone, one hue, light end ≥ 2:1 on --deck
 function honey(t: number): string {
   const x = Math.max(0, Math.min(1, t)) * (RAMP.length - 1);
   const i = Math.min(RAMP.length - 2, Math.floor(x));
@@ -43,6 +43,7 @@ export class Comb {
   draw(): void {
     const dpr = window.devicePixelRatio || 1;
     const w = this.canvas.clientWidth;
+    if (!w) return; // hidden: drawn when shown
     const R = this.R;
     const dx = Math.sqrt(3) * R;
     const dy = 1.5 * R;

@@ -20,6 +20,7 @@ import {
   bbCellSideOf,
   bbFlowerInReach,
   bbIntakeAccepts,
+  bbIntakeKindOf,
   bbLauncherOf,
   bbMouths,
   bbPlacePointLocal,
@@ -45,9 +46,15 @@ import type { Avoid } from './team';
 type P = { x: number; y: number };
 const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 const dist = (a: P, b: P): number => Math.hypot(a.x - b.x, a.y - b.y);
+/** IS THIS ELEMENT LOOSE ON THE FLOOR — what an intake can take. In DSIM's 3D solve an element the
+ * rollers are drawing in (or one still bouncing after a spill or a miss) hops, and DSIM tags it
+ * `flight` while it does; its intake takes a low flight all the same (`bbIntakeAct` lowFlight, under
+ * BB3_INTAKE_Z). Counting only `ground` made the robot drop every element the moment its own intake
+ * pulled it. */
+export const onFloor = (b: { state: { kind: string }; z?: number }): boolean => b.state.kind === 'ground' || (b.state.kind === 'flight' && (b.z ?? 0) <= BB.BB3_INTAKE_Z);
 
 /** bump when the options or how a replay is labelled change: cached demonstrations are rebuilt */
-export const SKILLS_VERSION = 6; // 6: AUTO in our own half only; the team's shooting zone
+export const SKILLS_VERSION = 7; // 6: AUTO in our own half only; the team's shooting zone; 7: DSIM Act 2 (3D solve: no FLOWER retrieval for a sweeper, a hopping element is loose, fire only inside the measured 3D envelope)
 /** the AUTO rule every robot plays by (a playbook planned under another is planned again) */
 export const AUTO_RULES = 'own-half-1';
 /** AUTO, OUR HALF ONLY: a planned pose keeps every corner this far from the centre line (in)… */
@@ -127,6 +134,14 @@ function placeable(spec: RobotSpec, p: P, heading: number, slop = 0.5): boolean 
   const fp = footprintCorners(spec, p, heading);
   if (fp.some((q) => Math.abs(q.x) > BB.BB_HALF_X - 0.1 || Math.abs(q.y) > BB.BB_HALF_Y - 0.1)) return false;
   return !SOLIDS.some((b) => polysOverlap(fp, b, slop));
+}
+/** the shift that brings a pose's footprint 0.15 in inside the field walls, or null if it is */
+function intoField(spec: RobotSpec, p: P, heading: number): P | null {
+  const fp = footprintCorners(spec, p, heading);
+  const shift = (v: number[], lim: number): number => Math.max(0, -lim - Math.min(...v)) - Math.max(0, Math.max(...v) - lim);
+  const dx = shift(fp.map((q) => q.x), BB.BB_HALF_X - 0.15);
+  const dy = shift(fp.map((q) => q.y), BB.BB_HALF_Y - 0.15);
+  return dx || dy ? { x: dx, y: dy } : null;
 }
 /** HIVE frame bars grown by 2 in (the safety margin) and their centre lines */
 const BAR_RECTS = BARS.map(([a, b]) => rect(a.x - 2, a.y - 2, b.x + 2, b.y + 2));
@@ -243,6 +258,10 @@ export class Pilot {
   readonly ext: { front: number; rear: number; half: number };
   /** the chassis ends with an intake mouth (REAL-v0: back; DREAM / the world-record build: both) */
   readonly ends: ('front' | 'back')[];
+  /** half the roller bar's span, by intake end (DSIM takes an element whose centre is under it) */
+  readonly mouthHalf: Partial<Record<'front' | 'back', number>> = {};
+  /** the intake ends' mouths, robot frame (DSIM bbMouths) */
+  private readonly mouths: { edge: 'front' | 'back'; x0: number; x1: number; y0: number; y1: number }[] = [];
   private readonly R: number;
   /** centre → the farthest corner (in) */
   readonly reachR: number;
@@ -272,6 +291,15 @@ export class Pilot {
   private readonly fireReach: number;
   /** the Box Tube's placement point in the robot frame (DSIM bbPlacePointLocal), null without one */
   readonly tube: P | null;
+  /** DOES IT PULL POLLEN OUT OF A FLOWER. In DSIM Act 2 a SWEEPER never can (its roller does not
+   * reach into the retrieval opening, `bbFlowerReachOf`); side rollers can, and a ramp once deployed
+   * and settled. Every team robot and every DSIM preset is a sweeper; the skills drive neither side
+   * rollers (one wheel lined up on the opening) nor a ramp (a toggle and a settle) yet — DSIM's own
+   * bot does not either — so a FLOWER is never a job here. The robot lab says so for a build whose
+   * intake could. */
+  readonly retrieves = false;
+  /** DSIM's intake archetype: 'sweeper' | 'siderollers' | 'ramp' */
+  readonly intakeKind: string;
   /** where it parks: 0 alone (the middle of the loading zone), 1 / 2 its upper / lower end when two robots park */
   parkSlot = 0;
   /** scoring spots a partner is shooting from (world frame): not this robot's */
@@ -285,6 +313,15 @@ export class Pilot {
    * never lets a corner cross the centre line — stricter than G402, which only fouls a robot fully
    * across AND touching an opponent. */
   fence: 0 | 1 | -1 = 0;
+  /** G407, A FULL HOPPER CARRIES NO FIFTH (set by the brain every tick). With no room the rollers do
+   * not pull (DSIM bbIntakeAct), so an element met by the open mouth rides along in its pocket, and
+   * DSIM counts one taken somewhere as CONTROL. `trail`: the intake end to drive with trailing (a
+   * build with one intake end, hopper full); `pocket`: the end with an element in its mouth right
+   * now, backed straight off before anything else (for at most 0.5 s) */
+  trail: 'front' | 'back' | null = null;
+  pocket: 'front' | 'back' | null = null;
+  /** with a full hopper, the loose elements near it (driven round, never into: drive()) */
+  loose: { x: number; y: number; r: number }[] = [];
   /** the team's shooting zone (train/zone.ts): it only goes to spots in it and only fires in it */
   readonly zone: ShootZone | null;
 
@@ -296,10 +333,15 @@ export class Pilot {
   ) {
     this.zone = zoneActive(zone) ? zone : null;
     this.E = effective(spec, true, 0); // intake running: the slower, safe budget
+    this.intakeKind = bbIntakeKindOf(spec);
     this.ext = footprintExtents(spec);
-    this.ends = bbMouths(spec)
-      .map((m) => m.edge)
-      .filter((e): e is 'front' | 'back' => e === 'front' || e === 'back');
+    const mouths = bbMouths(spec);
+    this.ends = mouths.map((m) => m.edge).filter((e): e is 'front' | 'back' => e === 'front' || e === 'back');
+    for (const m of mouths)
+      if (m.edge === 'front' || m.edge === 'back') {
+        this.mouthHalf[m.edge] = (m.y1 - m.y0) / 2;
+        this.mouths.push({ edge: m.edge, x0: m.x0, x1: m.x1, y0: m.y0, y1: m.y1 });
+      }
     if (!this.ends.length) throw new Error('skills need a front or back intake (side intakes are not modelled yet)');
     // paths clear the HIVE frame and FLOWER feet by half the width + 4 in (it cruises along its
     // long axis); the look-ahead safety in drive() covers the corners it sweeps while turning
@@ -356,19 +398,44 @@ export class Pilot {
     if (h === null) return p.x * this.fence >= this.reachR + 1 + HALF_MARGIN;
     return footprintCorners(this.spec, p, h).every((q) => q.x * this.fence >= HALF_MARGIN);
   }
-  /** may it hold fire from here: inside the team's shooting zone for the cell its turret aims at
-   * (DSIM releases only a shot that lands; the zone is where the team trusts the real robot to) */
+  /** MAY IT HOLD FIRE FROM HERE. DSIM releases a shot whenever its 2D ballistic verdict says the
+   * element lands, and the 3D solve then decides: from outside the measured envelope the element
+   * clips a cell's wall or the frame and bounces out (DSIM's own bot, firing on the verdict alone,
+   * scored 56 % of 247 match shots). So: inside this build's measured 3D envelope (train/envelope.ts:
+   * a stationary shot that goes in from every heading), cut to the team's shooting zone, for the
+   * cell its turret aims at — and not driving IN toward that cell faster than MAX_CLOSING (a closing
+   * robot walks its release into the too-close band and flattens its own arc; DSIM measured 0/6 at
+   * 40 in/s, 16/18 at 16; across the line or away, 24/24 at any speed). */
   mayFire(w: World, r: RobotState): boolean {
-    if (!this.zone) return true;
     const aim = bbCellSideOf(bbAimTarget(w, r));
-    const blue = r.alliance === 'blue';
     const m = mir(r.alliance, r.pos);
-    return zoneAllows(this.zone, blue ? aim : flip(aim), m.x, m.y);
+    const side = r.alliance === 'blue' ? aim : flip(aim);
+    // (the envelope is a 2 in grid: the zone's own edge is exact)
+    if (!inEnv(this.env, side, m.x, m.y) || !zoneAllows(this.zone, side, m.x, m.y)) return false;
+    const cx = r.alliance === 'blue' ? BB.BB_HIVE_X : -BB.BB_HIVE_X;
+    const cy = (aim === 'north' ? 1 : -1) * BB.BB_HIVE_CELL_DY;
+    const d = Math.hypot(cx - r.pos.x, cy - r.pos.y) || 1;
+    return (r.vel.x * (cx - r.pos.x) + r.vel.y * (cy - r.pos.y)) / d <= MAX_CLOSING;
   }
 
   /** did a shot from near here just fail for this robot (within 12 in, still banned) */
   isBad(p: P, tick: number): boolean {
     return this.badSpots.some((b) => b.until > tick && (b.x - p.x) ** 2 + (b.y - p.y) ** 2 < 144);
+  }
+  /** the intake end with a loose element in (or against) its mouth, if any */
+  pocketed(w: World, r: RobotState): 'front' | 'back' | null {
+    const c = Math.cos(r.heading);
+    const s = Math.sin(r.heading);
+    for (const b of w.balls) {
+      const dx = b.pos.x - r.pos.x;
+      const dy = b.pos.y - r.pos.y;
+      if (dx * dx + dy * dy > 400 || !onFloor(b)) continue;
+      const lx = dx * c + dy * s;
+      const ly = -dx * s + dy * c;
+      const er = b.r ?? BB.BB_POLLEN_R;
+      for (const m of this.mouths) if (lx > m.x0 - er && lx < m.x1 + er && ly > m.y0 - er && ly < m.y1 + er) return m.edge;
+    }
+    return null;
   }
   /** reach from the centre to the roller of an end */
   reach(end: 'front' | 'back'): number {
@@ -428,7 +495,7 @@ export class Pilot {
     if (o.vCap !== undefined && remaining < 30) vDes = Math.min(vDes, o.vCap);
     if (o.vMax !== undefined) vDes = Math.min(vDes, o.vMax);
     const dirH = Math.atan2(ey, ex);
-    const cruise = Math.abs(wrap(dirH - r.heading)) <= Math.PI / 2 ? dirH : wrap(dirH + Math.PI);
+    const cruise = this.trail ? (this.trail === 'front' ? wrap(dirH + Math.PI) : dirH) : Math.abs(wrap(dirH - r.heading)) <= Math.PI / 2 ? dirH : wrap(dirH + Math.PI);
     // a tank cannot strafe: it faces the way it drives until the last few inches, then turns in place
     const hT = this.tank
       ? h === null || (!o.lockH && remaining > 2.5) ? (d > 2.5 ? cruise : r.heading) : h
@@ -438,6 +505,13 @@ export class Pilot {
     let vx = d > 1e-9 ? (vDes * ex) / d : 0;
     let vy = d > 1e-9 ? (vDes * ey) / d : 0;
     let rot = rot0;
+    if (this.pocket) {
+      // straight away from that mouth, not turning (a turn sweeps the element round with it)
+      const a = r.heading + (this.pocket === 'front' ? Math.PI : 0);
+      vx = 20 * Math.cos(a);
+      vy = 20 * Math.sin(a);
+      rot = 0;
+    }
     // SAFETY (G417 is a death). Two different dangers, two different answers:
     //   · its OWN motion (momentum, spin) carries its footprint onto a HIVE frame bar within a third
     //     of a second → stop turning and back off THAT bar (the one the footprint would hit);
@@ -525,6 +599,26 @@ export class Pilot {
             vy = 0;
           }
         }
+      }
+    // G407, A FULL HOPPER PUSHES NOTHING (Pilot.loose): a loose element the footprint would reach
+    // within 0.25 s, driving toward it, is driven ROUND — the part of the motion toward it turns
+    // sideways (the way the robot already slides). Pushed along, DSIM counts it as CONTROL of a
+    // fifth element; a robot driving to shoot with its intake trailing met them with its back.
+    if (!danger)
+      for (const e of this.loose) {
+        const dx = e.x - r.pos.x;
+        const dy = e.y - r.pos.y;
+        const de = Math.hypot(dx, dy);
+        const toward = de > 1e-6 ? (vx * dx + vy * dy) / de : 0;
+        if (toward <= 0) continue;
+        const vn = Math.hypot(vx, vy);
+        const T = Math.min(0.25 * vn, Math.min(d, remaining)) / vn;
+        if (polyDist(e, footprintCorners(this.spec, { x: r.pos.x + vx * T, y: r.pos.y + vy * T }, r.heading + turnBy(T))) > e.r + 0.5) continue;
+        const nx = dx / de;
+        const ny = dy / de;
+        const side = vy * nx - vx * ny >= 0 ? 1 : -1; // the tangent (−ny, nx) the motion leans to
+        vx += toward * (-side * ny - nx);
+        vy += toward * (side * nx - ny);
       }
     // AUTO, OUR HALF ONLY. Like the frame bars, two dangers: its own MOMENTUM toward the line (the
     // distance it needs to stop, at the braking the speed law uses, eats the gap, or its motion
@@ -631,18 +725,24 @@ export function nearestSpot(w: World, r: RobotState, pilot: Pilot, from: P = r.p
   return mir(a, best);
 }
 
-/** seconds a shot is in the air (typical; S1 envelope flights are ~0.5–1 s) */
-export const FLIGHT_S = 0.75;
+/** in/s: the fastest a robot may drive IN toward the cell it shoots at (Pilot.mayFire) */
+export const MAX_CLOSING = 10;
+/** seconds after the release before the rising tray takes shots. DSIM 3D swings it through the
+ * launch window: of 608 shots in 8 full matches, those fired at it before the release or up to
+ * 0.25 s after went in 2 times in 28, those fired from 0.5 s after 22 in 33 (the 2D gate fired
+ * 0.75 s BEFORE the release, for shots to arrive as it happened) */
+export const RISE_S = 0.5;
 /** is firing now worth it: something to fire, and the turret's aim (the NEARER cell — DSIM aim
- * assist, play.ts bbAimTarget) is the cell that will be TAKING shots when this one arrives. A swing
- * after a tip hands over to the other tray at the release (hive.ts hiveTakingSide, 2 s into the
- * 4 s swing); a shot reaching the tipping tray before that only joins its spill. The world-record
- * replays score all through the swing — refusing it (as a first version did) lost 53 s of firing. */
+ * assist, play.ts bbAimTarget) is the cell that is taking shots. A swing after a tip hands over to
+ * the other tray at the release (hive.ts hiveTakingSide, 2 s into the 4 s swing), which catches
+ * shots from RISE_S later; a shot reaching the tipping tray before the release only joins its spill.
+ * The world-record replays score all through the swing — refusing it (as a first version did) lost
+ * 53 s of firing. */
 export function fireGate(w: World, r: RobotState): boolean {
   if (r.hopper.length === 0) return false;
   const hive = bb(w).hives[r.alliance];
   const other = flip(hive.up);
-  const taking = hive.tipping <= 0 ? hive.up : hive.released || hive.tipping - BB_TIP_RELEASE_S <= FLIGHT_S ? other : null;
+  const taking = hive.tipping <= 0 ? hive.up : hive.tipping <= BB_TIP_RELEASE_S - RISE_S ? other : null;
   return taking !== null && bbCellSideOf(bbAimTarget(w, r)) === taking;
 }
 
@@ -694,7 +794,7 @@ const hiveCentre = (a: Alliance): P => ({ x: a === 'blue' ? BB.BB_HIVE_X : -BB.B
 /** collectable loose elements in the cycle zone */
 function cycleLoose(w: World, a: Alliance, pilot: Pilot, skip?: Set<number>): Ball[] {
   const c = hiveCentre(a);
-  return w.balls.filter((b) => b.state.kind === 'ground' && pilot.accepts(b.color, a) && !skip?.has(b.id) && dist(b.pos, c) <= CYCLE_R && (!pilot.fence || b.pos.x * pilot.fence > 0));
+  return w.balls.filter((b) => onFloor(b) && pilot.accepts(b.color, a) && !skip?.has(b.id) && dist(b.pos, c) <= CYCLE_R && (!pilot.fence || b.pos.x * pilot.fence > 0));
 }
 
 // ─────────────────────────────── the options available now ───────────────────────────────
@@ -732,7 +832,7 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
     // GROUPS of loose POLLEN and own NECTAR on the tiles, the 6 the robot reaches first
     const lz = BB.BB_LZ[a];
     // (in AUTO only what lies on our side of the centre line)
-    const loose = w.balls.filter((b) => b.state.kind === 'ground' && pilot.accepts(b.color, a) && ok(`b${b.id}`) && !avoid.balls.has(b.id) && (!pilot.fence || b.pos.x * pilot.fence > 0));
+    const loose = w.balls.filter((b) => onFloor(b) && pilot.accepts(b.color, a) && ok(`b${b.id}`) && !avoid.balls.has(b.id) && (!pilot.fence || b.pos.x * pilot.fence > 0));
     const est = (b: Ball): number => pilot.estTime(r, b.pos, null) + pilot.turnTo(r.pos, r.heading, b.pos);
     let cand: { g: Ball[]; anchor: Ball; t: number }[] = [];
     let close = false;
@@ -767,8 +867,9 @@ export function options(w: World, r: RobotState, pilot: Pilot, cap: number, bann
         ...(close ? { close: true } : {}),
       });
     }
-    // FLOWERS whose bottom element is a POLLEN (a NECTAR at the bottom locks it)
-    BB.BB_FLOWERS.forEach((f, i) => {
+    // FLOWERS whose bottom element is a POLLEN (a NECTAR at the bottom locks it) — for an intake
+    // that reaches into the retrieval opening at all (Pilot.retrieves)
+    if (pilot.retrieves) BB.BB_FLOWERS.forEach((f, i) => {
       const st = B.flowers[i].stack;
       const bottom = st.length ? w.balls.find((q) => q.id === st[0]) : undefined;
       if (!bottom || bottom.color !== 'yellow' || !ok(`f${i}`) || avoid.flowers.has(i)) return;
@@ -916,8 +1017,19 @@ export function approach(pilot: Pilot, r: { pos: P; heading: number }, b: P, clo
       for (const e of ends) {
         const off = pilot.reach(e) - 1.5; // element at the roller
         const h = Pilot.facing(e, a + Math.PI);
-        const goal = { x: b.x + u.x * off, y: b.y + u.y * off };
-        const pre = { x: b.x + u.x * (off + pilot.style.preDist), y: b.y + u.y * (off + pilot.style.preDist) };
+        let goal = { x: b.x + u.x * off, y: b.y + u.y * off };
+        // AN ELEMENT AGAINST A WALL (a GARDEN line, a LOADING ZONE's staged POLLEN, a spill that
+        // rolled there): the pose slides back inside the field. DSIM's rollers still take it
+        // (bbIntakeAct takes a wall-pinned element where it lies, anywhere under the bar) while
+        // the roller stops within 1.5 in of the usual seat and the element stays 1 in inside the
+        // bar's end — the new field is 70.674 in to the wall, and 24 of its POLLEN touch one
+        const s = intoField(pilot.spec, goal, h);
+        if (s) {
+          const back = s.x * u.x + s.y * u.y; // along the approach, + = away from the element
+          if (back < -0.01 || back > 1.5 || Math.abs(s.x * u.y - s.y * u.x) > (pilot.mouthHalf[e] ?? 0) - 1) continue;
+          goal = { x: goal.x + s.x, y: goal.y + s.y };
+        }
+        const pre = { x: goal.x + u.x * pilot.style.preDist, y: goal.y + u.y * pilot.style.preDist };
         if (placeable(pilot.spec, goal, h, 0.5) && placeable(pilot.spec, pre, h, 0.5) && clearOfFrame(pilot.spec, goal, h, margin) && clearOfFrame(pilot.spec, pre, h, margin) && pilot.halfOk(goal, h) && pilot.halfOk(pre, h)) return { pre, goal, h, direct: k === 0 };
       }
     }
@@ -926,6 +1038,8 @@ export function approach(pilot: Pilot, r: { pos: P; heading: number }, b: P, clo
 }
 
 // ─────────────────────────────── executing one option ───────────────────────────────
+/** the ids of the elements robot `id` holds */
+const heldBy = (w: World, id: number): Set<number> => new Set(w.balls.filter((b) => b.state.kind === 'held' && (b.state as { robot: number }).robot === id).map((b) => b.id));
 export type Outcome = 'running' | 'done' | 'failed';
 
 export class Executor {
@@ -938,7 +1052,9 @@ export class Executor {
   private holdH: number | null = null;
   private idle = 0;
   private hop0 = 0;
-  private readonly hopStart: number;
+  /** the elements this robot held last tick, and how many it has taken during this option */
+  private held: Set<number>;
+  private picks = 0;
   private end: 'front' | 'back' = 'back';
   // a sweep
   private ids: Set<number>; // (the tip cycle re-reads its zone every tick)
@@ -947,6 +1063,7 @@ export class Executor {
   private target: number | null = null;
   private targetAt = 0;
   private targetBudget = 0;
+  private noTurn = 0; // ticks at the line-up spot, heading off and not turning
   private readonly skip = new Set<number>();
   // shooting
   private hold: P | null = null;
@@ -967,7 +1084,7 @@ export class Executor {
     this.start = w.tick;
     this.lastGain = w.tick;
     this.hop0 = r.hopper.length;
-    this.hopStart = r.hopper.length;
+    this.held = heldBy(w, r.id);
     pilot.reset();
     if (opt.kind === 'flower') this.end = flowerEnd(opt.flower!, pilot, r.heading);
     const est = opt.kind === 'flower' ? pilot.estTime(r, flowerGoal(opt.flower!, pilot, this.end).pre, null) : pilot.estTime(r, opt, null);
@@ -989,16 +1106,24 @@ export class Executor {
 
   /** has this option already collected anything */
   get gained(): boolean {
-    return this.hop0 > this.hopStart;
+    return this.picks > 0;
   }
 
   /** this tick's command and whether the option is finished */
   step(w: World, r: RobotState, cap: number): { c: RobotCommand; out: Outcome } {
     const t = w.tick;
-    if (r.hopper.length > this.hop0) {
-      this.hop0 = r.hopper.length;
-      this.lastGain = t;
-    }
+    // TAKEN and SPENT by element identity, not by the hopper's count: firing on the move while
+    // collecting spends one as fast as the rollers take one, and the count stays level (that made
+    // most "empty trips" in DSIM 3D trips that had taken their element)
+    const now = heldBy(w, r.id);
+    for (const id of now)
+      if (!this.held.has(id)) {
+        this.picks++;
+        this.lastGain = t;
+      }
+    for (const id of this.held) if (!now.has(id)) this.lastShotT = t;
+    this.held = now;
+    if (r.hopper.length > this.hop0) this.hop0 = r.hopper.length;
     const over = t - this.start > this.budget || (this.pilot.stuck && !(this.opt.kind === 'flower' && this.phase === 'seat') && this.opt.kind !== 'park');
     const o = this.opt;
     switch (o.kind) {
@@ -1010,14 +1135,14 @@ export class Executor {
         const st = bb(w).flowers[o.flower!].stack;
         const bottom = st.length ? w.balls.find((q) => q.id === st[0]) : undefined;
         if (r.hopper.length >= cap || !bottom || bottom.color !== 'yellow') return { c: cmd(), out: r.hopper.length > 0 ? 'done' : 'failed' };
-        if (over) return { c: cmd(), out: r.hopper.length > this.hopStart ? 'done' : 'failed' };
+        if (over) return { c: cmd(), out: this.gained ? 'done' : 'failed' };
         if (this.phase === 'go' && dist(r.pos, g.pre) < 3 && Math.abs(wrap(g.h - r.heading)) < 0.08) {
           this.phase = 'seat';
           this.lastGain = t;
         }
         if (this.phase === 'go') return { c: this.pilot.drive(r, t, g.pre, g.h), out: 'running' };
         // square in, slower than IMPACT_MAX (20 in/s), and keep pressing while it pulls POLLEN out
-        if (t - this.lastGain > 90) return { c: cmd(), out: r.hopper.length > this.hopStart ? 'done' : 'failed' };
+        if (t - this.lastGain > 90) return { c: cmd(), out: this.gained ? 'done' : 'failed' };
         const c = this.pilot.drive(r, t, g.seat, g.h, { vCap: Math.min(this.pilot.style.seatV, this.pilot.vIntake), lockH: true });
         c.intake = true;
         return { c, out: 'running' };
@@ -1104,17 +1229,10 @@ export class Executor {
    * is nothing left to take or shoot, or nothing has been taken or shot for sweepIdleS. */
   private lastShotT = 0;
   private dry = 0;
-  private cHop = -1;
-  private took = false;
   private cycle(w: World, r: RobotState, cap: number): { c: RobotCommand; out: Outcome } {
     const t = w.tick;
     const a = r.alliance;
-    // progress: an element taken or a shot fired
-    if (this.cHop >= 0 && r.hopper.length > this.cHop) {
-      this.lastGain = t;
-      this.took = true;
-    } else if (this.cHop >= 0 && r.hopper.length < this.cHop) this.lastShotT = t;
-    this.cHop = r.hopper.length;
+    // progress: an element taken (step) or a shot fired
     this.lastGain = Math.max(this.lastGain, this.lastShotT); // a shot is progress for the sweep inside too
     // no element taken and no shot for sweepIdleS: the loop is not working here — a failure, so the
     // brain leaves it alone for a while (a forced tip cycle once stalled every match by re-picking it)
@@ -1123,7 +1241,7 @@ export class Executor {
     const hive = bb(w).hives[a];
     const coming = hive.tipping > 0 && !hive.released && hive.contents.length >= 2;
     this.dry = !loose.length && !coming && r.hopper.length === 0 ? this.dry + 1 : 0;
-    if (this.dry > 30) return { c: cmd(), out: this.took ? 'done' : 'failed' };
+    if (this.dry > 30) return { c: cmd(), out: this.gained ? 'done' : 'failed' };
     if (r.hopper.length >= cap || (!loose.length && r.hopper.length > 0 && !coming)) {
       // shoot from the zone (the shoot job's own step: it gives a spot up when no shot comes)
       const s = this.shootStep(w, r);
@@ -1159,12 +1277,12 @@ export class Executor {
       return { c: cmd(), out: this.gained ? 'done' : 'failed' };
     }
     const loose = w.balls.filter(
-      (b) => b.state.kind === 'ground' && this.pilot.accepts(b.color, a) && !this.skip.has(b.id) && (this.ids.has(b.id) || dist(b.pos, this.center) <= this.radius),
+      (b) => onFloor(b) && this.pilot.accepts(b.color, a) && !this.skip.has(b.id) && (this.ids.has(b.id) || dist(b.pos, this.center) <= this.radius),
     );
     let b = this.target === null ? undefined : loose.find((q) => q.id === this.target);
     // a target it cannot get to is skipped: over its time, stuck on the way, or held off by another
     // robot for 3/4 s (a partner parked beside it) — never for slow progress pushing into it
-    if (b && (t - this.targetAt > this.targetBudget || (this.pilot.stuck && this.phase === 'go') || this.pilot.blockedTicks > 45)) {
+    if (b && (t - this.targetAt > this.targetBudget || (this.pilot.stuck && this.phase === 'go') || this.pilot.blockedTicks > 45 || this.noTurn > STUCK_TICKS)) {
       this.skip.add(b.id);
       this.banned.set(`b${b.id}`, t + ban);
       b = undefined;
@@ -1186,6 +1304,7 @@ export class Executor {
       this.targetBudget = Math.round(60 * (S.budgetMul * bc + S.budgetAddS));
       this.app = null;
       this.phase = 'go';
+      this.noTurn = 0;
       this.pilot.reset();
     }
     const d = dist(r.pos, b.pos);
@@ -1203,9 +1322,11 @@ export class Executor {
     // when the robot is already on the approach line
     if (A.direct) this.phase = 'seat';
     if (this.phase === 'go' && ((dist(r.pos, A.pre) < 6 && Math.abs(wrap(A.h - r.heading)) < 0.15) || (d < Math.max(this.pilot.ext.rear, this.pilot.ext.front) + 6 && Math.abs(wrap(A.h - r.heading)) < 0.25))) this.phase = 'seat';
+    // at the line-up spot and not turning to line up (its corners against a wall): skipped (above)
+    this.noTurn = this.phase === 'go' && dist(r.pos, A.pre) < 3 && Math.abs(r.angVel) <= 0.05 ? this.noTurn + 1 : 0;
     // (a hair under: a Float32 gene decoding to 2.0000001 means 2)
     // (a dumper never fires on the move: holding fire turns its whole chassis toward the HIVE)
-    const fire = !this.pilot.dumper && r.hopper.length >= Math.max(1, Math.ceil(S.fireHold - 1e-6)) && this.pilot.vFire / 0.85 >= S.fireMinV && fireGate(w, r) && this.pilot.inRange(w, a, r.pos);
+    const fire = !this.pilot.dumper && r.hopper.length >= Math.max(1, Math.ceil(S.fireHold - 1e-6)) && this.pilot.vFire / 0.85 >= S.fireMinV && fireGate(w, r) && this.pilot.mayFire(w, r);
     const vMax = fire ? this.pilot.vFire : undefined;
     const c = this.phase === 'go' ? this.pilot.drive(r, t, A.pre, A.h, { vMax }) : this.pilot.drive(r, t, A.goal, A.h, { lockH: true, vCap: this.pilot.vIntake, vMax });
     return { c, out: 'running' };

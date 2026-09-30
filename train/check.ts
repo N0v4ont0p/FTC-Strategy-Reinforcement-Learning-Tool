@@ -128,7 +128,9 @@ const base = (seed: number, extra: Partial<EpisodeArgs> = {}): EpisodeArgs => ({
 // ---- 3. episodes: determinism and exact frames -------------------------------------------------------------
 const data = ensureData();
 {
-  const g = data?.report.genome ?? null;
+  // (the replays' fit when there is one; else the distilled no-learning network — in DSIM Act 2 the
+  // team's 2D replays do not re-simulate, so there is no fit until a 3D replay is added)
+  const g = data?.report.genome ?? ensureGreedy().genome;
   const a = runEpisode(base(21, { genome: g, frames: true, samples: true }));
   const b = runEpisode(base(21, { genome: g, frames: true, samples: true }));
   check('3 episode: same network + seed → identical life (score, path, decisions, frames, samples)', a.reward === b.reward && a.track === b.track && JSON.stringify(a.decisions) === JSON.stringify(b.decisions) && JSON.stringify(a.frames) === JSON.stringify(b.frames) && JSON.stringify(a.samples) === JSON.stringify(b.samples));
@@ -256,7 +258,7 @@ if (data) {
   check('4 imitation: same network shape as the policy', r.params === paramCount(SHAPE) && SHAPE.sizes[0] === N_OBS + N_OPT_FEATS);
   const demos = setSamples(loadSet(currentKey()));
   check('4 data set: cached by a key over the included replays and the skills version', data.key === currentKey() && demos.length === r.train.samples + r.holdout.samples, `${demos.length} demonstrations, key ${data.key}`);
-} else console.log('SKIP  4 imitation: no replays in "Training data/"');
+} else console.log('SKIP  4 imitation: no replay in "Training data/" that DSIM re-simulates (a 3D replay of this SIM_VERSION)');
 
 // ---- 5. learning components --------------------------------------------------------------------------------
 {
@@ -279,7 +281,9 @@ if (data) {
       return { obs: Float32Array.from({ length: N_OBS }, () => rng() * 2 - 1), feats, k, y: 0, q };
     });
   const start = fromB64(ensureGreedy().genome);
-  const fit = fitLessons(SHAPE, start, mk(3000), mk(500), [], { epochs: 30, lr: 0.002, anchor: 0.001, demoWeight: 0, seed: 1 });
+  // (the lesson fit's own 60 epochs, defaultConfig: from the network distilled in DSIM 3D, 30 reached
+  // 49 % — the 2D one's 63 % had been marginal already)
+  const fit = fitLessons(SHAPE, start, mk(3000), mk(500), [], { epochs: defaultConfig('check').epochs, lr: 0.002, anchor: 0.001, demoWeight: 0, seed: 1 });
   check('5 lessons: the network learns to prefer options by their what-if points (held-out regret falls)', fit.report.regret < 0.5 * fit.report.startRegret && fit.report.hit > 0.6 && fit.report.hit > fit.report.startHit, `regret ${fit.report.startRegret.toFixed(2)} → ${fit.report.regret.toFixed(2)} pts, best option ${(100 * fit.report.startHit).toFixed(0)}% → ${(100 * fit.report.hit).toFixed(0)}%`);
   const j = judge(SHAPE, fit.p, mk(200));
   check('5 lessons: the style genes (skills) are never touched by a gradient', fit.p.subarray(styleOffset(SHAPE)).every((v, i) => v === start[styleOffset(SHAPE) + i]) && j.regret >= 0);
@@ -474,9 +478,11 @@ for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(RO
   const F = E.fork();
   const G = E.fork();
   (G.brains[1] as unknown as { mode: string }).mode = 'idle'; // a branch played differently
-  while (E.step());
+  // (copies first, as every what-if plays: a 3D copy borrows its match's engine until the match
+  // steps on — harness/dsim.ts registerFork)
   while (F.step());
   while (G.step());
+  while (E.step());
   check('10 alliance: a copy of a two-robot match played on finishes bit-identical; a branch played differently leaves it untouched', worldResult(E.w).hash === worldResult(F.w).hash && E.reward() === F.reward() && worldResult(G.w).hash !== worldResult(E.w).hash);
   // every partner plays its part
   const kinds: PartnerKind[] = ['real', 'sniper', 'hauler', 'skimmer', 'parker', 'idle'];
@@ -582,7 +588,9 @@ for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(RO
   check('11 plan: playing a plan is deterministic (the same draw twice → the same AUTO points)', again[0] === again[1]);
   // the search beats the robot's own AUTO, on fresh draws
   const pool = new WorkerPool(12);
-  const solo = await planAuto(P0, pool, AUTO_QUICK);
+  // (alone, a moderate budget: in DSIM 3D with AUTO in its own half, the quick one's shallow beam
+  // found +2.9 over the robot's own AUTO, this one +6.2 — the gain lies a few jobs deep)
+  const solo = await planAuto(P0, pool, { ...AUTO_QUICK, beam: 8, branch: 4, draws: 4, finalists: 4, finalDraws: 24 });
   const joint = await planAuto({ profile: V1, start: 'F3', partner: 'real', partnerStart: 'BOTTOM_AUD', mode: 'joint', seed: 1 }, pool, AUTO_QUICK);
   const best = await planAuto({ profile: V1, start: 'F3', partner: 'skimmer', partnerStart: 'BOTTOM_AUD', mode: 'best', seed: 1 }, pool, AUTO_QUICK);
   pool.close();
@@ -590,7 +598,7 @@ for (const n of ['_check-a', '_check-f', '_check-g', '_check-h']) rmSync(join(RO
   // AUTOs are about as good as a joint plan gets — before, the plans' gain came from the far half —
   // so what holds there is the planner's promise: never a plan ranked below the robots' own AUTO)
   const rk = (m: { mean: number; cvar10: number }): number => 0.5 * m.mean + 0.5 * m.cvar10;
-  check('11 planner: a searched AUTO beats the robot\'s own AUTO on fresh draws alone; planned jointly with a second REAL-v1 it never ranks below their own AUTOs (mean and worst tenth)', solo.nominal.mean > solo.baseline.mean + 5 && rk(joint.nominal) >= rk(joint.baseline) - 1e-9, `alone ${solo.nominal.mean.toFixed(1)} vs ${solo.baseline.mean.toFixed(1)}, joint ${joint.nominal.mean.toFixed(1)} (worst tenth ${joint.nominal.cvar10.toFixed(1)}) vs ${joint.baseline.mean.toFixed(1)} (${joint.baseline.cvar10.toFixed(1)}) (quick budget)`);
+  check('11 planner: a searched AUTO beats the robot\'s own AUTO on fresh draws alone; planned jointly with a second REAL-v1 it never ranks below their own AUTOs (mean and worst tenth)', solo.nominal.mean > solo.baseline.mean + 5 && rk(joint.nominal) >= rk(joint.baseline) - 1e-9, `alone ${solo.nominal.mean.toFixed(1)} vs ${solo.baseline.mean.toFixed(1)}, joint ${joint.nominal.mean.toFixed(1)} (worst tenth ${joint.nominal.cvar10.toFixed(1)}) vs ${joint.baseline.mean.toFixed(1)} (${joint.baseline.cvar10.toFixed(1)}) (joint: quick budget)`);
   check('11 planner: a joint plan plans both robots; a best response only ours (the partner runs its own AUTO)', joint.plan[1].length > 0 && best.plan[1].length === 0 && best.taken.every((q) => q.robot === 0) && joint.taken.some((q) => q.robot === 1));
   check('11 planner: every result carries its worst tenth, robots drawn from the range, and an exact replay of AUTO', [solo, joint, best].every((r) => r.nominal.cvar10 <= r.nominal.mean && r.sampled.n > 0 && !!r.frames && r.frames.f.length > 800 && r.frames.f.every((q) => q.m[0] === 'pre' || q.m[0] === 'auto' || q.m[0] === 'transition')));
   // the playbook: its grid, a build, storage, the studio's endpoints
@@ -841,7 +849,7 @@ const s2a = runEpisode(s2args(null));
   check('16 robots: every profile is listed with its build in words and validated over its whole range', robots.length >= 3 && robots.every((r) => r.ok && r.build.includes('·')), robots.map((r) => `${r.id}: ${r.build}`).join(' | '));
   const v1 = loadProfile(join(ROOT, 'profiles/real-v1.json'));
   const ins = inspectRobot(v1);
-  check('16 robots: DSIM\'s own floors and ceilings (REAL-v1: mass ≥ 23.3 lb), its smallest and largest robot, its measured envelope and start', ins.floors['spec.massLb'].min === 23.3 && ins.small.length === 13.5 && ins.big.width === 17 && ins.envelope.quality === 'measured' && ins.envelope.spots.north.length > 100 && ins.start.x > 55);
+  check('16 robots: DSIM\'s own floors and ceilings (REAL-v1: mass ≥ 23 lb in DSIM Act 2), its smallest and largest robot, its measured envelope and start', ins.floors['spec.massLb'].min === 23 && ins.small.length === 13.5 && ins.big.width === 17 && ins.envelope.quality === 'measured' && ins.envelope.spots.north.length > 100 && ins.start.x > 55);
   const bad = JSON.parse(JSON.stringify(v1));
   bad.limits.fireRate.min = 20;
   bad.spec.massLb.min = 10;

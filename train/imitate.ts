@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { BB, bb, coerce, init, type Replay } from '../harness/dsim';
+import { BB, C, PHYSICS, bb, coerce, init, type Replay } from '../harness/dsim';
 import { loadProfile, resolve, type Resolved } from '../harness/profiles';
 import { ReplayPlayer } from '../dsim-main/src/sim/replay';
 import { mulberry32, seedOf } from '../harness/rng';
@@ -153,6 +153,31 @@ export interface DataFile {
   name: string;
   size: number;
   included: boolean;
+  /** does it re-simulate exactly in this DSIM: recorded in its version and its physics. A replay from
+   * before DSIM Act 2 (its 2D pipeline, an older sim version) replays as DRIFT — the team's own
+   * 730–819-point runs re-simulate to 56–151 — so it can be neither a demonstration nor a benchmark */
+  replayable: boolean;
+  why?: string;
+}
+const replayCheck = new Map<string, { replayable: boolean; why?: string }>();
+/** read a replay's header: the sim version and physics it was recorded in (cached per file size and time) */
+function replayableHere(name: string, size: number, mtime: number): { replayable: boolean; why?: string } {
+  const k = `${name}:${size}:${mtime}`;
+  const hit = replayCheck.get(k);
+  if (hit) return hit;
+  let out: { replayable: boolean; why?: string };
+  try {
+    const r = JSON.parse(readFileSync(join(DATA_DIR, name), 'utf8')) as { sim?: number; physics?: string };
+    const phys = r.physics ?? '2d';
+    out =
+      r.sim === C.SIM_VERSION && phys === PHYSICS
+        ? { replayable: true }
+        : { replayable: false, why: `recorded in DSIM sim ${r.sim ?? '?'} (${phys === '2d' ? 'the 2D physics' : phys}), this DSIM is sim ${C.SIM_VERSION} (${PHYSICS}): it no longer re-simulates` };
+  } catch (e) {
+    out = { replayable: false, why: `not a readable replay: ${(e as Error).message.slice(0, 80)}` };
+  }
+  replayCheck.set(k, out);
+  return out;
 }
 export interface SetFile {
   name: string;
@@ -188,7 +213,11 @@ export function dataFiles(): DataFile[] {
   return readdirSync(DATA_DIR)
     .filter((f) => f.endsWith('.json'))
     .sort()
-    .map((f) => ({ name: f, size: statSync(join(DATA_DIR, f)).size, included: !ex.has(f) }));
+    .map((f) => {
+      const st = statSync(join(DATA_DIR, f));
+      const rc = replayableHere(f, st.size, st.mtimeMs);
+      return { name: f, size: st.size, included: rc.replayable && !ex.has(f), ...rc };
+    });
 }
 /** which data set the included replays make (changes with the files, the exclusions and the skills) */
 export function currentKey(): string {

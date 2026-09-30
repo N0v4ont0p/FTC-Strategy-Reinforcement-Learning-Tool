@@ -261,9 +261,12 @@ const rep = <T,>(n: number, x: T): T[] => Array.from({ length: n }, () => x);
   const gh = new Guards(RULES_CONSERVATIVE);
   gh.observe(wh, new Map([[0, cmd({ bbNectar: true })]]));
   check('8 G426 (conservative): a press that reached DSIM in AUTO is flagged', (gh.report().violations['G426-hp-entry-in-auto'] ?? 0) === 1);
-  wh.events.push('MAJOR — test G407 CONTROL of 5+ elements');
+  wh.events.push('WARNING - BLUE (G407 CONTROL of 5+ elements)');
   gh.observe(wh, new Map());
-  check('8 G407: DSIM warning is counted as a violation', (gh.report().violations['G407-control-over-4'] ?? 0) === 1);
+  gh.observe(wh, new Map()); // (DSIM keeps the event in world.events: read once, not every tick)
+  wh.events.push('MAJOR FOUL - RED +15 (G407 STRATEGIC CONTROL of 5+ elements)');
+  gh.observe(wh, new Map());
+  check('8 G407: each DSIM warning is counted once as a violation (DSIM scores its own MAJOR)', (gh.report().violations['G407-control-over-4'] ?? 0) === 1 && (gh.report().byAlliance.blue?.['G407-control-over-4'] ?? 0) === 1);
 }
 
 // ---- 9. determinism with every layer on ----------------------------------------------------------

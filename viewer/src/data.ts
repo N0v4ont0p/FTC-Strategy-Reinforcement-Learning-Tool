@@ -41,7 +41,8 @@ export interface RunState {
 }
 export interface DataInfo {
   dir: string;
-  files: { name: string; size: number; included: boolean; info?: { score: number; events: number; samples: number; unmatched: number; error?: string } }[];
+  /** replayable: it re-simulates exactly in this DSIM (recorded in its version and physics); why: when not */
+  files: { name: string; size: number; included: boolean; replayable?: boolean; why?: string; info?: { score: number; events: number; samples: number; unmatched: number; error?: string } }[];
   latest: string;
   built: boolean;
   fitted: { agree: number; chance: number; holdout: string; samples: number } | null;
@@ -237,6 +238,8 @@ export interface HomeStatusV {
   activity: { actors: number; learning: boolean; evaluating: { id: number; done: number; total: number } | null };
   lastPromotion: string | null;
   searchExam: { time: string; champion: number; n: number; alone: number; search: number; gain: MeanCiV } | null;
+  /** a run made by an older version (another sim), kept under `from`; this run's learner began from its champion */
+  carried: { from: string; version: number; champion: number; exam: number | null; seeded: boolean; time: string } | null;
   problems: string[];
   log: string[];
 }

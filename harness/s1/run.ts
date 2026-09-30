@@ -66,14 +66,30 @@ function posesFor(name: string): Pose[] {
   P.push({ name: 'LZ', x: BB.BB_HALF_X - rear - 0.5, y: LZ_Y, h: Math.PI, n: { x: -1, y: 0 } }); // back into blue's LOADING ZONE
   P.push({ name: 'RLZ', x: -BB.BB_HALF_X + rear + 0.5, y: -LZ_Y, h: 0, n: { x: 1, y: 0 } }); // red's zone (solo free-preload quirk)
   // back mouth on FLOWER feet (APPROX; S2 docks exactly)
-  P.push({ name: 'F3R', x: BB.BB_HALF_X - foot - rear - 0.3, y: 24, h: Math.PI, n: { x: -1, y: 0 } });
-  P.push({ name: 'F4R', x: 24, y: -BB.BB_HALF_Y + foot + rear + 0.3, h: Math.PI / 2, n: { x: 0, y: 1 } });
-  P.push({ name: 'F1R', x: -BB.BB_HALF_X + foot + rear + 0.3, y: -24, h: 0, n: { x: 1, y: 0 } });
-  P.push({ name: 'F2R', x: -24, y: BB.BB_HALF_Y - foot - rear - 0.3, h: -Math.PI / 2, n: { x: 0, y: -1 } });
-  P.push({ name: 'GARDEN', x: 60, y: BB.BB_HALF_Y - front - 2, h: Math.PI / 2, n: { x: 0, y: -1 } }); // front bumper toward blue's GARDEN
+  const [F1, F2, F3, F4] = BB.BB_FLOWERS;
+  P.push({ name: 'F3R', x: BB.BB_HALF_X - foot - rear - 0.3, y: F3.y, h: Math.PI, n: { x: -1, y: 0 } });
+  P.push({ name: 'F4R', x: F4.x, y: -BB.BB_HALF_Y + foot + rear + 0.3, h: Math.PI / 2, n: { x: 0, y: 1 } });
+  P.push({ name: 'F1R', x: -BB.BB_HALF_X + foot + rear + 0.3, y: F1.y, h: 0, n: { x: 1, y: 0 } });
+  P.push({ name: 'F2R', x: F2.x, y: BB.BB_HALF_Y - foot - rear - 0.3, h: -Math.PI / 2, n: { x: 0, y: -1 } });
+  P.push({ name: 'GARDEN', x: (BB.BB_GARDEN.blue.x0 + BB.BB_GARDEN.blue.x1) / 2, y: BB.BB_HALF_Y - front - 2, h: Math.PI / 2, n: { x: 0, y: -1 } }); // front bumper toward blue's GARDEN
+  // where a robot goes for a spill: the nearest spot (1 in grid) it can turn a full circle in, to
+  // where the spill comes to rest — in DSIM's 3D solve a spill rolls on to the side wall, where no
+  // robot centre fits
+  const turnSafe = (q: Vec2): boolean => Array.from({ length: 24 }, (_, k) => (k * Math.PI) / 12).every((hh) => placeable(spec, q, hh));
+  const standNear = (c: Vec2): Vec2 => {
+    let best: Vec2 | null = null;
+    for (let dx = -40; dx <= 40; dx++)
+      for (let dy = -40; dy <= 40; dy++) {
+        const q = { x: Math.round(c.x) + dx, y: Math.round(c.y) + dy };
+        if ((!best || Math.hypot(q.x - c.x, q.y - c.y) < Math.hypot(best.x - c.x, best.y - c.y)) && turnSafe(q)) best = q;
+      }
+    if (!best) throw new Error(`${name}: nowhere to stand near the spill at (${c.x.toFixed(1)}, ${c.y.toFixed(1)})`);
+    return best;
+  };
   for (const side of ['north', 'south'] as const) {
     const c = centroid(side);
-    P.push({ name: side === 'north' ? 'SPILL_N' : 'SPILL_S', x: c.x, y: c.y, h: null });
+    const st = standNear(c);
+    P.push({ name: side === 'north' ? 'SPILL_N' : 'SPILL_S', x: st.x, y: st.y, h: null });
     const cellY = (side === 'north' ? 1 : -1) * BB.BB_HIVE_CELL_DY;
     const scoring = env[`REAL-v0:${side}`].filter((q) => q.entered);
     const pick = (target: Vec2, tag: string): void => {

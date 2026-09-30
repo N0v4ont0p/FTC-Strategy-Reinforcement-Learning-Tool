@@ -21,11 +21,14 @@ type Side = 'north' | 'south';
 /** the S1 grid: 2 in, the whole field */
 const GRID = Array.from({ length: 71 }, (_, i) => -70 + 2 * i);
 
+/** the solve an envelope was measured in: DSIM Act 2's 3D physics (a shot that clips a cell's wall
+ * bounces out). Part of every key, so an envelope measured in DSIM's 2D pipeline is never used. */
+const MEASURED_IN = 'dsim-act2-3d';
 /** what makes two builds shoot alike: the launcher and where it and the intakes sit, and the size */
 export function familyKey(spec: RobotSpec): string {
   const l = bbLauncherOf(spec, 0);
   const lift = bbLiftOf(spec);
-  const id = JSON.stringify({ k: l.kind, m: l.mount, m2: l.mount2 ?? null, hood: l.hoodDeg, i: spec.intakeMount ?? null, lift: lift ? lift.mount : null, L: spec.length, W: spec.width });
+  const id = JSON.stringify({ phys: MEASURED_IN, k: l.kind, m: l.mount, m2: l.mount2 ?? null, hood: l.hoodDeg, i: spec.intakeMount ?? null, lift: lift ? lift.mount : null, L: spec.length, W: spec.width });
   return createHash('sha1').update(id).digest('hex').slice(0, 12);
 }
 

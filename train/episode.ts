@@ -16,7 +16,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { C, DT, Match, bb, coerce, recordScore, verifyReplay, worldResult, type RobotCommand, type RobotSpec, type Seat, type World } from '../harness/dsim';
+import { C, DT, Match, bb, coerce, recordScore, registerFork, verifyReplay, worldResult, type RobotCommand, type RobotSpec, type Seat, type World } from '../harness/dsim';
 import { loadProfile, resolve, type Resolved } from '../harness/profiles';
 import { MatchFilter, HUMAN, ORACLE, RULES_CONSERVATIVE } from '../harness/filters';
 import { Perturber } from '../harness/perturb';
@@ -427,8 +427,10 @@ export class Episode {
     return s - this.fouls;
   }
 
-  /** a copy of the match as it is now, without any of the outputs (a what-if branch) */
-  fork(): Episode {
+  /** a copy of the match as it is now, without any of the outputs (a what-if branch). A copy that
+   * will step borrows this match's 3D engine on its first step (harness/dsim.ts registerFork: a
+   * save of this tick); a `probe` only decides (decideOnly) and never steps. */
+  fork(probe = false): Episode {
     const keep = this.out;
     const rec = this.m.rec;
     const log = this.brain.log;
@@ -438,13 +440,25 @@ export class Episode {
     this.brain.log = undefined;
     this.brain.samples = undefined;
     try {
-      return deepClone(this);
+      const c = deepClone(this);
+      if (!probe) registerFork(this.w, c.w);
+      return c;
     } finally {
       this.out = keep;
       this.m.rec = rec;
       this.brain.log = log;
       this.brain.samples = samples;
     }
+  }
+  /** free the match's 3D engine (harness/dsim.ts `dispose`): this episode will not step again */
+  dispose(): void {
+    this.m.dispose();
+  }
+  /** THE DECISION PROBE: every brain acts on the world as it is now — exactly the first half of a
+   * step (Match.step asks the controller before DSIM steps) — and nothing is simulated, so a probe
+   * never builds a 3D engine. Call it on a fork: the brains' memory moves on. */
+  decideOnly(): void {
+    this.act(this.w);
   }
   /** fresh luck from here on — DSIM's own draws, intake failures and misses — never the real future */
   reseed(seed: number): void {
@@ -653,15 +667,19 @@ export class Episode {
    * values what is left of the match (a match that ends, or a robot that dies, is valued as it is) */
   whatIf(key: string, tick: number, luck: number, horizon: number, value: Mlp | null, commit: boolean, who = 0): number {
     const b = this.fork();
-    b.reseed(luck);
-    b.brains[who].force = { key, tick, commit };
-    const r0 = b.reward();
-    const end = b.w.tick + horizon;
-    // after the buzzer nothing is decided any more, but points still land: play the settle out
-    while ((b.w.tick < end || b.w.match.phase === 'post') && b.step());
-    let q = b.reward() - r0;
-    if (!b.done && value) q += b.valueNow(value);
-    return q;
+    try {
+      b.reseed(luck);
+      b.brains[who].force = { key, tick, commit };
+      const r0 = b.reward();
+      const end = b.w.tick + horizon;
+      // after the buzzer nothing is decided any more, but points still land: play the settle out
+      while ((b.w.tick < end || b.w.match.phase === 'post') && b.step());
+      let q = b.reward() - r0;
+      if (!b.done && value) q += b.valueNow(value);
+      return q;
+    } finally {
+      b.dispose();
+    }
   }
   /** the predictor's points still to come from here */
   valueNow(value: Mlp): number {
@@ -766,10 +784,11 @@ export class Episode {
       while (fi < forces.length && forces[fi][0] < this.w.tick) fi++;
       if (fi < forces.length && forces[fi][0] === this.w.tick) this.brain.force = { key: forces[fi][1], tick: forces[fi++][0], commit: false };
       if (watch && (ph === 'auto' || ph === 'teleop') && this.w.tick >= win[0] && this.w.tick < win[1]) {
-        // will the brain decide on this tick? A fork steps once to find out (a job can end at any tick)
+        // will the brain decide on this tick? A fork acts once to find out (a job can end at any tick);
+        // it decides before DSIM steps, so the probe simulates nothing (decideOnly)
         const t = this.w.tick;
-        const probe = this.fork();
-        probe.step();
+        const probe = this.fork(true);
+        probe.decideOnly();
         const d = probe.brain.last;
         if (d && d.tick === t) {
           const L = a.lessons;
@@ -819,8 +838,8 @@ export class Episode {
         // the alliance's options are searched with our robot's choice already made (a fresh probe
         // when ours was just changed, so the partner decides on the very list it will see)
         if (a.search2 && a.searchPartner && this.brains[1]) {
-          const pr = this.brain.force ? this.fork() : probe;
-          if (pr !== probe) pr.step();
+          const pr = this.brain.force ? this.fork(true) : probe;
+          if (pr !== probe) pr.decideOnly();
           const d2 = pr.brains[1].last;
           if (d2 && d2.tick === t && d2.at === 'begin') {
             const res = this.searchHalving(d2, a.search2, value, seedOf(a.seed, 'search2', 'partner'), 1);
@@ -930,7 +949,12 @@ export class Episode {
 }
 
 export function runEpisode(a: EpisodeArgs): EpisodeResult {
-  return new Episode(a).run();
+  const ep = new Episode(a);
+  try {
+    return ep.run();
+  } finally {
+    ep.dispose();
+  }
 }
 
 export const MATCH_TICKS = Math.round((C.PRE_COUNTDOWN + C.AUTO_DURATION + C.TRANSITION_DURATION + C.TELEOP_DURATION) / DT);

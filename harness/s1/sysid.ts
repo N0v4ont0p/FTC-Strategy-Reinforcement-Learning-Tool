@@ -1,6 +1,6 @@
 // S1 SYSTEM IDENTIFICATION: drive the real DSIM robot with step inputs in a clear lab world and
 // compare, tick by tick, with the model in drive.ts. The model is only trusted where this agrees.
-import { biobuzzStep, cmd, DT, labWorld, type RobotCommand, type RobotSpec, type World } from '../dsim';
+import { biobuzzStep, cmd, DT, dispose, labWorld, type RobotCommand, type RobotSpec, type World } from '../dsim';
 import { effective, motorStep } from './drive';
 
 /** DSIM's reported position trails a v_new·dt integration by a constant POS_LAG·Δv (measured
@@ -31,6 +31,7 @@ function drive(w: World, seq: { c: RobotCommand; n: number }[]): { vx: number; v
       const r = w.robots[0];
       out.push({ vx: r.vel.x, vy: r.vel.y, w: r.angVel, x: r.pos.x, y: r.pos.y, h: r.heading });
     }
+  dispose(w); // each case drives one fresh world once
   return out;
 }
 

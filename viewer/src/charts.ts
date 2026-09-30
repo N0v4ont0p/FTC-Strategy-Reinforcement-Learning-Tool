@@ -3,8 +3,10 @@
 // labelled in text ink. Every chart also has a table view (historyTable).
 import type { GenSummary } from './data';
 import { OPTIONS } from './data';
+import { color } from './ui';
 
-const css = (v: string): string => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+/** the palette, from the cached theme (ui.ts color): no getComputedStyle inside a draw */
+const css = (v: string): string => color(v);
 const tip = (): HTMLElement => document.getElementById('tip')!;
 
 function setup(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; w: number; h: number } {
@@ -63,6 +65,7 @@ export class LineChart<T> {
       hideTip();
       this.draw();
     });
+    // (a chart on a hidden page is drawn when its page is shown: the observer fires as it gets a size)
     new ResizeObserver(() => this.draw()).observe(canvas);
   }
   set(rows: T[], refs: RefLine[] = this.refs): void {
@@ -110,18 +113,19 @@ export class LineChart<T> {
     return { L, R, T, B, lo, hi, x, y, n };
   }
   draw(): void {
+    if (!this.canvas.clientWidth) return; // hidden: drawn when shown
     const { ctx, w, h } = setup(this.canvas);
     const H = this.rows;
     const g = this.geom(w, h);
     const d = this.o.digits ?? 1;
     ctx.font = `11px ${css('--f-mono')}`;
-    ctx.fillStyle = css('--smoke');
+    ctx.fillStyle = css('--dust');
     if (!H.length && !this.refs.length) {
       ctx.textAlign = 'center';
       ctx.fillText(this.o.empty ?? 'press Start — the first generation appears here', w / 2, h / 2);
       return;
     }
-    ctx.strokeStyle = '#2c241c';
+    ctx.strokeStyle = css('--rule');
     ctx.lineWidth = 1;
     for (let k = 0; k <= 3; k++) {
       const v = g.lo + ((g.hi - g.lo) * k) / 3;
@@ -136,24 +140,24 @@ export class LineChart<T> {
     for (const r of this.refs) {
       const yy = Math.round(g.y(r.value)) + 0.5;
       ctx.save();
-      ctx.strokeStyle = css('--ash');
+      ctx.strokeStyle = css('--dust');
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.moveTo(g.L, yy);
       ctx.lineTo(w - g.R, yy);
       ctx.stroke();
       ctx.restore();
-      ctx.fillStyle = css('--smoke');
+      ctx.fillStyle = css('--mist');
       ctx.textAlign = 'left';
       ctx.fillText(r.label, g.L + 4, yy - 4);
     }
     if (!H.length) {
-      ctx.fillStyle = css('--smoke');
+      ctx.fillStyle = css('--dust');
       ctx.textAlign = 'center';
       ctx.fillText(this.o.empty ?? 'press Start — the first generation appears here', (w - g.R + g.L) / 2, h / 2);
       return;
     }
-    ctx.fillStyle = css('--smoke');
+    ctx.fillStyle = css('--dust');
     ctx.textAlign = 'left';
     ctx.fillText(this.o.xLabel(H[0]), g.L, h - 3);
     ctx.textAlign = 'right';
@@ -201,12 +205,12 @@ export class LineChart<T> {
     for (const { s, v, y } of ends) {
       ctx.fillStyle = col(s.color);
       ctx.fillRect(w - g.R + 6, y - 1, 8, 2);
-      ctx.fillStyle = css('--wax');
+      ctx.fillStyle = css('--chalk');
       ctx.fillText(`${s.label} ${v.toFixed(d)}`, w - g.R + 17, y + 4);
     }
     if (this.hover >= 0 && this.hover < H.length) {
       const xx = g.x(this.hover);
-      ctx.strokeStyle = css('--ash');
+      ctx.strokeStyle = css('--rule-2');
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(xx, g.T);
@@ -216,7 +220,7 @@ export class LineChart<T> {
         const v = this.v(H[this.hover], s);
         if (v === null) continue;
         ctx.fillStyle = col(s.color);
-        ctx.strokeStyle = css('--comb');
+        ctx.strokeStyle = css('--deck');
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(xx, g.y(v), 4, 0, Math.PI * 2);
@@ -261,6 +265,7 @@ export class StackChart {
     return this.hist.slice(-Math.max(1, Math.floor(w / 3)));
   }
   draw(): void {
+    if (!this.canvas.clientWidth) return;
     const { ctx, w, h } = setup(this.canvas);
     const S = this.shown(w);
     if (!S.length) return;

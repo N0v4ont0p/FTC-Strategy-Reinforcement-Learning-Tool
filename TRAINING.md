@@ -6,6 +6,52 @@ human-player button, park, and run the **tip cycle** by the HIVE (your replays' 
 learns is **what to do next**, and **how** its skills are tuned. It learns from every decision it
 makes, with one clear reward.
 
+## DSIM Act 2: every match is the 3D solve (2026-09-30)
+
+DSIM (github.com/genius0412/dsim, `main` d8f1fa9f, 2026-09-28; BIOBUZZ Act 2 released 2026-09-24)
+solves BIOBUZZ in 3D (Rapier, deterministic build), the way every online match is played: elements,
+the HIVE's see-saw trays and the FLOWERs are rigid bodies, so a shot goes in or clips the cell and
+bounces out, and a spill rolls across the tiles to a wall. It is pinned in `harness/dsim-pin.json`;
+its source is never edited. What changed for us:
+
+- **The field** is 70.674 in to the wall (CAD), and 24 POLLEN start touching one: each GARDEN line and a
+  missing robot's four preloads in its loading zone. The robot takes a wall element square to the wall
+  (the pose slides back inside the field; DSIM's rollers take a wall-pinned element where it lies);
+  before this it found no legal pose for any of them and stood still for most of AUTO.
+- **Intakes are a draw-in roller model.** A sweeper cannot pull POLLEN out of a FLOWER (side rollers and
+  a deployed ramp can), so REAL-v1 no longer goes to FLOWERs for POLLEN; it still places NECTAR on
+  them. The Robot tab says what a build's intake reaches.
+- **Shots are physical.** Every build's shooting envelope was measured again in 3D (the full load of 4
+  from all four headings; a spot counts only if every element settles in the cell: `outputs/envelopes/`).
+  The robot fires only from its envelope and never while closing on the cell faster than 10 in/s.
+  After a tip, the rising tray takes shots from 0.5 s after the release (measured: shots fired before
+  that went in 2 times in 28, after it 22 in 33). Layer C (the profile's launcher accuracy, 85 % for
+  REAL-v1) still makes its misses on top: DSIM's launcher has no noise.
+- **G407 counts herded elements** (the hopper plus any element pushed along). With a full hopper the
+  robot drives with its intake end trailing, backs straight off an element left in its mouth, and
+  drives round loose elements instead of into them: 31 → 7 fouls in 24 matches. Each DSIM warning is
+  one violation for us (a MAJOR, as always); DSIM scores its own STRATEGIC MAJOR itself.
+- **Guards**: an element DSIM's rollers are drawing in is not a strike, and one that is then picked up
+  and shot is not a strike's profit (that was 15–20 false points a match). DSIM keeps every event of a
+  match in one list; the guards now read only each tick's new ones.
+- **Pickups** are counted by element, not by the hopper's count (firing on the move kept the count
+  level, so most "empty trips" had taken their element). A line-up spot where the robot cannot turn
+  (its corners on a wall) is skipped like any other stuck target.
+- **Copies of a match are exact again.** DSIM keeps one Rapier engine per World object, so a copy's
+  first step used to build a fresh engine from the JSON and drift from the match. A copy now borrows
+  its match's engine through DSIM's own rollback API (`saveEngineState` / `rewindEngineTo`, restored to
+  the copy's tick) and gives it back the same way; a copy played on finishes bit-identical, and every
+  what-if is played before its match moves on (`harness/dsim.ts`).
+- **Measured, the no-learning REAL-v1 alone** (48 full matches): 202 points (206.9 DSIM score, 0.3
+  G407 a match). Numbers elsewhere in this document were measured in DSIM's older 2D solve unless they
+  say 3D; there REAL-v1 scored about 375.
+- **Your replays** are recorded in the 2D solve (SIM_VERSION 2): they no longer re-simulate, so imitation
+  uses none of them until a 3D replay is added. Training data lists each one with why.
+- **Runs**: a continuous run from before (version 3) is kept as `<robot>-v3` (Home says so) and a new
+  run starts, its learner seeded from the old champion's network. Playbook and team-play entries
+  planned in 2D show as **outdated** (the printed playbook warns on its cover) and are planned again on
+  the next build.
+
 ## The reward
 
 **One number, the same everywhere: DSIM's score for the match, minus the foul points of the rules DSIM
@@ -171,9 +217,16 @@ round.
 
 ## The studio at a glance
 
-- **Header**: a pill with what is training (robot · training/paused · exam · champion) — click it for
-  Home. The older generational trainer's controls and tabs hide behind **Generational trainer**
-  (they show by themselves while one of its runs trains).
+- **Layout**: the field on the left, always in view; the pages on the right (Home, Robot, Playbook,
+  Team plays, Routes, Mistakes, Log in the top bar). Over the field sits the **scoreboard**, like an FTC
+  audience display: the phase and its clock, the blue alliance's score, the job the robot is on, the
+  HIVE's tips as honeycomb cells and the hopper. Under it: play/pause (**Space**), back and forward
+  5 s (**← →**), a slider, 1× · 2× · 4× (remembered) and a caption saying what is playing.
+- **Nothing is drawn when nothing moves**: the field draws while a match plays or after a change, never
+  in a hidden tab, and pages redraw only what changed. An idle studio does no work.
+- **Header**: a pill with what is training (robot · training/paused · exam · champion), or a search's
+  progress while one runs — click it for its page. **···** holds the older generational trainer (its
+  controls, tabs and field views: LIVE, a generation's best, its champion), DSIM, and Quit.
 - **Home** opens with **Ready to train**, a checklist: the robot is valid, its shooting envelope is
   measured, the studio runs by itself (the LaunchAgent), notifications are on, training has started,
   the AUTO playbook is built — each with the button that fixes it. **Watch the champion** replays
@@ -237,8 +290,9 @@ something on the real robot, narrow its range here.
   draft keeps the build exactly, puts mass and motor speed in a range inside DSIM's floors, and takes
   the rest from a robot you choose.
 - **Edit** every range (lowest · nominal · highest). Under each build number a bar shows **what DSIM
-  will actually build** (its floor and ceiling for that build — REAL-v1 cannot weigh under 23.3 lb);
+  will actually build** (its floor and ceiling for that build — REAL-v1 cannot weigh under 23 lb);
   a range outside it turns red.
+- **Its intake**: what DSIM builds (sweeper, side rollers, ramp) and whether it reaches into a FLOWER.
 - **Check**: every edit is validated over the whole range (the nominal robot, each end, all-min,
   all-max and 256 draws) — the same check that makes training refuse a bad robot.
 - **See it**: the build drawn by DSIM with the range's smallest and largest footprint, and its
@@ -460,6 +514,11 @@ network learns when.
 | Background | half the cores, 10 lesson matches |
 
 ## Honest limits
+
+- **DSIM 3D is a different game from 2D**: shots really miss, spills roll to the walls, elements are
+  pushed around. Scores are lower than in 2D (the no-learning REAL-v1 alone: ~202 against ~375), and
+  every result measured in 2D (above, in `runs/` from before Act 2, in outdated playbook entries) is
+  only a guide until it is measured again.
 
 - **Luck is large:** two robots on the same match differ by about ±40 points. The race needs many
   matches to prove a small gain, so the champion changes only now and then. A flat champion line

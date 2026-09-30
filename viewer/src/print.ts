@@ -39,11 +39,13 @@ function selected(): PlaybookEntryV[] {
 
 function cover(list: PlaybookEntryV[], no: Map<string, number>): string {
   const r = robots.find((x) => x.file === book.profile);
+  const stale = list.filter((e) => e.stale).length;
   const best = PARTNER_ORDER.map((k) => list.filter((e) => e.problem.partner === k).sort((a, b) => b.nominal.mean - a.nominal.mean)[0]).filter(Boolean);
   return `<section class="sheet cover">
     <div class="brand"><span class="mark"></span><h1>AUTO Playbook · ${esc(r?.id ?? book.name)}</h1></div>
     <p class="who">${esc(r?.build ?? '')}</p>
     <p class="date">${new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })} · ${list.length} plans · every number is a DSIM score</p>
+    ${stale ? `<p class="stale"><b>${stale === list.length ? 'Every plan here is' : `${stale} of these plans are`} outdated</b>: planned under older rules (DSIM's old physics, an older AUTO rule or another shooting zone), so the points and paths may no longer hold. Build the playbook again in the studio before relying on ${stale === 1 ? 'it' : 'them'}.</p>` : ''}
     <h2>The best plan beside each partner</h2>
     <table class="rec"><thead><tr><th>Partner</th><th>We start</th><th>They start</th><th class="n">AUTO pts</th><th class="n">worst tenth</th><th class="n">vs no plan</th><th class="n">plan</th></tr></thead><tbody>${best
       .map((e) => `<tr><td>${esc(PARTNER[e.problem.partner] ?? e.problem.partner)}</td><td>${esc(SHORT[e.problem.start] ?? e.problem.start)}</td><td>${esc(e.problem.partnerStart ? (SHORT[e.problem.partnerStart] ?? e.problem.partnerStart) : '—')}</td><td class="n"><span class="pts">${e.nominal.mean.toFixed(1)}</span></td><td class="n">${e.nominal.cvar10.toFixed(1)}</td><td class="n">${sgn(e.nominal.mean - e.baseline.mean)}</td><td class="n">#${no.get(e.key)}</td></tr>`)
@@ -69,7 +71,7 @@ function entry(e: PlaybookEntryV, n: number): string {
   const up = e.nominal.mean - e.baseline.mean;
   return `<section class="sheet entry" data-key="${esc(e.key)}">
     <div class="head"><div><h3>${esc(title(e))}</h3><div class="sub">${esc(subtitle(e))}</div></div><span class="no">#${n}</span></div>
-    <div class="chips"><span class="chip">AUTO <b>${e.nominal.mean.toFixed(1)}</b> ± ${e.nominal.ci95.toFixed(1)}</span><span class="chip">worst tenth <b>${e.nominal.cvar10.toFixed(1)}</b></span><span class="chip${up > 0 ? ' up' : ''}">vs no plan <b>${sgn(up)}</b></span><span class="chip">robot range <b>${e.sampled.mean.toFixed(1)}</b></span></div>
+    <div class="chips">${e.stale ? '<span class="chip old">OUTDATED — build again</span>' : ''}<span class="chip">AUTO <b>${e.nominal.mean.toFixed(1)}</b> ± ${e.nominal.ci95.toFixed(1)}</span><span class="chip">worst tenth <b>${e.nominal.cvar10.toFixed(1)}</b></span><span class="chip${up > 0 ? ' up' : ''}">vs no plan <b>${sgn(up)}</b></span><span class="chip">robot range <b>${e.sampled.mean.toFixed(1)}</b></span></div>
     <div class="body"><canvas aria-label="Plan diagram"></canvas><div>${steps}</div></div>
   </section>`;
 }

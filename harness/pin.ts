@@ -1,6 +1,6 @@
 // The DSIM pin: one content hash of dsim-main's source. Skips node_modules (installed by `npm ci`),
 // .DS_Store, .impeccable/ (a design-tool hook writes its cache there) and symlinks (as `find
-// -type f` does). Run with --write to (re)create harness/dsim-pin.json.
+// -type f` does). Run with --write [--source "<where it came from>"] to (re)create harness/dsim-pin.json.
 import { createHash } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -31,9 +31,10 @@ export const readPin = (): { files: number; treeSha256: string } => JSON.parse(r
 
 if (process.argv.includes('--write')) {
   const h = treeHash();
+  const src = process.argv.indexOf('--source'); // where this DSIM came from, in words
   const pin = {
     pinnedAt: new Date().toISOString().slice(0, 10),
-    source: 'dsim-main (zip snapshot, alpha, BIOBUZZ scored)',
+    source: src >= 0 ? process.argv[src + 1] : 'dsim-main (zip snapshot, alpha, BIOBUZZ scored)',
     ...h,
     excludes: [...SKIP, 'symlinks'],
     rule: 'never edit dsim-main source; node_modules only via npm ci',

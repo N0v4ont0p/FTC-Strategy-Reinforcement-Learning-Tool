@@ -11,12 +11,13 @@ import { drawBiobuzzRobot } from '../../dsim-main/src/games/biobuzz/drawRobot';
 import { drawBiobuzzBalls } from '../../dsim-main/src/games/biobuzz/draw';
 import { viewAngleOf } from '../../dsim-main/src/sim/field';
 import { rot } from '../../dsim-main/src/math';
+import { BB_HALF_X } from '../../dsim-main/src/games/biobuzz/config';
 import { AUTO_START, OPTIONS, TRACK_FIELDS, TRACK_STRIDE, decodeTrack, type FocusFile, type Frames, type GenFile, type Individual } from './data';
+import { color as css } from './ui';
 
 const VIEW = viewAngleOf('blue');
 /** world-space "screen up", exactly DSIM's Camera.screenUpWorld(): rot({0, 1}, −viewAngle) */
 const UP: Vec2 = rot({ x: 0, y: 1 }, -VIEW);
-const css = (v: string): string => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const COLOR: Record<string, string> = { y: 'yellow', r: 'red', b: 'blue' };
 
 interface Ghost {
@@ -56,8 +57,23 @@ export class FieldView {
   tick = AUTO_START;
   endTick = AUTO_START;
   speed = 4;
-  playing = true;
   gen: GenFile | null = null;
+  /** nothing loaded yet: the field alone */
+  empty = true;
+  // THE LOOP: a frame is drawn only while a replay plays, or once after something changed (a seek, a
+  // load, a resize) — never 60 times a second over a paused or empty field — and not at all while the
+  // tab is hidden
+  private raf = 0;
+  private last = 0;
+  private dirty = true;
+  private _playing = false;
+  get playing(): boolean {
+    return this._playing;
+  }
+  set playing(v: boolean) {
+    this._playing = v;
+    if (v) this.kick();
+  }
   // focus
   focus: FocusFile | null = null;
   private fw: World | null = null;
@@ -71,7 +87,33 @@ export class FieldView {
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
     new ResizeObserver(() => this.resize()).observe(canvas);
+    document.addEventListener('visibilitychange', () => {
+      this.last = 0;
+      if (!document.hidden) this.requestDraw();
+    });
     this.resize();
+  }
+
+  /** draw once, on the next frame */
+  requestDraw(): void {
+    this.dirty = true;
+    this.kick();
+  }
+  private kick(): void {
+    if (this.raf || document.hidden) return;
+    this.raf = requestAnimationFrame((t) => this.frame(t));
+  }
+  private frame(now: number): void {
+    this.raf = 0;
+    const dt = this.last ? Math.min(100, now - this.last) : 1000 / 60;
+    this.last = now;
+    if (this._playing) this.step(dt);
+    if (this._playing || this.dirty) {
+      this.dirty = false;
+      this.draw();
+    }
+    if (this._playing) this.kick();
+    else this.last = 0;
   }
 
   setField(w: World): void {
@@ -79,16 +121,18 @@ export class FieldView {
     this.template = structuredClone(w.robots[0]);
     this.template.hopper = [];
     this.renderFieldLayer();
+    this.requestDraw();
   }
 
   private resize(): void {
-    this.dpr = window.devicePixelRatio || 1;
+    this.dpr = Math.min(2, window.devicePixelRatio || 1);
     this.w = this.canvas.clientWidth;
     this.h = this.canvas.clientHeight;
     this.canvas.width = Math.round(this.w * this.dpr);
     this.canvas.height = Math.round(this.h * this.dpr);
-    this.scale = Math.min(this.w, this.h) / (2 * (72 + 5));
+    this.scale = Math.min(this.w, this.h) / (2 * (BB_HALF_X + 3));
     this.renderFieldLayer();
+    this.requestDraw();
   }
 
   private apply(ctx: CanvasRenderingContext2D): void {
@@ -123,6 +167,8 @@ export class FieldView {
     });
     this.endTick = Math.max(AUTO_START + 60, ...this.ghosts.map((q) => q.ind.deathTick)) + 60;
     this.tick = AUTO_START;
+    this.empty = false;
+    this.requestDraw();
   }
 
   loadFocus(f: FocusFile): void {
@@ -134,6 +180,8 @@ export class FieldView {
     this.tick = f.frames.f[0]?.t ?? 0;
     this.endTick = f.frames.f[f.frames.f.length - 1]?.t ?? 0;
     this.seekFocus(this.tick);
+    this.empty = false;
+    this.requestDraw();
   }
 
   private resetFocus(): void {
@@ -207,6 +255,7 @@ export class FieldView {
   seek(t: number): void {
     this.tick = Math.max(0, Math.min(this.endTick, t));
     if (this.mode === 'focus' && this.fr) this.seekFocus(this.tick);
+    this.requestDraw();
   }
 
   /** the start of the replay (the swarm starts at AUTO; exact frames at their first frame) */
@@ -217,7 +266,7 @@ export class FieldView {
   /** advance by one animation frame. `loop` (LIVE) wraps and calls onLoop; otherwise (a replay you
    * analyse) it stops on the last frame and calls onEnd. Real match time: 60 ticks a second × speed. */
   step(dtMs: number): void {
-    if (!this.playing) return;
+    if (!this._playing) return;
     this.acc += (dtMs / 1000) * 60 * this.speed;
     const ticks = Math.floor(this.acc);
     if (ticks < 1) return;
@@ -230,7 +279,7 @@ export class FieldView {
         this.onLoop();
       } else {
         this.tick = this.endTick;
-        this.playing = false;
+        this._playing = false;
         this.onEnd();
       }
     }
@@ -245,9 +294,8 @@ export class FieldView {
   draw(): void {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#0e0b08';
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    if (this.mode === 'focus') return this.drawFocus();
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (this.mode === 'focus' && !this.empty) return this.drawFocus();
     if (this.fieldLayer.width && this.fieldLayer.height) ctx.drawImage(this.fieldLayer, 0, 0); // not before the first resize
     if (!this.gen || !this.template) return;
     this.apply(ctx);
@@ -325,7 +373,7 @@ export class FieldView {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = a;
-    ctx.strokeStyle = css('--honey-hi') || '#f6d38a';
+    ctx.strokeStyle = css('--pollen-hi');
     ctx.lineWidth = 0.8;
     ctx.beginPath();
     ctx.arc(p[0], p[1], 11, 0, Math.PI * 2);
@@ -337,7 +385,7 @@ export class FieldView {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = 1;
-    ctx.strokeStyle = css('--honey-hi') || '#f6d38a';
+    ctx.strokeStyle = css('--pollen');
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.arc(p[0], p[1], 14, 0, Math.PI * 2);
@@ -353,7 +401,7 @@ export class FieldView {
     const i0 = Math.max(0, i1 - 100);
     if (i1 <= i0) return;
     ctx.save();
-    ctx.strokeStyle = css('--honey') || '#e9a23b';
+    ctx.strokeStyle = css('--pollen');
     ctx.lineWidth = 0.9;
     ctx.globalAlpha = 0.8;
     ctx.beginPath();
@@ -370,7 +418,7 @@ export class FieldView {
     ctx.save();
     ctx.globalAlpha = Math.max(0, a);
     if (kind === 'crash') {
-      ctx.strokeStyle = css('--st-crash') || '#d03b3b';
+      ctx.strokeStyle = css('--st-crash');
       ctx.lineWidth = 1.6;
       const s = 4 + 3 * (1 - a);
       ctx.beginPath();
@@ -380,7 +428,7 @@ export class FieldView {
       ctx.lineTo(p[0] + s, p[1] - s);
       ctx.stroke();
     } else {
-      ctx.strokeStyle = css('--st-stall') || '#fab219';
+      ctx.strokeStyle = css('--st-stall');
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(p[0], p[1], 3 + 4 * (1 - a), 0, Math.PI * 2);

@@ -1,8 +1,8 @@
 {
-  "pinnedAt": "2026-09-22",
-  "source": "dsim-main (zip snapshot, alpha, BIOBUZZ scored)",
-  "files": 610,
-  "treeSha256": "a95f38eaccb81f0ed0366de0e9877da59f4ed342ff3e5041d9cb8c2a1c59b18b",
+  "pinnedAt": "2026-09-29",
+  "source": "github.com/genius0412/dsim main d8f1fa9f50 (2026-09-28): BIOBUZZ Act 2, the 3D solve every online match runs; a clone, its .git left out",
+  "files": 856,
+  "treeSha256": "b5ba96a99888957848ec5c34e3df624b23124c29866fea0c450eefe15bdb2e2f",
   "excludes": [
     "node_modules",
     ".DS_Store",

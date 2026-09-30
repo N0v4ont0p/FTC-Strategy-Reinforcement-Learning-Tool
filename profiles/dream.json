@@ -1,6 +1,6 @@
 {
   "id": "DREAM",
-  "label": "The DSIM builder build (screenshots 2026-09-22) — the ceiling, not the team's robot.",
+  "label": "The DSIM builder build (screenshots 2026-09-22) — the ceiling, not the team's robot. Mass 24.5 lb: DSIM Act 2's floor for this build (it was 24.1 on the 2026-09-21 DSIM).",
   "status": "fixed",
   "spec": {
     "name": "Robie Mcrobotface",
@@ -8,7 +8,7 @@
     "teamNumber": 19859,
     "drivetrain": "mecanum",
     "driveRpm": 510,
-    "massLb": 24.1,
+    "massLb": 24.5,
     "length": 14.5,
     "width": 16,
     "intake": "sloped",

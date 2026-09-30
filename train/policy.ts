@@ -12,7 +12,7 @@ import { N_ENT, N_OBS, N_OPT_IN, encode, encodeEnts, optInput } from './obs';
 import { EntNet, layout, type EntInput, type EntShape } from './entnet';
 import type { Sample } from './bc';
 import { share } from './fork';
-import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, parkGoal, type Option, type OptionKind, type Style } from './skills';
+import { Executor, F_CURRENT, F_EST, N_OPT_FEATS, Pilot, STYLE, fireGate, options, parkGoal, type Option, type OptionKind, type Style, onFloor } from './skills';
 import { NO_AVOID, type AllianceBoard, type BrainMode } from './team';
 import { matchStep, type PlanStep, type TakenStep } from './plan';
 import { PTS_PER_S, roleBias, roleFilter, roleNow, type Play, type Role } from './teamplay';
@@ -152,6 +152,7 @@ export class Brain {
   private seat: number;
   private role: Role | null = null;
   private holdSince = -1; // a joint volley: tick it started waiting for the partner
+  private releasing = 0; // ticks in a row a full hopper has had an element in its mouth
   /** the planner's look-ahead: at the first job start past the plan, keep the options in `free` */
   stopAtFree = false;
   free: { tick: number; opts: Option[]; scores: number[] } | null = null;
@@ -261,6 +262,13 @@ export class Brain {
     }
     // AUTO: every robot stays in its own half (skills.ts Pilot.fence)
     this.pilot.fence = w.match.phase === 'auto' ? (r.alliance === 'blue' ? 1 : -1) : 0;
+    // G407: a full hopper carries no fifth element (skills.ts Pilot.trail / Pilot.pocket)
+    const full = r.hopper.length >= this.cap;
+    this.pilot.trail = full && this.pilot.ends.length === 1 ? this.pilot.ends[0] : null;
+    const pocket = full ? this.pilot.pocketed(w, r) : null;
+    this.releasing = pocket ? this.releasing + 1 : 0;
+    this.pilot.pocket = pocket && this.releasing <= 30 ? pocket : null;
+    this.pilot.loose = full ? w.balls.filter((b) => onFloor(b) && Math.hypot(b.pos.x - r.pos.x, b.pos.y - r.pos.y) < 30).map((b) => ({ x: b.pos.x, y: b.pos.y, r: b.r ?? BB.BB_POLLEN_R })) : [];
     if (this.mode === 'idle') return new Map([[this.robotId, cmd()]]);
     if (this.mode === 'park') {
       // a LEAVE + PARK partner: off the wall to its park spot at once, and it stays there
@@ -392,9 +400,13 @@ export class Brain {
     c ??= cmd();
     for (const b of w.balls) {
       const k = b.state.kind;
-      if (this.prevKind.get(b.id) === 'element' && (this.prevEl.get(b.id) ?? '').startsWith('hive:') && k === 'ground') this.spilled.set(b.id, w.tick);
+      // a SPILL: an element leaving a HIVE cell (in DSIM's 3D solve it falls through the air first,
+      // so "left the cell", not "became ground")
+      const el = k === 'element' ? String((b.state as { el?: string }).el ?? '') : '';
+      const was = this.prevEl.get(b.id) ?? '';
+      if (was.startsWith('hive:') && el !== was) this.spilled.set(b.id, w.tick);
       this.prevKind.set(b.id, k);
-      this.prevEl.set(b.id, k === 'element' ? String((b.state as { el?: string }).el ?? '') : '');
+      this.prevEl.set(b.id, el);
     }
     let spillNear = false;
     for (const [id, t0] of this.spilled) {
@@ -403,7 +415,7 @@ export class Brain {
         continue;
       }
       const b = w.balls.find((q) => q.id === id);
-      if (b && b.state.kind === 'ground' && Math.hypot(b.pos.x - r.pos.x, b.pos.y - r.pos.y) < SPILL_REACH) spillNear = true;
+      if (b && onFloor(b) && Math.hypot(b.pos.x - r.pos.x, b.pos.y - r.pos.y) < SPILL_REACH) spillNear = true;
     }
     if (spillNear) c.intake = false;
     if (this.hpNow) {

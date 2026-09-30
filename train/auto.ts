@@ -109,9 +109,13 @@ function arm(ep: Episode, plans: (PlanStep[] | null)[], style?: number[] | null)
 export function playPlan(a: { args: EpisodeArgs[]; plans: (PlanStep[] | null)[]; style?: number[] | null }): number[] {
   return a.args.map((args) => {
     const ep = new Episode(args);
-    arm(ep, a.plans, a.style);
-    while (ep.step());
-    return ep.reward();
+    try {
+      arm(ep, a.plans, a.style);
+      while (ep.step());
+      return ep.reward();
+    } finally {
+      ep.dispose();
+    }
   });
 }
 
@@ -120,24 +124,32 @@ export function playPlan(a: { args: EpisodeArgs[]; plans: (PlanStep[] | null)[];
  * AUTO ends first */
 export function nextChoice(a: { args: EpisodeArgs; plans: (PlanStep[] | null)[] }): { robot: number; tick: number; opts: { step: PlanStep; prior: number }[] } | null {
   const ep = new Episode(a.args);
-  arm(ep, a.plans);
-  ep.brains.forEach((b, i) => (b.stopAtFree = !!a.plans[i]));
-  for (;;) {
-    for (const b of ep.brains) {
-      if (!b.free) continue;
-      const f = b.free;
-      return { robot: b.id, tick: f.tick, opts: f.opts.map((o, i) => ({ step: stepOf(o), prior: f.scores[i] })) };
+  try {
+    arm(ep, a.plans);
+    ep.brains.forEach((b, i) => (b.stopAtFree = !!a.plans[i]));
+    for (;;) {
+      for (const b of ep.brains) {
+        if (!b.free) continue;
+        const f = b.free;
+        return { robot: b.id, tick: f.tick, opts: f.opts.map((o, i) => ({ step: stepOf(o), prior: f.scores[i] })) };
+      }
+      if (!ep.step()) return null;
     }
-    if (!ep.step()) return null;
+  } finally {
+    ep.dispose();
   }
 }
 
 /** play the plan once with exact frames and the timing sheet (the playbook's replay) */
 export function showPlan(a: { args: EpisodeArgs; plans: (PlanStep[] | null)[]; style?: number[] | null }): { reward: number; taken: TakenStep[]; frames: Frames; events: [number, string][] } {
   const ep = new Episode({ ...a.args, frames: true });
-  arm(ep, a.plans, a.style);
-  const r = ep.run();
-  return { reward: r.reward, taken: ep.brains.flatMap((b) => b.taken).sort((p, q) => p.tick - q.tick || p.robot - q.robot), frames: r.frames!, events: r.events ?? [] };
+  try {
+    arm(ep, a.plans, a.style);
+    const r = ep.run();
+    return { reward: r.reward, taken: ep.brains.flatMap((b) => b.taken).sort((p, q) => p.tick - q.tick || p.robot - q.robot), frames: r.frames!, events: r.events ?? [] };
+  } finally {
+    ep.dispose();
+  }
 }
 
 // ─────────────────────────────── the search ───────────────────────────────

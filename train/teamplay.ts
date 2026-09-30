@@ -63,13 +63,14 @@ const same = (r: Role | null): PhaseRoles => ({ auto: r, teleop: r, end: r });
 const tele = (r: Role | null, end: Role | null = r): PhaseRoles => ({ auto: null, teleop: r, end });
 
 // ─────────────────────────────── the library ───────────────────────────────
-const FLOWERS = { flower: 5, place: 5, field: -2, lz: -2 };
-const GROUND = { field: 2, lz: 2, flower: -6, place: -6 };
+// (DSIM Act 2: a SWEEPER cannot pull POLLEN out of a FLOWER — skills.ts Pilot.retrieves — so a FLOWER
+// role is the NECTAR one: the Box Tube places NECTAR on FLOWERs from the 1:00 cue)
+const FLOWERS = { place: 6 };
+const GROUND = { field: 2, lz: 2, place: -6 };
 export const PLAYS: Play[] = [
   { id: 'free', label: 'Free play', blurb: 'no roles: each robot its own brain, the alliance board keeps them off each other’s elements', roles: [same(null), same(null)] },
-  // (FLOWERs hold most of their POLLEN in AUTO, and take NECTAR from the 1:00 cue: the role spans both)
-  { id: 'flower-ground', label: 'FLOWERs · ground', blurb: 'from AUTO on, we work the FLOWERs (and place NECTAR on them after the cue); the partner sweeps the ground and the loading zone', roles: [same(role({ kinds: FLOWERS })), same(role({ kinds: GROUND }))] },
-  { id: 'ground-flower', label: 'Ground · FLOWERs', blurb: 'from AUTO on, we sweep the ground and the loading zone; the partner works the FLOWERs', roles: [same(role({ kinds: GROUND })), same(role({ kinds: FLOWERS }))] },
+  { id: 'flower-ground', label: 'FLOWERs · ground', blurb: 'we place NECTAR on the FLOWERs from the 1:00 cue; the partner sweeps the ground and the loading zone and never places', roles: [same(role({ kinds: FLOWERS })), same(role({ kinds: GROUND }))] },
+  { id: 'ground-flower', label: 'Ground · FLOWERs', blurb: 'we sweep the ground and the loading zone and never place; the partner places NECTAR on the FLOWERs from the 1:00 cue', roles: [same(role({ kinds: GROUND })), same(role({ kinds: FLOWERS }))] },
   { id: 'top-bottom', label: 'Top · bottom', blurb: 'each robot one side of the HIVE: we collect in the top half (the north cell’s side), the partner in the bottom', roles: [same(role({ y: 'top', hard: true })), same(role({ y: 'bottom', hard: true }))] },
   { id: 'bottom-top', label: 'Bottom · top', blurb: 'each robot one side of the HIVE: we take the bottom half, the partner the top', roles: [same(role({ y: 'bottom', hard: true })), same(role({ y: 'top', hard: true }))] },
   { id: 'both-target', label: 'Both on the target side', blurb: 'both robots work the half of the field the HIVE’s target cell faces, and move with it when a tip flips it', roles: [tele(role({ y: 'target', out: 6 })), tele(role({ y: 'target', out: 6 }))] },
@@ -79,15 +80,14 @@ export const PLAYS: Play[] = [
   { id: 'far-near', label: 'Far half · our half', blurb: 'we raid the far half; the partner keeps our half', roles: [tele(role({ x: 'far', xLine: 0, out: 4 })), tele(role({ x: 'ours', xLine: 0, hard: true }))] },
   { id: 'cycle-support', label: 'Tip cycle · support', blurb: 'we run the tip cycle by the HIVE; the partner feeds it from the field and the loading zone', roles: [tele(role({ kinds: { cycle: 6, field: -1 } })), tele(role({ kinds: { cycle: -8, field: 2, lz: 2 } }))] },
   { id: 'support-cycle', label: 'Support · tip cycle', blurb: 'the partner runs the tip cycle; we feed it', roles: [tele(role({ kinds: { cycle: -8, field: 2, lz: 2 } })), tele(role({ kinds: { cycle: 6, field: -1 } }))] },
-  { id: 'lz-field', label: 'Loading zone · field', blurb: 'we take the human player’s NECTAR and the loading zone; the partner the open field', roles: [tele(role({ kinds: { hp: 4, lz: 5, field: -2 } })), tele(role({ kinds: { lz: -6, hp: -6, field: 2, flower: 1 } }))] },
-  { id: 'field-lz', label: 'Field · loading zone', blurb: 'the partner handles the human player and the loading zone; we the field', roles: [tele(role({ kinds: { lz: -6, hp: -6, field: 2, flower: 1 } })), tele(role({ kinds: { hp: 4, lz: 5, field: -2 } }))] },
+  { id: 'lz-field', label: 'Loading zone · field', blurb: 'we take the human player’s NECTAR and the loading zone; the partner the open field', roles: [tele(role({ kinds: { hp: 4, lz: 5, field: -2 } })), tele(role({ kinds: { lz: -6, hp: -6, field: 2 } }))] },
+  { id: 'field-lz', label: 'Field · loading zone', blurb: 'the partner handles the human player and the loading zone; we the field', roles: [tele(role({ kinds: { lz: -6, hp: -6, field: 2 } })), tele(role({ kinds: { hp: 4, lz: 5, field: -2 } }))] },
   { id: 'volley', label: 'Joint volleys', blurb: 'both collect freely but fire together: whoever is loaded waits (up to 4 s) for the other, so the cell fills at once', roles: [tele(role({ hold: true })), tele(role({ hold: true }))] },
   { id: 'target-volley', label: 'Target side, joint volleys', blurb: 'both on the target side, firing together', roles: [tele(role({ y: 'target', out: 6, hold: true })), tele(role({ y: 'target', out: 6, hold: true }))] },
   { id: 'diagonal', label: 'Diagonal split', blurb: 'we take the top of our half and the bottom of the far half… as a diagonal: top-ours / bottom-far', roles: [tele(role({ y: 'top', x: 'ours', out: 5 })), tele(role({ y: 'bottom', x: 'far', out: 5 }))] },
   { id: 'we-park-early', label: 'Partner scores to the end', blurb: 'free play; we park 20 s early (a sure PARK), the partner scores until the last moment', roles: [tele(null, role({ parkLead: 20 })), tele(null, role({ parkLead: -1 }))] },
   { id: 'partner-parks-early', label: 'We score to the end', blurb: 'free play; the partner parks 20 s early, we score until the last moment', roles: [tele(null, role({ parkLead: -1 })), tele(null, role({ parkLead: 20 }))] },
-  { id: 'flower-rush', label: 'FLOWER rush, then split', blurb: 'AUTO: both go for FLOWERs; TELEOP: top · bottom halves', roles: [{ auto: role({ kinds: { flower: 6 } }), teleop: role({ y: 'top', hard: true }), end: role({ y: 'top' }) }, { auto: role({ kinds: { flower: 6 } }), teleop: role({ y: 'bottom', hard: true }), end: role({ y: 'bottom' }) }] },
-  { id: 'endgame-flowers', label: 'Endgame FLOWERs', blurb: 'free play, then the last 30 s: we place NECTAR on FLOWERs while the partner finishes the HIVE', roles: [tele(null, role({ kinds: { place: 8, flower: 3 } })), tele(null, role({ kinds: { place: -8, shoot: 2, cycle: 2 } }))] },
+  { id: 'endgame-flowers', label: 'Endgame FLOWERs', blurb: 'free play, then the last 30 s: we place NECTAR on FLOWERs while the partner finishes the HIVE', roles: [tele(null, role({ kinds: { place: 8 } })), tele(null, role({ kinds: { place: -8, shoot: 2, cycle: 2 } }))] },
 ];
 /** the solo plays: a style for our robot alone (the partner's roles unused) */
 export const SOLO_PLAYS = ['free', 'flower-ground', 'ground-flower', 'top-bottom', 'bottom-top', 'both-target', 'away-target', 'near-far', 'far-near', 'cycle-support', 'lz-field', 'field-lz', 'we-park-early', 'endgame-flowers'];
@@ -153,7 +153,8 @@ export function playWords(p: Play): { us: Record<PlayPhase, string>; partner: Re
 // ─────────────────────────────── mutation ───────────────────────────────
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const pick = <T>(rnd: Rng, a: readonly T[]): T => a[Math.floor(rnd() * a.length)];
-const KINDS: OptionKind[] = ['field', 'lz', 'flower', 'cycle', 'place', 'shoot', 'hp'];
+// (no 'flower': no build here pulls POLLEN out of a FLOWER — a preference for it would change nothing)
+const KINDS: OptionKind[] = ['field', 'lz', 'cycle', 'place', 'shoot', 'hp'];
 const PHASES: PlayPhase[] = ['auto', 'teleop', 'end'];
 
 /** one random change to a play (named, so the lineage reads as a story) */

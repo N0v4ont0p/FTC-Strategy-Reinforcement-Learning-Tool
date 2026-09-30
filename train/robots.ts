@@ -10,7 +10,7 @@
 //   · SAVED to profiles/<id>.json — a bad range never reaches training (runs refuse it).
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { coerce, type RobotSpec } from '../harness/dsim';
+import { BB, bbIntakeKindOf, coerce, type RobotSpec } from '../harness/dsim';
 import { buildOf, loadProfile, pinned, profileProblems, resolve, type ProfileFile } from '../harness/profiles';
 import { ROOT } from './engine';
 import { envelopeOf, envelopeQuality, zonedEnvelope } from './envelope';
@@ -119,6 +119,9 @@ export interface Inspection {
   floors: Record<string, { min: number; max: number }>;
   envelope: { key: string; quality: 'measured' | 'nearest' | 'fallback'; spots: { north: { x: number; y: number }[]; south: { x: number; y: number }[] } };
   start: { x: number; y: number; h: number }; // the team's start (F3), for the preview
+  /** DSIM's intake archetype, and whether it reaches into a FLOWER's retrieval opening at all (a
+   * sweeper never does in DSIM Act 2; side rollers and a deployed ramp do — skills.ts Pilot.retrieves) */
+  intake: { kind: string; reachesFlower: boolean };
   info: typeof FIELD_INFO;
 }
 export function inspectRobot(p: ProfileFile): Inspection {
@@ -139,6 +142,10 @@ export function inspectRobot(p: ProfileFile): Inspection {
     start: (() => {
       const q = startPoseOf(nominal, 'F3');
       return { x: q.x, y: q.y, h: (q.headingDeg * Math.PI) / 180 };
+    })(),
+    intake: (() => {
+      const kind = bbIntakeKindOf(nominal);
+      return { kind, reachesFlower: BB.bbFlowerReachOf(kind, true) !== null };
     })(),
     info: FIELD_INFO,
   };

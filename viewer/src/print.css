@@ -67,3 +67,7 @@ td.n, th.n { text-align: right; font-family: var(--f-mono); font-variant-numeric
   .cover { break-after: page; }
   .entry { padding-top: 0.15in; }
 }
+
+/* a plan made under older rules (DSIM's old physics, an older AUTO rule, another shooting zone) */
+.cover .stale { margin: 14px 0 0; padding: 10px 12px; border: 1.5px solid #b3261e; border-radius: 4px; background: #fdecea; color: #6e1510; font-size: 12.5px; }
+.chip.old { border-color: #b3261e; color: #b3261e; font-weight: 700; letter-spacing: 0.04em; }

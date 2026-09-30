@@ -1228,7 +1228,7 @@ export class Engine extends EventEmitter {
     if (target === 'player') return { genome: ch.genome, label: `champion #${ch.id} thinking ahead`, extra: { value: this.ck.value, search: SEARCH } };
     if (target === 'imitation') {
       const d = ensureData();
-      if (!d) throw new Error('no replays in "Training data/"');
+      if (!d) throw new Error('no replays in "Training data/" that re-simulate in this DSIM (a replay recorded before DSIM Act 2 no longer does: record new ones)');
       return { genome: d.report.genome, label: 'imitation of your replays', extra: {} };
     }
     const { ck, meta } = this.loadCheckpoint(target);

@@ -47,10 +47,11 @@ import { PLAYS, SOLO_PLAYS, type Play } from './teamplay';
 import { TeamPlaybook } from './teamplaybook';
 import { Store } from './store';
 import { entGenome, labelRows, type EntFitReport, type LearnArgs, type LearnResult } from './entlearn';
+import { ENT_PREFIX } from './policy';
 import type { OpponentKind, PartnerKind } from './team';
 
 export const V2_DIR = join(RUNS, '.v2');
-export const V2_VERSION = 3; // 2: the exam brings opponents; 3: team plays (the entity network reads each option's role)
+export const V2_VERSION = 4; // 2: the exam brings opponents; 3: team plays (the entity network reads each option's role); 4: DSIM Act 2 (every match in DSIM's 3D solve)
 const EXAM_SEED = 525_252;
 const PRE = Math.round(C.PRE_COUNTDOWN / DT);
 const PLAY_END = Math.round((C.PRE_COUNTDOWN + C.AUTO_DURATION + C.TRANSITION_DURATION + C.TELEOP_DURATION) / DT);
@@ -142,6 +143,9 @@ export interface V2State {
   candidates: CandidateRecord[];
   searchExam: { time: string; hours: number; champion: number; n: number; alone: number; search: number; gain: MeanCi } | null;
   audits: AuditPoint[]; // one per audited champion
+  /** a run made by an older version (another sim) is kept under this name, and this run starts
+   * from its champion's network: its learner begins there */
+  carried?: { from: string; version: number; champion: number; exam: number | null; seeded: boolean; time: string };
 }
 /** a mistake as the audit keeps it: which exam match, whether the previous champion made it too */
 export interface AuditEntry extends AuditItem {
@@ -191,6 +195,20 @@ export interface ExamEntry {
   partner: PartnerKind | 'none';
   opponents: OpponentKind;
 }
+/** a new run: the no-learning robot is the first champion; the learner starts from `start` (a
+ * carried-over champion's network) or a fresh entity network */
+function freshState(name: string, config: V2Config, start: string | null): V2State {
+  return {
+    version: V2_VERSION, name, config, created: now(), running: false,
+    champion: { id: 0, genome: null, born: now(), exam: [] },
+    base: null,
+    learner: { genome: start ?? entGenome(seedOf(name, 'learner')), lr: 0.002, runs: 0, last: null, before: null, tried: [] },
+    nextId: 1, actorSeq: 0, labelsAtLearn: 0,
+    totals: { matches: 0, labels: 0, examMatches: 0, wallSeconds: 0, busySeconds: 0, promotions: 0, rejections: 0 },
+    history: [], candidates: [], searchExam: null, audits: [],
+  };
+}
+
 /** the fixed exam: every partner kind against every opponent kind, the same seeds forever, interleaved
  * so any prefix covers them all */
 export function examList(c: Pick<V2Config, 'examSeeds' | 'partners' | 'opponents'>): ExamEntry[] {
@@ -239,22 +257,33 @@ export class Continuous extends EventEmitter {
     this.dir = join(V2_DIR, name);
     const f = join(this.dir, 'state.json');
     if (existsSync(f)) {
-      this.st = JSON.parse(readFileSync(f, 'utf8')) as V2State;
-      if (this.st.version !== V2_VERSION) throw new Error(`run ${name} was made by another version (${this.st.version})`);
+      const old = JSON.parse(readFileSync(f, 'utf8')) as V2State;
+      if (old.version > V2_VERSION) throw new Error(`run ${name} was made by a newer version (${old.version})`);
+      if (old.version === V2_VERSION) this.st = old;
+      else {
+        // MADE BY AN OLDER VERSION — its champion's exam was played in another sim (version 3 and
+        // before: DSIM's 2D pipeline), so continuing it would compare challengers measured here with
+        // scores measured there. It is KEPT as it is, under a new name, and a fresh run starts whose
+        // learner begins from the old champion's network (the skills and its inputs are the same):
+        // the head start is examined here like any candidate before it can be champion.
+        let kept = `${name}-v${old.version}`;
+        for (let k = 2; existsSync(join(V2_DIR, kept)); k++) kept = `${name}-v${old.version}-${k}`;
+        renameSync(this.dir, join(V2_DIR, kept));
+        const cfg: V2Config = { ...v2Defaults(old.config.profile), ...old.config };
+        const g = old.champion.genome;
+        const seeded = !!g && g.startsWith(ENT_PREFIX);
+        const ex = old.champion.exam.length ? old.champion.exam.reduce((a, b) => a + b, 0) / old.champion.exam.length : null;
+        this.st = freshState(name, cfg, seeded ? g : null);
+        this.st.carried = { from: kept, version: old.version, champion: old.champion.id, exam: ex, seeded, time: now() };
+        mkdirSync(this.dir, { recursive: true });
+        this.save();
+      }
     } else {
       if (!config) throw new Error(`no run called "${name}"`);
       const probs = profileProblems(loadProfile(join(ROOT, config.profile)), true);
       if (probs.length) throw new Error(`cannot train ${config.profile}: ${probs.join('; ')}`);
       mkdirSync(this.dir, { recursive: true });
-      this.st = {
-        version: V2_VERSION, name, config, created: now(), running: false,
-        champion: { id: 0, genome: null, born: now(), exam: [] },
-        base: null,
-        learner: { genome: entGenome(seedOf(name, 'learner')), lr: 0.002, runs: 0, last: null, before: null, tried: [] },
-        nextId: 1, actorSeq: 0, labelsAtLearn: 0,
-        totals: { matches: 0, labels: 0, examMatches: 0, wallSeconds: 0, busySeconds: 0, promotions: 0, rejections: 0 },
-        history: [], candidates: [], searchExam: null, audits: [],
-      };
+      this.st = freshState(name, config, null);
       this.save();
     }
     this.st.audits ??= [];
@@ -752,6 +781,7 @@ export class Continuous extends EventEmitter {
       activity: { actors: this.actorsInFlight, learning: this.learning, evaluating: this.evaluating },
       lastPromotion: lastPromo,
       searchExam: s.searchExam,
+      carried: s.carried ?? null,
       audit: s.audits[s.audits.length - 1] ?? null,
       drills: { ...this.store.countStates('drill:'), played: s.totals.drills ?? 0 },
       problems: this.problems,

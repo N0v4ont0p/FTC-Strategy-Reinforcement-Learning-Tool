@@ -1,6 +1,6 @@
 // RULE GUARDS + ANOMALY DETECTORS (PLAN.md §7.2, §7.4) — the rules DSIM does not enforce, and
 // DSIM physics oddities a policy must not profit from. Observe-only: never edits the world.
-import { BB, DT, footprintCorners, footprintExtents, type Alliance, type RobotCommand, type World } from './dsim';
+import { BB, DT, bbIntakeAct, bbIntakeExtraReach, footprintCorners, footprintExtents, physicsOf, type Alliance, type RobotCommand, type World } from './dsim';
 import { polysOverlap, rect, pointDepthInside } from './geom';
 import { hpDropZone } from './filters';
 import type { RuleOpts } from './filters';
@@ -69,7 +69,7 @@ export class Guards {
   private spillTick = new Map<number, number>();
   private landTick = new Map<number, number>();
   private frameContact = new Set<number>();
-  private lastG407 = -10;
+  private nEvents = 0; // how many of world.events were already read
   private who = new Map<number, Alliance>(); // robot id → alliance
   private lastFast = new Map<number, number>();
   private prevSpeed = new Map<number, number>();
@@ -97,8 +97,12 @@ export class Guards {
   observe(w: World, applied: Map<number, RobotCommand>): void {
     const t = w.tick;
     for (const r of w.robots) this.who.set(r.id, r.alliance);
+    // this tick's events only: DSIM keeps every event of the match in `world.events`
+    if (w.events.length < this.nEvents) this.nEvents = 0;
+    const fresh = w.events.slice(this.nEvents);
+    this.nEvents = w.events.length;
     // DSIM's own fouls/warnings, logged for the report (DSIM already scores them)
-    for (const e of w.events) if (/G\d{3}/.test(e)) this.add(t, 'DSIM-foul', e);
+    for (const e of fresh) if (/G\d{3}/.test(e)) this.add(t, 'DSIM-foul', e);
 
     for (const r of w.robots) {
       const fp = footprintCorners(r.spec, r.pos, r.heading);
@@ -120,12 +124,13 @@ export class Guards {
       }
     }
 
-    // G407 as a violation (DSIM only warns): the warning event names the offender's alliance
-    for (const e of w.events)
-      if (e.includes('G407')) {
-        if (t - this.lastG407 > 1) this.add(t, 'G407-control-over-4', e, undefined, false, /WARNING - RED/.test(e) ? 'red' : /WARNING - BLUE/.test(e) ? 'blue' : undefined); // one per episode
-        this.lastG407 = t;
-      }
+    // G407 as a violation: DSIM warns once per instance of CONTROL of 5+ (edge-triggered) and
+    // bills only the STRATEGIC ones itself; a learning robot repeating one is strategic by
+    // definition, so every instance is a MAJOR here (DSIM's own MAJOR stays in its score)
+    for (const e of fresh) {
+      const m = /^WARNING - (RED|BLUE) \(G407/.exec(e);
+      if (m) this.add(t, 'G407-control-over-4', e, undefined, false, m[1] === 'RED' ? 'red' : 'blue');
+    }
 
     if (w.balls.length !== this.totalElements) this.add(t, 'element-count', `${w.balls.length} elements`, undefined, true);
 
@@ -135,12 +140,20 @@ export class Guards {
       const e = footprintExtents(r.spec);
       return Math.hypot(r.vel.x, r.vel.y) + Math.abs(r.angVel) * Math.hypot(Math.max(e.front, e.rear), e.half);
     }));
+    // what the intakes are drawing in right now: DSIM's own roller model (`bbIntakeAct`, the same
+    // call its step makes) pulls an element at up to BB_INTAKE_DRAW_IN — a pickup, not a strike
+    const pulled = new Set<number>();
+    for (const r of w.robots)
+      if (!r.passive && (r.autoIntake || applied.get(r.id)?.intake))
+        for (const p of bbIntakeAct(w, r, { lowFlight: physicsOf(w) === '3d', extraReach: bbIntakeExtraReach(r, w.time) }).pull) pulled.add(p.ball.id);
     for (const b of w.balls) {
       const kind = b.state.kind;
       const el = kind === 'element' ? (b.state as { el: string }).el : '';
       const pk = this.prevKind.get(b.id);
-      // spill: an element leaving a HIVE cell onto the ground
-      if (pk === 'element' && (this.prevEl.get(b.id) ?? '').startsWith('hive:') && kind === 'ground') this.spillTick.set(b.id, t);
+      // spill: an element leaving a HIVE cell (DSIM's 3D solve drops it through the air first, so
+      // the moment it leaves the cell, not the moment it is ground)
+      const wasIn = this.prevEl.get(b.id) ?? '';
+      if (wasIn.startsWith('hive:') && el !== wasIn) this.spillTick.set(b.id, t);
       if (pk === 'flight' && kind === 'ground') this.landTick.set(b.id, t); // landed shot: exempt from the fast check only (G409 is HIVE releases only)
       const lt = this.landTick.get(b.id);
       if (lt !== undefined && (t - lt) * DT > 1.5) this.landTick.delete(b.id);
@@ -155,7 +168,7 @@ export class Guards {
         const sp = Math.hypot(b.vel.x, b.vel.y);
         const accel = sp - (this.prevSpeed.get(b.id) ?? sp);
         this.prevSpeed.set(b.id, sp);
-        if (accel > 5 && sp > fastestRobot + FAST_MARGIN && this.spillTick.get(b.id) === undefined && !this.landTick.has(b.id)) {
+        if (accel > 5 && sp > fastestRobot + FAST_MARGIN && this.spillTick.get(b.id) === undefined && !this.landTick.has(b.id) && !pulled.has(b.id)) {
           if (t - (this.lastFast.get(b.id) ?? -1e9) > 60) this.add(t, 'fast-ground-element', `element ${b.id} at ${sp.toFixed(0)} in/s`, undefined, true);
           this.lastFast.set(b.id, t);
           this.struck.set(b.id, t);
@@ -178,7 +191,9 @@ export class Guards {
       }
       // did a struck element PROFIT: into a HIVE cell within the window, or lying in a GARDEN after it
       const sk = this.struck.get(b.id);
-      if (sk !== undefined) {
+      // captured: whatever it scores next is a pickup and a shot, not the strike
+      if (sk !== undefined && kind === 'held') this.struck.delete(b.id);
+      else if (sk !== undefined) {
         if (kind === 'element' && pk !== 'element' && el.startsWith('hive:')) {
           this.profit(t, el.slice(5) as Alliance, `struck element ${b.id} entered ${el}`);
           this.struck.delete(b.id);

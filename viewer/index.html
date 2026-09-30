@@ -3,147 +3,169 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>BIOBUZZ Learning Studio</title>
+    <title>BIOBUZZ Studio</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 29'%3E%3Cpath d='M13 0 26 7.25v14.5L13 29 0 21.75V7.25Z' fill='%23f4c542'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
-    <header class="bar">
-      <div class="brand"><span class="mark" aria-hidden="true"></span><span class="title">BIOBUZZ Learning</span></div>
-      <button id="v2Pill" class="v2pill" type="button" title="Training (Home)"><i class="dot" aria-hidden="true"></i><span id="v2PillText">nothing training</span></button>
-      <div id="v1Head" class="v1head" hidden>
-      <div class="runpick">
-        <label for="runSel" class="k">Run</label>
-        <select id="runSel" aria-label="Open run"></select>
-        <button id="btnNew" type="button" class="quiet">New run</button>
+    <header class="top">
+      <a class="brand" href="#home" aria-label="BIOBUZZ Studio, home">
+        <svg viewBox="0 0 26 29" aria-hidden="true"><path d="M13 0 26 7.25v14.5L13 29 0 21.75V7.25Z" fill="#f4c542" /><path d="M13 7.5 19.5 11.2v7.1L13 22l-6.5-3.7v-7.1Z" fill="#0a0d12" /><circle cx="13" cy="14.7" r="2.6" fill="#f4c542" /></svg>
+        <span class="w1">BIOBUZZ</span><span class="w2">STUDIO</span>
+      </a>
+      <nav class="nav" role="tablist" aria-label="Pages">
+        <button role="tab" aria-selected="true" data-page="home" type="button">Home</button>
+        <button role="tab" aria-selected="false" data-page="robot" type="button">Robot</button>
+        <button role="tab" aria-selected="false" data-page="playbook" type="button">Playbook</button>
+        <button role="tab" aria-selected="false" data-page="plays" type="button">Team plays</button>
+        <button role="tab" aria-selected="false" data-page="routes" type="button">Routes</button>
+        <button role="tab" aria-selected="false" data-page="mistakes" type="button">Mistakes</button>
+        <button role="tab" aria-selected="false" data-page="log" type="button">Log</button>
+      </nav>
+      <button id="pill" class="pill" type="button" title="Training at a glance"><i class="dot" aria-hidden="true"></i><span id="pillText">connecting…</span></button>
+      <button id="menuBtn" class="iconbtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More">⋯</button>
+      <div id="menu" class="menu" role="menu" hidden>
+        <button type="button" role="menuitem" id="mV1"><span id="mV1Label">Show the generational trainer</span><small>the older trainer: its runs, checkpoints, settings and tabs</small></button>
+        <button type="button" role="menuitem" id="mDsim"><span>Open DSIM</span><small>localhost:5173, in a new tab</small></button>
+        <hr />
+        <button type="button" role="menuitem" id="mQuit" class="danger"><span>Quit studio</span><small>stops training, DSIM and the studio</small></button>
       </div>
-      <div class="status" id="status" role="status">connecting…</div>
-      <div class="ctl" role="group" aria-label="Training controls">
-        <button id="btnStart" type="button">Start training</button>
-        <button id="btnPause" type="button" class="quiet">Pause</button>
-        <button id="btnStep1" type="button" class="quiet" title="Run one generation, then pause">+1 gen</button>
-        <button id="btnStep10" type="button" class="quiet" title="Run ten generations, then pause">+10 gens</button>
-        <button id="btnStop" type="button" class="quiet" title="Finish this generation, save, stop">Stop</button>
-        <button id="btnAbort" type="button" class="quiet danger" title="Throw away the generation in progress and stop">Abort generation</button>
-      </div>
-      </div>
-      <span class="grow"></span>
-      <button id="btnV1" type="button" class="quiet small" aria-pressed="false" title="The older generational trainer: its runs, controls and tabs">Generational trainer</button>
-      <button id="btnQuit" type="button" class="quiet danger quit" title="Stop training, DSIM and the studio, and close this tab">Quit studio</button>
     </header>
-    <div class="topprog" aria-label="Progress"><div id="progFill"></div><span id="progText" class="mono"></span></div>
 
-    <main class="grid">
+    <!-- the older generational trainer (shown on demand, or while one of its runs trains) -->
+    <div id="v1bar" class="v1bar" hidden>
+      <span class="tag">GENERATIONAL</span>
+      <select id="runSel" aria-label="Open run"></select>
+      <button id="btnNew" type="button" class="quiet small">New run</button>
+      <span class="status off" id="status" role="status">no run</span>
+      <div class="v1ctl" role="group" aria-label="Training controls">
+        <button id="btnStart" type="button" class="small">Start training</button>
+        <button id="btnPause" type="button" class="quiet small">Pause</button>
+        <button id="btnStep1" type="button" class="quiet small" title="Run one generation, then pause">+1 gen</button>
+        <button id="btnStep10" type="button" class="quiet small" title="Run ten generations, then pause">+10 gens</button>
+        <button id="btnStop" type="button" class="quiet small" title="Finish this generation, save, stop">Stop</button>
+        <button id="btnAbort" type="button" class="danger small" title="Throw away the generation in progress and stop">Abort generation</button>
+      </div>
+      <nav class="v1nav" role="tablist" aria-label="Generational trainer pages">
+        <button role="tab" aria-selected="false" data-page="overview" type="button">Overview</button>
+        <button role="tab" aria-selected="false" data-page="race" type="button">Race</button>
+        <button role="tab" aria-selected="false" data-page="report" type="button">Report</button>
+        <button role="tab" aria-selected="false" data-page="runs" type="button">Runs</button>
+        <button role="tab" aria-selected="false" data-page="checkpoints" type="button">Checkpoints</button>
+        <button role="tab" aria-selected="false" data-page="settings" type="button">Settings</button>
+        <button role="tab" aria-selected="false" data-page="data" type="button">Training data</button>
+        <button role="tab" aria-selected="false" data-page="evaluate" type="button">Evaluate</button>
+      </nav>
+    </div>
+    <div id="v1prog" hidden><div class="topprog"><div id="progFill"></div></div><div class="progtext" id="progText"></div></div>
+
+    <main class="app">
+      <!-- THE STAGE: the field, exactly as DSIM played it -->
       <section class="stage" aria-label="Field">
-        <div class="stagebar">
-          <div class="modes" role="tablist" aria-label="Field view">
+        <div class="v1modes" id="v1modes" hidden>
+          <div class="seg" role="tablist" aria-label="Field view">
             <button id="modeLive" role="tab" aria-selected="true" type="button">Live</button>
             <button id="modeBest" role="tab" aria-selected="false" type="button">Generation best</button>
             <button id="modeChamp" role="tab" aria-selected="false" type="button">Champion</button>
           </div>
-          <div class="viewinfo" id="viewInfo"></div>
+          <span class="sub" id="pace"></span>
         </div>
-        <div class="canvaswrap">
-          <canvas id="field" aria-label="Robots on the BIOBUZZ field"></canvas>
-          <div class="overlay" id="overlay"></div>
-          <div class="empty v2empty" id="emptyV2" hidden>
-            <p class="emptyhead">The field</p>
-            <p>Watch the champion play any exam match, a playbook plan, a route or a mistake — exactly as DSIM played it.</p>
-            <button id="btnWatchChamp" type="button">Watch the champion</button>
+        <div class="board idle" id="board" aria-live="off">
+          <div class="cell phase"><span class="k" id="bPhaseK">match</span><span class="v" id="bClock">0:00</span></div>
+          <div class="cell score"><span class="k">Blue alliance</span><span class="v" id="bScore">—</span></div>
+          <div class="cell job"><span class="k" id="bJobK">doing</span><span class="v" id="bJob">—</span></div>
+          <div class="cell tips"><span class="k">Tips</span><span class="hexes" id="bTips"></span></div>
+          <div class="cell hop" hidden><span class="k">Hopper</span><span class="dots" id="bHop"></span></div>
+        </div>
+        <div class="fieldwrap">
+          <canvas id="field" aria-label="The BIOBUZZ field"></canvas>
+          <div class="stageempty" id="stageEmpty">
+            <div>
+              <p class="t">THE FIELD</p>
+              <p id="stageEmptyText">Watch the champion play an exam match, a playbook plan, a route or a mistake, exactly as DSIM played it.</p>
+              <button id="btnWatchChamp" type="button">Watch the champion</button>
+            </div>
           </div>
-          <div class="empty" id="empty" hidden>
-            <p class="emptyhead">No generational run open</p>
-            <p>Training is one button on the <b>Home</b> tab. A generational run (the older trainer) is one line of learning: its champion, lessons, checkpoints and history.</p>
-            <button id="btnNew2" type="button">Create a run</button>
+          <div class="stageempty" id="stageEmptyV1" hidden>
+            <div>
+              <p class="t">NO GENERATIONAL RUN</p>
+              <p>Training is one button on Home. A generational run is the older trainer: its champion, lessons, checkpoints and history.</p>
+              <button id="btnNew2" type="button">Create a run</button>
+            </div>
           </div>
         </div>
-        <div class="transport" id="transportLive">
-          <span class="livebadge"><i aria-hidden="true"></i>Live</span>
-          <div class="livebar" aria-hidden="true"><div id="liveFill"></div></div>
-          <span id="clockLive" class="mono">0:00</span>
-          <span id="pace" class="mono pace" title="The whole newest generation, replayed as fast as training runs, so the field keeps up with it"></span>
-        </div>
-        <div class="transport" id="transportReplay" hidden>
-          <button id="play" type="button" class="quiet">Pause</button>
-          <button id="restart" type="button" class="quiet" aria-label="Restart from the beginning">↺</button>
+        <div class="transport" id="transport">
+          <button id="play" class="play" type="button" aria-label="Play"><svg viewBox="0 0 14 14" aria-hidden="true"><path id="playIcon" d="M3 1.5v11l9-5.5z" fill="currentColor" /></svg></button>
+          <button id="restart" class="quiet restart" type="button" aria-label="Restart from the beginning">↺</button>
           <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Match time" />
-          <span id="clock" class="mono">0:00</span>
+          <span id="clock" class="clock">0:00</span>
           <div class="seg" role="radiogroup" aria-label="Playback speed">
             <button type="button" role="radio" data-speed="1" aria-checked="true">1×</button>
             <button type="button" role="radio" data-speed="2" aria-checked="false">2×</button>
+            <button type="button" role="radio" data-speed="4" aria-checked="false">4×</button>
           </div>
         </div>
+        <div class="transport" id="transportLive" hidden>
+          <span class="liveb"><i aria-hidden="true"></i>LIVE</span>
+          <div class="livebar" aria-hidden="true"><div id="liveFill"></div></div>
+          <span id="clockLive" class="clock">0:00</span>
+        </div>
+        <div class="stagecap" id="stageCap"></div>
         <div class="inspector" id="inspector" hidden>
-          <div class="cardhead"><h2>Decision inspector</h2><span class="sub" id="inspWhen"></span></div>
+          <div class="cardhead"><h3>Decision inspector</h3><span class="sub" id="inspWhen"></span></div>
           <div id="inspBody" class="table"></div>
           <p class="hint" id="inspHint"></p>
         </div>
         <div class="legend" id="fieldLegend"></div>
       </section>
 
-      <aside class="side">
-        <div class="tabs" role="tablist" aria-label="Panels">
-          <button role="tab" aria-selected="true" data-tab="home" type="button">Home</button>
-          <button role="tab" aria-selected="false" data-tab="robot" type="button">Robot</button>
-          <button role="tab" aria-selected="false" data-tab="playbook" type="button">Playbook</button>
-          <button role="tab" aria-selected="false" data-tab="plays" type="button">Team plays</button>
-          <button role="tab" aria-selected="false" data-tab="routes" type="button">Routes</button>
-          <button role="tab" aria-selected="false" data-tab="mistakes" type="button">Mistakes</button>
-          <button role="tab" aria-selected="false" data-tab="log" type="button">Log</button>
-        </div>
-        <div class="tabs v1tabs" role="tablist" aria-label="Generational trainer panels" id="v1Tabs" hidden>
-          <span class="tabk">generational</span>
-          <button role="tab" aria-selected="false" data-tab="overview" type="button">Overview</button>
-          <button role="tab" aria-selected="false" data-tab="race" type="button">Race</button>
-          <button role="tab" aria-selected="false" data-tab="report" type="button">Report</button>
-          <button role="tab" aria-selected="false" data-tab="runs" type="button">Runs</button>
-          <button role="tab" aria-selected="false" data-tab="checkpoints" type="button">Checkpoints</button>
-          <button role="tab" aria-selected="false" data-tab="settings" type="button">Settings</button>
-          <button role="tab" aria-selected="false" data-tab="data" type="button">Training data</button>
-          <button role="tab" aria-selected="false" data-tab="evaluate" type="button">Evaluate</button>
-        </div>
-
-        <div class="panel" data-panel="home">
-          <div class="counters">
-            <div class="big"><span class="k">exam — our robot alone, every partner and opponent</span><span class="v mono" id="homeExam">—</span><span class="sub" id="homeExamSub">press Train: nothing has been learned yet</span></div>
-            <div class="pair">
-              <div><span class="k">state</span><span class="v" id="homeState">idle</span><span class="sub" id="homeDoing"></span></div>
-              <div><span class="k">cores busy</span><span class="v mono" id="homeCpu">—</span><span class="sub" id="homeHours"></span></div>
+      <section class="pages" id="pages">
+        <!-- ───────── HOME ───────── -->
+        <div class="page" data-page="home">
+          <header class="phead">
+            <div>
+              <p class="eyebrow">Training · continuous</p>
+              <h1>Home</h1>
+              <p class="lead">One button. The robot plays full matches beside every kind of partner and thinks ahead at its decisions; every decision it thinks through is a lesson. A new network takes over only after the fixed exam proves it clearly better, never worse in its bad matches.</p>
             </div>
-            <div class="pair">
-              <div><span class="k">decisions learned from</span><span class="v mono" id="homeLabels">0</span><span class="sub" id="homeRate"></span></div>
-              <div><span class="k">champion</span><span class="v mono" id="homeChamp">—</span><span class="sub" id="homeChampWhen"></span></div>
+          </header>
+          <div class="notice" id="homeCarried" hidden></div>
+          <div class="hero">
+            <div>
+              <div class="k">Exam · our robot alone, every partner and opponent</div>
+              <div class="score none" id="homeExam">—</div>
+              <div class="line" id="homeExamLine"><span class="sub">press Train: nothing has been learned yet</span></div>
+            </div>
+            <div class="ctl">
+              <select id="homeProfile" aria-label="Robot to train"></select>
+              <button id="homeTrain" type="button" class="big">Train</button>
+              <button id="homePause" type="button" class="quiet">Pause</button>
             </div>
           </div>
-          <div class="card setup" id="setupCard">
+          <div class="notice bad" id="homeProblems" role="alert" hidden></div>
+          <div class="stats">
+            <div class="stat"><div class="k">State</div><div class="v" id="homeState">idle</div><div class="s" id="homeDoing">&nbsp;</div></div>
+            <div class="stat"><div class="k">Cores busy</div><div class="v" id="homeCpu">—</div><div class="s" id="homeHours">&nbsp;</div></div>
+            <div class="stat"><div class="k">Lessons</div><div class="v" id="homeLabels">0</div><div class="s" id="homeRate">decisions learned from</div></div>
+            <div class="stat"><div class="k">Champion</div><div class="v" id="homeChamp">—</div><div class="s" id="homeChampWhen">&nbsp;</div></div>
+          </div>
+          <div class="card" id="setupCard">
             <div class="cardhead"><h2>Ready to train</h2><span class="sub" id="setupScore"></span></div>
             <ol class="checklist" id="setupList"></ol>
           </div>
           <div class="card">
-            <div class="row">
-              <label class="hint">Robot <select id="homeProfile" aria-label="Robot to train"></select></label>
-              <button id="homeTrain" type="button">Train</button>
-              <button id="homePause" type="button" class="quiet">Pause</button>
-            </div>
-            <div id="homeProblems" class="sub" role="alert"></div>
-            <p class="hint">One button. The robot plays matches beside every kind of partner and thinks ahead at its decisions (each option played out on shared luck draws, the close ones again and longer); every such decision is a lesson for its network. A new network is exam-checked on the same fixed matches every time and takes over only when it is clearly better, never worse in its bad matches. It keeps going until you pause, carries on after a crash or a restart, and every number here is a DSIM score.</p>
-          </div>
-          <div class="card">
             <div class="cardhead"><h2>Exam by hours of training</h2><span class="sub" id="homeTrend"></span></div>
-            <canvas id="homeChart" height="160" aria-label="The champion's exam score by hours of training, with the no-learning robot as a reference line"></canvas>
+            <canvas id="homeChart" class="chart" height="170" aria-label="The champion's exam score by hours of training, with the no-learning robot as a reference line"></canvas>
             <div class="chartlegend" id="homeLegend"></div>
           </div>
-          <div class="card">
-            <div class="cardhead"><h2>Beside each partner</h2><span class="sub">the champion's exam points</span></div>
-            <div id="homePartners" class="table"></div>
+          <div class="cols">
+            <div class="card"><div class="cardhead"><h2>Beside each partner</h2></div><div id="homePartners" class="table"></div></div>
+            <div class="card"><div class="cardhead"><h2>Against each opponent</h2></div><div id="homeOpponents" class="table"></div></div>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>Against each opponent</h2><span class="sub">the champion's exam points</span></div>
-            <div id="homeOpponents" class="table"></div>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>Watch the champion</h2><a id="dlChampV2" class="btnlink small" href="#" download>Download network</a></div>
+            <div class="cardhead"><h2>Watch the champion</h2><a id="dlChampV2" class="btn quiet small" href="#" download hidden>Download network</a></div>
             <div class="row"><select id="watchSel" aria-label="Exam match to watch" class="grow"></select><button id="watchGo" type="button">Watch</button></div>
-            <p class="hint">Any of its exam matches, replayed exactly on the field — beside each kind of partner, against each kind of opponent.</p>
+            <p class="hint">Any of its exam matches, replayed exactly on the field: beside each kind of partner, against each kind of opponent.</p>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Candidates</h2><span class="sub" id="homeLearner"></span></div>
@@ -151,7 +173,7 @@
           </div>
           <div class="card">
             <div class="cardhead"><h2>What it is doing</h2></div>
-            <div id="homeLog" class="table mono"></div>
+            <div id="homeLog" class="log"></div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Notifications</h2><button id="ntTest" type="button" class="quiet small">Send a test</button></div>
@@ -160,99 +182,31 @@
           </div>
         </div>
 
-        <div class="panel" data-panel="overview" hidden>
-          <div class="counters">
-            <div class="pair">
-              <div><span class="k">generation</span><span class="v mono" id="gen">0</span><span class="sub" id="genWhen"></span></div>
-              <div><span class="k">lessons learned</span><span class="v mono" id="lessonsN">0</span><span class="sub">decisions, every option played out</span></div>
+        <!-- ───────── ROBOT ───────── -->
+        <div class="page" data-page="robot" hidden>
+          <header class="phead">
+            <div>
+              <p class="eyebrow">Robot lab</p>
+              <h1>Robot</h1>
+              <p class="lead">A robot is its DSIM build plus a range for everything not measured yet. Training draws a robot from those ranges every match: the narrower and truer they are, the truer everything it learns.</p>
             </div>
-            <div class="pair">
-              <div><span class="k">matches played</span><span class="v mono" id="matchesN">0</span><span class="sub" id="simTime"></span></div>
-              <div><span class="k">throughput</span><span class="v mono" id="rpm">—</span><span class="sub">matches / min</span></div>
-            </div>
-          </div>
-          <div class="card champ">
-            <div class="cardhead"><h2>Champion</h2><span class="sub" id="champGen"></span></div>
-            <div id="champBody" class="champbody">No champion yet.</div>
-            <div class="row">
-              <button id="watchChamp" type="button">Watch champion</button>
-              <button id="copySnippet" type="button" class="quiet">Copy DSIM snippet</button>
-              <a id="dlChamp" class="btnlink" href="/api/export/champion.json" download>Download network</a>
-              <a id="dlCsv" class="btnlink" href="/api/export/metrics.csv" download>Metrics CSV</a>
-            </div>
-            <p class="hint" id="snippetHint">Every champion takes the same exam: 64 fixed matches (the same for every run), next to the no-learning robot on the same matches. A robot becomes champion only by beating the champion on brand-new matches with identical luck, by more than chance allows. To see it in DSIM (http://localhost:5173), paste the snippet into the console (Safari: Develop → Show Web Inspector), then open Records → Career.</p>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>Learning curve</h2><span class="sub">the exam, by hours of training</span></div>
-            <canvas id="chartExam" height="170" aria-label="Exam score of each champion by hours of training, with the no-learning robot as a reference line"></canvas>
-            <div class="chartlegend" id="examLegend"></div>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>Points lost to choices</h2><span class="sub">per decision, what-if</span></div>
-            <canvas id="chartRegret" height="110" aria-label="Points the champion's choice lost against the best option found by what-if play, per decision, by generation"></canvas>
-            <div class="chartlegend" id="regretLegend"></div>
-            <p class="hint">At each lesson decision every option is played out on copies of the match. This is how many points the option the champion chose made less than the best one — its mistakes, measured. It falls as the robot learns. (Picking the best of noisy play-outs slightly overstates it; the trend is what counts.)</p>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>Seconds lost per match</h2><span class="sub">the champion's lesson matches</span></div>
-            <canvas id="chartLost" height="110" aria-label="Seconds per match lost to idling, empty trips and blocked shots, by generation"></canvas>
-            <div class="chartlegend" id="lostLegend"></div>
-            <div class="sub" id="lostNow"></div>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>DSIM score by generation</h2><button id="tableToggle" type="button" class="link">Show table</button></div>
-            <canvas id="chartScore" height="150" aria-label="DSIM score by generation, with reference lines"></canvas>
-            <div class="chartlegend" id="scoreLegend"></div>
-            <div id="fitTable" class="table" hidden></div>
-          </div>
-        </div>
-
-        <div class="panel" data-panel="playbook" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>AUTO playbook</h2><span class="hint mono" id="pbStatus"></span></div>
-            <p class="hint">The best 30 s AUTO for our robot beside each kind of partner, from each legal pair of starts, found by search in DSIM. Every plan is scored on the same luck draws; the best few on 64 fresh ones, ranked on the average and the worst tenth. <b>Best response</b>: the partner runs its own AUTO. <b>Joint</b>: both AUTOs planned together. It needs every core: pause training first.</p>
-            <div class="fields">
-              <label>Robot <select id="pbProfile"></select></label>
-              <label>Budget <select id="pbBudget"><option value="full">Full (about 90 s an entry)</option><option value="quick">Quick look (about 15 s)</option></select></label>
-              <label>Our start <select id="pbStart"><option value="">every start</option><option value="F3">F3 (our start)</option><option value="TOP_REAR">top, rear wall</option><option value="BOTTOM_AUD">bottom, audience wall</option><option value="TOP_SIDE">top, side wall</option><option value="BOTTOM_SIDE">bottom, side wall</option></select></label>
-            </div>
-            <div class="row"><button id="pbBuild" type="button">Build playbook</button><button id="pbStop" type="button" class="quiet">Stop</button><span class="grow"></span><a id="pbPrint" class="btnlink" href="./print.html" target="_blank">Print / PDF</a></div>
-<div class="jobprog" id="pbProg" hidden>
-              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="pbBar"><div class="jpfill" id="pbFill"></div></div>
-              <div class="jphead"><b id="pbNow"></b><span id="pbEta" class="mono"></span></div>
-              <div class="jpsub"><div class="jpmini"><div id="pbFill2"></div></div><span id="pbStage"></span></div>
-              <div class="jpbeat mono" id="pbBeat"></div>
-              <div class="jplog mono" id="pbLog" aria-live="polite"></div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>Entries</h2><label class="hint">Partner <select id="pbFilter"><option value="">every partner</option></select></label></div>
-            <div id="pbList" class="table tall"><p class="hint">Nothing planned yet.</p></div>
-          </div>
-          <div class="card" id="pbDetail" hidden>
-            <div class="cardhead"><h2 id="pbTitle"></h2><button id="pbWatch" type="button">Watch it</button></div>
-            <canvas id="pbDiagram" class="diagram" aria-label="The plan on the field: both robots' paths and numbered steps"></canvas>
-            <div id="pbSheet"></div>
-          </div>
-        </div>
-
-        <div class="panel" data-panel="robot" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>Your robots</h2><button id="rbImportBtn" type="button" class="quiet small">Import from DSIM</button></div>
-            <div id="rbList" class="rblist"></div>
-            <p class="hint">A robot is its DSIM build plus a <b>range</b> for everything not measured yet. Training draws a robot from those ranges every match: the narrower and truer they are, the truer everything it learns. Measure something on the real robot → narrow its range here.</p>
-          </div>
+            <div class="actions"><button id="rbImportBtn" type="button" class="quiet">Import from DSIM</button></div>
+          </header>
           <div class="card" id="rbImport" hidden>
-            <div class="cardhead"><h2>Import from DSIM</h2><button id="rbImportClose" type="button" class="link">close</button></div>
+            <div class="cardhead"><h2>Import from DSIM</h2><button id="rbImportClose" type="button" class="link">Close</button></div>
             <ol class="steps">
-              <li>In DSIM (<a href="http://localhost:5173" target="_blank">localhost:5173</a>) build the robot, then open the console (Safari: Develop → Show JavaScript Console).</li>
-              <li>Paste <code id="rbSnippet">copy(localStorage['decodesim.settings.v1'])</code> <button id="rbCopy" type="button" class="link">copy this</button> and press Return — DSIM's robot is now on your clipboard.</li>
+              <li>In DSIM (<a href="http://localhost:5173" target="_blank" rel="noopener">localhost:5173</a>) build the robot, then open the console (Safari: Develop → Show JavaScript Console).</li>
+              <li>Paste <code id="rbSnippet">copy(localStorage['decodesim.settings.v1'])</code> <button id="rbCopy" type="button" class="link">copy this</button> and press Return: DSIM's robot is now on your clipboard.</li>
               <li>Paste it below. A replay file works too.</li>
             </ol>
-            <textarea id="rbPaste" rows="4" placeholder="paste here" spellcheck="false"></textarea>
-            <div class="row"><label class="hint">…or a robot from your replays <select id="rbReplay"><option value="">—</option></select></label></div>
-            <div class="row"><label class="hint">Starting ranges from <select id="rbTemplate"></select></label><button id="rbFind" type="button">Find robots</button></div>
+            <textarea id="rbPaste" rows="4" placeholder="Paste here" spellcheck="false"></textarea>
+            <div class="row"><label>Or a robot from your replays <select id="rbReplay"><option value="">—</option></select></label></div>
+            <div class="row"><label>Starting ranges from <select id="rbTemplate"></select></label><span class="grow"></span><button id="rbFind" type="button">Find robots</button></div>
             <div id="rbCands" class="rblist"></div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Your robots</h2></div>
+            <div id="rbList" class="rblist"></div>
           </div>
           <div class="card" id="rbEditor" hidden>
             <div class="cardhead"><h2 id="rbTitle">Robot</h2><span id="rbBadge" class="badge"></span></div>
@@ -260,28 +214,28 @@
               <label>Name <input id="rbId" type="text" maxlength="40" /></label>
               <label>Notes <textarea id="rbLabel" rows="2"></textarea></label>
             </div>
-            <div class="sub" id="rbBuild"></div>
+            <dl class="facts" id="rbFacts"></dl>
             <div class="previews">
-              <figure><canvas id="rbPreview"></canvas><figcaption>the build — dashed: the range's largest and smallest</figcaption></figure>
-              <figure><canvas id="rbEnvelope"></canvas><figcaption id="rbEnvCap">where it can score from</figcaption></figure>
+              <figure><canvas id="rbPreview"></canvas><figcaption>the build · dashed: the range's largest and smallest</figcaption></figure>
+              <figure><canvas id="rbEnvelope"></canvas><figcaption id="rbEnvCap">where it scores from</figcaption></figure>
             </div>
             <div class="row"><span id="rbEnvQ" class="sub grow"></span><button id="rbMeasure" type="button" class="quiet small">Measure its envelope</button></div>
-            <div id="rbProblems" class="problems"></div>
+            <div id="rbProblems" class="notice bad problems"></div>
             <section class="zone" aria-labelledby="rbZoneH">
-              <div class="zhead"><h3 id="rbZoneH">Shooting zone</h3><span id="rbZoneSum" class="badge"></span></div>
-              <p class="hint">Where the robot may shoot from. DSIM scores a shot from wherever the physics lands it; the real robot is less sure far out. The robot only drives to scoring spots inside the zone and only holds fire inside it. <b>Draw an area:</b> click the field to add a corner, drag a corner to move it, double-click a corner to remove it.</p>
+              <div class="cardhead"><h3 id="rbZoneH">Shooting zone</h3><span id="rbZoneSum" class="badge"></span></div>
+              <p class="hint">Where the robot may shoot from. DSIM's 3D solve decides where a shot settles; the zone narrows that to where you trust the real robot. The robot only drives to scoring spots inside it and only holds fire inside it. <b>Draw an area:</b> click the field to add a corner, drag a corner to move it, double-click a corner to remove it.</p>
               <div class="zbody">
-                <canvas id="rbZoneCanvas" aria-label="the shooting zone on the field"></canvas>
+                <canvas id="rbZoneCanvas" aria-label="The shooting zone on the field"></canvas>
                 <div class="zctl">
-                  <label class="zslider"><span>Farthest from the cell it shoots at</span><input id="rbZoneMax" type="range" min="0" max="120" step="2" /><b id="rbZoneMaxV" class="mono"></b></label>
-                  <label class="zslider"><span>Nearest to it</span><input id="rbZoneMin" type="range" min="0" max="60" step="2" /><b id="rbZoneMinV" class="mono"></b></label>
+                  <label class="zslider"><span>Farthest from the cell it shoots at</span><input id="rbZoneMax" type="range" min="0" max="120" step="2" /><b id="rbZoneMaxV"></b></label>
+                  <label class="zslider"><span>Nearest to it</span><input id="rbZoneMin" type="range" min="0" max="60" step="2" /><b id="rbZoneMinV"></b></label>
                   <div class="zpresets"><span class="hint">Start from</span>
                     <button type="button" class="quiet small" data-zp="off">Everything DSIM scores</button>
                     <button type="button" class="quiet small" data-zp="36">Close · 36 in</button>
                     <button type="button" class="quiet small" data-zp="54">Medium · 54 in</button>
                     <button type="button" class="quiet small" data-zp="ours">Our half</button>
                   </div>
-                  <button id="rbZoneClear" type="button" class="link">remove the drawn area</button>
+                  <button id="rbZoneClear" type="button" class="link">Remove the drawn area</button>
                   <div id="rbZoneStats" class="zstats"></div>
                   <p class="hint">Saved with the robot. Playbook and team-play entries made under another zone show as <span class="badge warn">outdated</span> and are planned again on the next build.</p>
                 </div>
@@ -292,28 +246,72 @@
           </div>
         </div>
 
-        <div class="panel" data-panel="plays" hidden>
+        <!-- ───────── PLAYBOOK ───────── -->
+        <div class="page" data-page="playbook" hidden>
+          <header class="phead">
+            <div>
+              <p class="eyebrow">AUTO · 30 seconds</p>
+              <h1>Playbook</h1>
+              <p class="lead">The best AUTO for our robot beside each kind of partner, from each legal pair of starts, found by search in DSIM. Every robot stays in its own half. <b>Best response</b>: the partner runs its own AUTO. <b>Joint</b>: both planned together.</p>
+            </div>
+            <div class="actions"><a id="pbPrint" class="btn quiet" href="./print.html" target="_blank" rel="noopener">Print / PDF</a></div>
+          </header>
           <div class="card">
-            <div class="cardhead"><h2>Team plays</h2><span class="hint mono" id="tpStatus"></span></div>
-            <p class="hint">The alliance plays <b>together</b>: a play gives each robot a role for AUTO, TELEOP and the last 30 s — FLOWERs · ground, each robot one side of the HIVE, both on the target side, tip cycle · support, joint volleys, who parks early… The search scores every play beside each kind of partner in DSIM on shared luck, then <b>mutates and crosses</b> the best (a zone line moves, the robots swap, a preference grows, a phase takes another's role) to discover plays nobody drew up. Finalists are re-scored on fresh luck. Training plays inside the winners.</p>
-            <div class="row"><label class="hint">Budget <select id="tpBudget"><option value="full">Full (a few minutes per partner)</option><option value="quick">Quick look</option></select></label><button id="tpBuild" type="button">Search plays</button><button id="tpStop" type="button" class="quiet">Stop</button></div>
-<div class="jobprog" id="tpProg" hidden>
-              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="tpBar"><div class="jpfill" id="tpFill"></div></div>
-              <div class="jphead"><b id="tpNow"></b><span id="tpEta" class="mono"></span></div>
+            <div class="fields">
+              <label>Robot <select id="pbProfile"></select></label>
+              <label>Budget <select id="pbBudget"><option value="full">Full · about 3 min an entry</option><option value="quick">Quick look · about 25 s</option></select></label>
+              <label>Our start <select id="pbStart"><option value="">Every start</option><option value="F3">F3 (our start)</option><option value="TOP_REAR">Top, rear wall</option><option value="BOTTOM_AUD">Bottom, audience wall</option><option value="TOP_SIDE">Top, side wall</option><option value="BOTTOM_SIDE">Bottom, side wall</option></select></label>
+            </div>
+            <div class="row"><button id="pbBuild" type="button">Build playbook</button><button id="pbStop" type="button" class="quiet">Stop</button><span class="grow"></span><span class="sub" id="pbStatus"></span></div>
+            <p class="hint">A build needs every core: pause training first.</p>
+            <div class="jobprog" id="pbProg" hidden>
+              <div class="jphead"><b id="pbNow"></b><span id="pbEta"></span></div>
+              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="pbBar"><div id="pbFill"></div></div>
+              <div class="jpsub"><div class="jpmini"><div id="pbFill2"></div></div><span id="pbStage"></span></div>
+              <div class="jpbeat" id="pbBeat"></div>
+              <div class="jplog" id="pbLog" aria-live="polite"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="cardhead"><h2>Entries</h2><label>Partner <select id="pbFilter"><option value="">Every partner</option></select></label></div>
+            <div id="pbList" class="table tall"><p class="hint">Nothing planned yet.</p></div>
+          </div>
+          <div class="card" id="pbDetail" hidden>
+            <div class="cardhead"><h2 id="pbTitle"></h2><button id="pbWatch" type="button">Watch it</button></div>
+            <canvas id="pbDiagram" aria-label="The plan on the field: both robots' paths and numbered steps"></canvas>
+            <div id="pbSheet" class="table"></div>
+          </div>
+        </div>
+
+        <!-- ───────── TEAM PLAYS ───────── -->
+        <div class="page" data-page="plays" hidden>
+          <header class="phead">
+            <div>
+              <p class="eyebrow">Alliance · two robots</p>
+              <h1>Team plays</h1>
+              <p class="lead">A play gives each robot a role for AUTO, TELEOP and the last 30 s. The search scores every play beside each kind of partner on shared luck, then mutates and crosses the best to discover plays nobody drew up. Training plays inside the winners.</p>
+            </div>
+          </header>
+          <div class="card">
+            <div class="row"><label>Budget <select id="tpBudget"><option value="full">Full · a few minutes per partner</option><option value="quick">Quick look</option></select></label><span class="grow"></span><button id="tpBuild" type="button">Search plays</button><button id="tpStop" type="button" class="quiet">Stop</button></div>
+            <span class="sub" id="tpStatus"></span>
+            <div class="jobprog" id="tpProg" hidden>
+              <div class="jphead"><b id="tpNow"></b><span id="tpEta"></span></div>
+              <div class="jpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="tpBar"><div id="tpFill"></div></div>
               <div class="jpsub"><div class="jpmini"><div id="tpFill2"></div></div><span id="tpStage"></span></div>
-              <div class="jpbeat mono" id="tpBeat"></div>
-              <div class="jplog mono" id="tpLog" aria-live="polite"></div>
+              <div class="jpbeat" id="tpBeat"></div>
+              <div class="jplog" id="tpLog" aria-live="polite"></div>
             </div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Beside</h2><span class="sub">best play · gain over free play</span></div>
             <div class="chips" id="tpPartners" role="tablist" aria-label="Partner kind"></div>
-            <div id="tpList" class="table tall"><p class="hint">Nothing searched yet — press Search plays.</p></div>
+            <div id="tpList" class="table tall"><p class="hint">Nothing searched yet: press Search plays.</p></div>
           </div>
           <div class="card" id="tpDetail" hidden>
             <div class="cardhead"><h2 id="tpTitle"></h2><button id="tpWatch" type="button">Watch it</button></div>
             <p class="sub" id="tpBlurb"></p>
-            <div id="tpRoles" class="roles"></div>
+            <div id="tpRoles" class="roles table"></div>
           </div>
           <details class="card">
             <summary><h2>The library</h2></summary>
@@ -321,173 +319,154 @@
           </details>
         </div>
 
-        <div class="panel" data-panel="routes" hidden>
+        <!-- ───────── ROUTES ───────── -->
+        <div class="page" data-page="routes" hidden>
+          <header class="phead">
+            <div>
+              <p class="eyebrow">How it scores</p>
+              <h1>Routes</h1>
+              <p class="lead">The champion's exam matches, cycle by cycle. A cycle runs volley to volley; <b>in/min</b> (our robot's elements into the HIVE per minute of the route) is what a route is worth. Pick one to see when it is used, then watch it.</p>
+            </div>
+            <span class="sub" id="rtWhen"></span>
+          </header>
           <div class="card">
-            <div class="cardhead"><h2>Route library</h2><span class="sub" id="rtWhen"></span></div>
-            <p class="hint">How the champion scores, cycle by cycle, on its exam matches (every partner kind, every opponent kind — the same matches for every champion). A cycle runs volley to volley; <b>in/min</b> — our robot's elements into the HIVE per minute of it — is what the route is worth (alliance points arrive in lumps when a HIVE tips). Click a route for when it is used, then <b>Watch it</b> in DSIM's replay.</p>
-            <div id="rtList" class="table tall"><p class="hint">After the first exam on the Home page.</p></div>
+            <div class="cardhead"><h2>Route library</h2></div>
+            <div id="rtList" class="table tall"><p class="hint">After the first exam on Home.</p></div>
           </div>
           <div class="card" id="rtDetail" hidden>
             <div class="cardhead"><h2 id="rtTitle"></h2><button id="rtWatch" type="button">Watch it</button></div>
             <div id="rtSheet" class="table"></div>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>Openings</h2><span class="sub">the first four places of TELEOP — the group order</span></div>
+            <div class="cardhead"><h2>Openings</h2><span class="sub">the first four places of TELEOP</span></div>
             <div id="rtOpen" class="table"></div>
           </div>
         </div>
 
-        <div class="panel" data-panel="mistakes" hidden>
-          <div class="counters">
-            <div class="pair">
-              <div><span class="k">repeat mistakes per match</span><span class="v mono" id="mkRepeats">—</span><span class="sub">the goal: 0</span></div>
-              <div><span class="k">mistakes per match</span><span class="v mono" id="mkPer">—</span><span class="sub" id="mkWho"></span></div>
+        <!-- ───────── MISTAKES ───────── -->
+        <div class="page" data-page="mistakes" hidden>
+          <header class="phead">
+            <div>
+              <p class="eyebrow">The audit</p>
+              <h1>Mistakes</h1>
+              <p class="lead">Every champion's exam matches are audited: empty trips, blocked shots, idle spells, fouls, stalls, crashes and judgement mistakes (where thinking ahead beat the network by more than 5 points). A repeat is one the previous champion made too. Each becomes a drill.</p>
             </div>
+          </header>
+          <div class="stats" style="grid-template-columns: repeat(2, minmax(0, 1fr))">
+            <div class="stat"><div class="k">Repeats per match</div><div class="v" id="mkRepeats">—</div><div class="s">the goal: 0</div></div>
+            <div class="stat"><div class="k">Mistakes per match</div><div class="v" id="mkPer">—</div><div class="s" id="mkWho">&nbsp;</div></div>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>By champion</h2><span class="sub">mistakes per exam match</span></div>
-            <canvas id="mkChart" height="150" aria-label="Mistakes and repeat mistakes per exam match, champion by champion"></canvas>
+            <div class="cardhead"><h2>By champion</h2><span class="sub">per exam match</span></div>
+            <canvas id="mkChart" class="chart" height="150" aria-label="Mistakes and repeat mistakes per exam match, champion by champion"></canvas>
             <div class="chartlegend" id="mkLegend"></div>
             <div id="mkKinds" class="table"></div>
-            <p class="hint">Every champion's exam matches are audited: <b>empty trips</b> (a collecting job that got nothing), <b>blocked shots</b>, <b>idle</b> spells (3 s or more standing still, not parking), <b>fouls</b> by rule, <b>stalls</b> (20 s without progress), <b>crashes</b> into the HIVE frame, and <b>judgement</b> mistakes — decisions where thinking ahead beat the network by more than 5 points (from its thinking-ahead exam). A <b>repeat</b> is one the previous champion made too: same match, same moment and place. Each mistake becomes a <b>drill</b>: every 4th training match starts 3 s before one, exactly as it happened, and the champion thinks it through.</p>
             <div class="sub" id="mkDrills"></div>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>The champion's mistakes</h2><label class="hint">Kind <select id="mkFilter"><option value="">every kind</option><option value="repeat">repeats only</option></select></label></div>
-            <div id="mkList" class="table tall"><p class="hint">After the first exam on the Home page.</p></div>
+            <div class="cardhead"><h2>The champion's mistakes</h2><label>Kind <select id="mkFilter"><option value="">Every kind</option><option value="repeat">Repeats only</option></select></label></div>
+            <div id="mkList" class="table tall"><p class="hint">After the first exam on Home.</p></div>
           </div>
         </div>
 
-        <div class="panel" data-panel="race" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>The race</h2><span class="sub" id="raceNow"></span></div>
-            <div id="raceTable" class="table"></div>
-            <p class="hint">Each generation the champion and every contender play the same brand-new matches with the same luck. A contender takes over when its lead passes the boundary (z ≥ 2.3: safe although it is looked at every generation) and it is not worse in its bad matches (its worst fifth). Clearly worse ones, and ones that could not prove themselves in 96 matches, are dropped.</p>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>What was learned this generation</h2></div>
-            <div id="learnNow" class="sub"></div>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>The champion's skill settings</h2><span class="sub">tuned by CMA-ES</span></div>
-            <div id="styleTable" class="table"></div>
-          </div>
+        <!-- ───────── LOG ───────── -->
+        <div class="page" data-page="log" hidden>
+          <header class="phead"><div><p class="eyebrow">Everything that happened</p><h1>Log</h1></div></header>
+          <div class="card"><p class="hint" id="logEmpty">Nothing yet since the studio opened. Training, searches and the studio’s own messages are listed here as they happen, newest first.</p><div class="log tall" id="log" aria-live="polite"></div></div>
         </div>
 
-        <div class="panel" data-panel="report" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>Gap report</h2><span class="sub" id="gapWhen"></span></div>
-            <div id="gapTable" class="table"></div>
-            <p class="hint">Measured the same way for everyone, from DSIM state. Your replays re-simulated in DSIM; the champion on your replays' own robot (ideal limits, no misses) and on each replay's own match — the same field luck you had; the champion on the exam. The rows split the gap: what the robot build costs, and what the brain and skills cost. A load starts with the first shot after a pickup.</p>
+        <!-- ───────── GENERATIONAL TRAINER (legacy) ───────── -->
+        <div class="page" data-page="overview" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Overview</h1></div></header>
+          <div class="stats">
+            <div class="stat"><div class="k">Generation</div><div class="v" id="gen">0</div><div class="s" id="genWhen">&nbsp;</div></div>
+            <div class="stat"><div class="k">Lessons</div><div class="v" id="lessonsN">0</div><div class="s">options played out</div></div>
+            <div class="stat"><div class="k">Matches</div><div class="v" id="matchesN">0</div><div class="s" id="simTime">&nbsp;</div></div>
+            <div class="stat"><div class="k">Matches / min</div><div class="v" id="rpm">—</div><div class="s">throughput</div></div>
           </div>
           <div class="card">
-            <div class="cardhead"><h2>Checks</h2></div>
-            <div id="checks" class="sub"></div>
+            <div class="cardhead"><h2>Champion</h2><span class="sub" id="champGen"></span></div>
+            <div id="champBody">No champion yet.</div>
+            <div class="row">
+              <button id="watchChamp" type="button" class="small">Watch champion</button>
+              <button id="copySnippet" type="button" class="quiet small">Copy DSIM snippet</button>
+              <a id="dlChamp" class="btn quiet small" href="/api/export/champion.json" download>Download network</a>
+              <a id="dlCsv" class="btn quiet small" href="/api/export/metrics.csv" download>Metrics CSV</a>
+            </div>
+            <p class="hint" id="snippetHint">Every champion takes the same exam (64 fixed matches, the same for every run), beside the no-learning robot on the same matches.</p>
           </div>
-          <div class="card">
-            <div class="cardhead"><h2>Mistakes on the exam</h2><span class="sub">per match</span></div>
-            <div id="examMistakes" class="table"></div>
-          </div>
+          <div class="card"><div class="cardhead"><h2>Learning curve</h2><span class="sub">the exam, by hours of training</span></div><canvas id="chartExam" class="chart" height="170"></canvas><div class="chartlegend" id="examLegend"></div></div>
+          <div class="card"><div class="cardhead"><h2>Points lost to choices</h2><span class="sub">per decision, what-if</span></div><canvas id="chartRegret" class="chart" height="110"></canvas><div class="chartlegend" id="regretLegend"></div></div>
+          <div class="card"><div class="cardhead"><h2>Seconds lost per match</h2></div><canvas id="chartLost" class="chart" height="110"></canvas><div class="chartlegend" id="lostLegend"></div><div class="sub" id="lostNow"></div></div>
+          <div class="card"><div class="cardhead"><h2>DSIM score by generation</h2><button id="tableToggle" type="button" class="link">Show table</button></div><canvas id="chartScore" class="chart" height="150"></canvas><div class="chartlegend" id="scoreLegend"></div><div id="fitTable" class="table" hidden></div></div>
+          <div class="card"><div class="cardhead"><h2>What the champion chooses</h2><span class="sub">share of its job decisions per generation</span></div><canvas id="chartChoice" class="chart" height="90"></canvas><div class="chartlegend" id="choiceLegend"></div></div>
+          <div class="card"><div class="cardhead"><h2>Every generation</h2><div class="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div><canvas id="comb" class="comb" aria-label="Honeycomb of generations: click one to replay its best match"></canvas></div>
         </div>
-
-        <div class="panel" data-panel="runs" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>Runs on this Mac</h2><button id="btnNew3" type="button" class="quiet">New run</button></div>
-            <div id="runsList" class="runlist"></div>
-            <p class="hint">Rename and delete need training stopped on that run. Duplicate makes an independent copy with the same history and checkpoints. Runs from older versions can only be deleted.</p>
-          </div>
+        <div class="page" data-page="race" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Race</h1></div><span class="sub" id="raceNow"></span></header>
+          <div class="card"><div id="raceTable" class="table"></div><p class="hint">Each generation the champion and every contender play the same brand-new matches with the same luck. A contender takes over when its lead passes the boundary and it is not worse in its bad matches.</p></div>
+          <div class="card"><div class="cardhead"><h2>This generation</h2></div><div id="learnNow" class="sub"></div></div>
+          <div class="card"><div class="cardhead"><h2>Skill settings</h2><span class="sub">tuned by CMA-ES</span></div><div id="styleTable" class="table"></div></div>
         </div>
-
-        <div class="panel" data-panel="checkpoints" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>Save a checkpoint</h2></div>
-            <form id="ckForm" class="row">
-              <input id="ckLabel" type="text" maxlength="80" placeholder="name it, e.g. before bigger mutations" aria-label="Checkpoint name" />
-              <button type="submit">Save checkpoint</button>
-            </form>
-            <p class="hint">A checkpoint is the whole run between two generations: every robot, the algorithm, the settings, the champion and the history. Rewinding saves the present first, so a rewind can be undone.</p>
-          </div>
-          <div class="card">
-            <div class="cardhead"><h2>Checkpoints</h2><span class="sub" id="ckCount"></span></div>
-            <div class="row"><button id="ckDelAuto" type="button" class="quiet danger">Delete all automatic</button><button id="ckDelUnpinned" type="button" class="quiet danger">Delete all unpinned</button></div>
-            <div id="ckList" class="cklist"></div>
-          </div>
+        <div class="page" data-page="report" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Report</h1></div><span class="sub" id="gapWhen"></span></header>
+          <div class="card"><div class="cardhead"><h2>Gap report</h2></div><div id="gapTable" class="table"></div></div>
+          <div class="card"><div class="cardhead"><h2>Checks</h2></div><div id="checks" class="sub"></div></div>
+          <div class="card"><div class="cardhead"><h2>Mistakes on the exam</h2><span class="sub">per match</span></div><div id="examMistakes" class="table"></div></div>
         </div>
-
-        <div class="panel" data-panel="settings" hidden>
+        <div class="page" data-page="runs" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Runs</h1></div><div class="actions"><button id="btnNew3" type="button" class="quiet">New run</button></div></header>
+          <div class="card"><div id="runsList" class="runlist"></div><p class="hint">Rename and delete need training stopped on that run. Duplicate makes an independent copy. Runs from older versions can only be deleted.</p></div>
+        </div>
+        <div class="page" data-page="checkpoints" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Checkpoints</h1></div><span class="sub" id="ckCount"></span></header>
           <div class="card">
-            <div class="cardhead"><h2>How to train</h2><span class="sub" id="presetNow"></span></div>
+            <form id="ckForm" class="row"><input id="ckLabel" type="text" maxlength="80" placeholder="Name it, e.g. before bigger mutations" aria-label="Checkpoint name" class="grow" /><button type="submit">Save checkpoint</button></form>
+            <p class="hint">A checkpoint is the whole run between two generations. Rewinding saves the present first, so a rewind can be undone.</p>
+          </div>
+          <div class="card"><div class="row"><button id="ckDelAuto" type="button" class="danger small">Delete all automatic</button><button id="ckDelUnpinned" type="button" class="danger small">Delete all unpinned</button></div><div id="ckList" class="cklist"></div></div>
+        </div>
+        <div class="page" data-page="settings" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Settings</h1></div><span class="sub" id="presetNow"></span></header>
+          <div class="card">
+            <div class="cardhead"><h2>How to train</h2></div>
             <div id="presetList" class="presets" role="radiogroup" aria-label="Training presets"></div>
-            <div id="presetDiff" class="sub diff"></div>
+            <div id="presetDiff" class="sub"></div>
             <div class="row"><button id="presetApply" type="button" disabled>Apply preset</button></div>
-            <p class="hint">A preset sets how hard the run trains: how many matches of lessons per generation, how many luck draws per lesson, how many skill settings are tried, how the champion is proven, how many cores. What the robots play (robot, driver) is never touched. Applies from the next generation.</p>
           </div>
-          <details class="card adv" id="advanced">
-            <summary><h2>Every setting</h2><span class="sub" id="cfgAlgo"></span></summary>
+          <details class="card" id="advanced">
+            <summary><h2>Every setting</h2></summary>
             <form id="cfgForm" class="advform">
-              <div class="cardhead"><h2>Lessons</h2></div>
-              <div class="fields" id="cfgCollect"></div>
-              <div class="cardhead"><h2>Learning</h2></div>
-              <div class="fields" id="cfgLearn"></div>
-              <div class="cardhead"><h2>Skill settings (CMA-ES)</h2></div>
-              <div class="fields" id="cfgSkills"></div>
-              <div class="cardhead"><h2>Race and exam</h2></div>
-              <div class="fields" id="cfgRace"></div>
-              <div class="cardhead"><h2>The robots' world</h2></div>
-              <div class="fields" id="cfgWorld"></div>
-              <div class="cardhead"><h2>Housekeeping</h2></div>
-              <div class="fields" id="cfgHouse"></div>
+              <h3>Lessons</h3><div class="fields" id="cfgCollect"></div>
+              <h3>Learning</h3><div class="fields" id="cfgLearn"></div>
+              <h3>Skill settings (CMA-ES)</h3><div class="fields" id="cfgSkills"></div>
+              <h3>Race and exam</h3><div class="fields" id="cfgRace"></div>
+              <h3>The robots' world</h3><div class="fields" id="cfgWorld"></div>
+              <h3>Housekeeping</h3><div class="fields" id="cfgHouse"></div>
               <div class="row"><button type="submit">Apply changes</button><button type="button" id="cfgReset" class="quiet">Undo edits</button></div>
-              <p class="hint">Changes apply from the next generation, go into the log, and are part of every checkpoint after them.</p>
+              <p class="hint">Changes apply from the next generation and go into the log.</p>
               <p class="hint" id="cfgFixed"></p>
             </form>
           </details>
         </div>
-
-        <div class="panel" data-panel="data" hidden>
+        <div class="page" data-page="data" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Training data</h1></div><span class="sub" id="dataState"></span></header>
           <div class="card">
-            <div class="cardhead"><h2>Training data</h2><span class="sub" id="dataState"></span></div>
-            <p class="sub">Your DSIM replays in <span class="mono">Training data/</span>. Each one is re-simulated in DSIM and every decision in it (which group, FLOWER, shoot, human player) becomes a demonstration. A network fitted to them races the champion from generation 0, and your decisions are mixed into what every candidate learns, fading out as the robot's own what-if lessons take over (the run's replay weight and fade). They are also the "you" row of the gap report.</p>
-            <div id="dataList" class="datalist"></div>
-            <div class="row">
-              <button id="dataRefresh" type="button">Refresh training data</button>
-              <label class="btnlink upload">Add replays…<input id="dataUpload" type="file" accept=".json,application/json" multiple hidden /></label>
-            </div>
+            <p class="sub">Your DSIM replays in <span class="mono">Training data/</span>. Each one is re-simulated in DSIM and every decision in it becomes a demonstration. Only a replay recorded in this DSIM (its version and its 3D physics) re-simulates exactly; one recorded before DSIM Act 2 is listed but left out.</p>
+            <div id="dataList" class="table"></div>
+            <div class="row"><button id="dataRefresh" type="button">Refresh training data</button><label class="btn quiet">Add replays…<input id="dataUpload" type="file" accept=".json,application/json" multiple hidden /></label></div>
             <p class="hint" id="dataRun"></p>
-            <p class="hint">Refresh re-simulates the ticked replays and refits (a few seconds per replay); the open run then learns from the new set from its next generation. In DSIM, save a replay with Records → the run → ↓ Data.</p>
           </div>
         </div>
-
-        <div class="panel" data-panel="evaluate" hidden>
+        <div class="page" data-page="evaluate" hidden>
+          <header class="phead"><div><p class="eyebrow">Generational trainer</p><h1>Evaluate</h1></div></header>
           <form id="evalForm" class="card">
-            <div class="cardhead"><h2>Evaluate a policy</h2></div>
-            <p class="hint">Full matches on held-out seeds (never used for lessons, the race or the exam); the reward is DSIM's score minus fouls DSIM does not call. Runs between generations.</p>
-            <div class="fields">
-              <label>Policy <select id="evalTarget"></select></label>
-              <label>Matches <input id="evalN" type="number" min="1" max="2000" value="32" /></label>
-            </div>
+            <p class="hint">Full matches on held-out seeds (never used for lessons, the race or the exam); the reward is DSIM's score minus fouls DSIM does not call.</p>
+            <div class="fields"><label>Policy <select id="evalTarget"></select></label><label>Matches <input id="evalN" type="number" min="1" max="2000" value="32" /></label></div>
             <div class="row"><button type="submit">Run evaluation</button></div>
           </form>
-          <div class="card">
-            <div class="cardhead"><h2>Results</h2></div>
-            <div id="evalList" class="table tall"></div>
-          </div>
+          <div class="card"><div class="cardhead"><h2>Results</h2></div><div id="evalList" class="table tall"></div></div>
         </div>
-
-        <div class="panel" data-panel="log" hidden>
-          <div class="card">
-            <div class="cardhead"><h2>Run log</h2></div>
-            <div class="log tall" id="log" aria-live="polite"></div>
-          </div>
-        </div>
-      </aside>
-
-      <section class="combwrap" aria-label="Every generation so far">
-        <div class="combhead"><h2>What the champion chooses to do</h2><span class="sub">share of its job decisions per generation, in its lesson matches</span></div>
-        <canvas id="chartChoice" height="90" aria-label="Share of each option chosen per generation"></canvas>
-        <div class="chartlegend" id="choiceLegend"></div>
-        <div class="combhead gap"><h2>Every generation so far</h2><span class="sub">one cell per generation · brighter = higher best lesson-match score · click to replay its best match</span><div class="ramp" id="ramp">lower <span class="sw" aria-hidden="true"></span> higher best score</div></div>
-        <canvas id="comb" aria-label="Honeycomb of generations"></canvas>
       </section>
     </main>
 
@@ -498,29 +477,27 @@
           <label>Name <input name="name" required pattern="[A-Za-z0-9_][A-Za-z0-9_\-]{0,47}" placeholder="solo-1" /></label>
           <label>How to train <select name="preset" id="newPreset"></select></label>
           <label>Robot <select name="profile" id="newProfile"></select></label>
-          <label class="check"><input name="sampleProfile" type="checkbox" checked /> a different robot from its range every match</label>
           <label>Driver <select name="driver"><option value="oracle">Exact (no reaction delay)</option><option value="human">Human (0.25 s reaction)</option></select></label>
           <label>Seed <input name="seed" type="number" min="1" value="1" /></label>
+          <label class="check"><input name="sampleProfile" type="checkbox" checked /> A new robot from its range every match</label>
         </div>
         <p class="hint" id="newErr" role="alert"></p>
         <div class="row end"><button type="button" class="quiet" data-close>Cancel</button><button type="submit" value="ok">Create run</button></div>
       </form>
     </dialog>
-
     <dialog id="forkDlg" aria-labelledby="forkTitle">
       <form id="forkForm" method="dialog" class="dlg">
         <h2 id="forkTitle">Fork into a new run</h2>
-        <p class="hint" id="forkFrom"></p>
+        <p id="forkFrom"></p>
         <div class="fields">
           <label>New run name <input name="name" required pattern="[A-Za-z0-9_][A-Za-z0-9_\-]{0,47}" /></label>
           <label>Lesson matches per generation <input name="collect" type="number" min="1" max="512" /></label>
-          <label class="check"><input name="open" type="checkbox" checked /> open it now</label>
+          <label class="check"><input name="open" type="checkbox" checked /> Open it now</label>
         </div>
         <p class="hint" id="forkErr" role="alert"></p>
         <div class="row end"><button type="button" class="quiet" data-close>Cancel</button><button type="submit" value="ok">Fork</button></div>
       </form>
     </dialog>
-
     <dialog id="askDlg" aria-labelledby="askTitle">
       <form method="dialog" class="dlg">
         <h2 id="askTitle"></h2>
@@ -530,11 +507,10 @@
         <div class="row end"><button value="no" class="quiet">Cancel</button><button value="yes" id="askYes">Confirm</button></div>
       </form>
     </dialog>
-
     <div id="closed" class="closed" hidden>
       <div>
-        <p class="emptyhead">Studio closed</p>
-        <p>Training, DSIM and the studio have stopped. Your runs are saved. Start again with <span class="mono">./start.sh</span> — a run that was training carries on by itself.</p>
+        <p class="t">STUDIO CLOSED</p>
+        <p>Training, DSIM and the studio have stopped. Your runs are saved. Start again with <span class="mono">./start.sh</span>: a run that was training carries on by itself.</p>
         <p class="sub" id="closedHint">You can close this tab.</p>
       </div>
     </div>

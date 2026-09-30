@@ -17,14 +17,16 @@ import { Store } from './store';
 import { PARTNERS, PLAYBOOK_PARTNERS, STARTS, legalPair, partnerProfile, type PartnerKind, type StartId } from './team';
 import type { Frames } from './episode';
 import { ensureEnvelopes } from './envelope';
+import { PHYSICS } from '../harness/dsim';
 import { AUTO_RULES } from './skills';
 import { zoneStamp } from './zone';
 
 export const PLAYBOOK_DIR = join(ROOT, 'outputs', 'playbook');
 /** `rules`: the AUTO rules and shooting zone it was planned under; `stale`: not today's (a build plans it again) */
 export type PlaybookEntry = Omit<AutoResult, 'frames' | 'events'> & { key: string; at: string; rules?: string; stale?: boolean };
-/** what a plan depends on besides the problem: the AUTO rules (skills.ts AUTO_RULES) and the robot's shooting zone */
-export const rulesStamp = (profile: string): string => `${AUTO_RULES}|${zoneStamp(loadProfile(isAbsolute(profile) ? profile : join(ROOT, profile)).shootZone)}`;
+/** what a plan depends on besides the problem: the AUTO rules (skills.ts AUTO_RULES), the sim it was
+ * planned in (DSIM Act 2's 3D solve) and the robot's shooting zone */
+export const rulesStamp = (profile: string): string => `${AUTO_RULES}|dsim-act2-${PHYSICS}|${zoneStamp(loadProfile(isAbsolute(profile) ? profile : join(ROOT, profile)).shootZone)}`;
 /** an entry's replay: exact frames and the match's events (what the studio's field view plays) */
 export interface PlaybookReplay {
   frames: Frames;

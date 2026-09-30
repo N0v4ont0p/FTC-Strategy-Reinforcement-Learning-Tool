@@ -6,7 +6,7 @@
 // honest wording — optimal only within this family — and each result carries a PROVABLE lower
 // bound (drive.ts), so the gap to the true optimum is known.
 // (v1 only routed around the HIVE frame: 29/208 REAL-v0 pairs jammed on FLOWER feet and walls.)
-import { BB, biobuzzStep, cmd, DT, footprintCorners, labWorld, type RobotCommand, type RobotSpec, type World } from '../dsim';
+import { BB, biobuzzStep, cmd, DT, dispose, footprintCorners, labWorld, type RobotCommand, type RobotSpec, type World } from '../dsim';
 import { polysOverlap, rect } from '../geom';
 import { mulberry32, seedOf } from '../rng';
 import { effective, lbTicks, lbTurnTicks, type Eff } from './drive';
@@ -77,6 +77,13 @@ export interface Rollout {
 
 export function rollout(spec: RobotSpec, E: Eff, from: Pose, to: Pose, p: Params, trace = false, base?: World): Rollout {
   const w = base ? structuredClone(base) : labWorld(1, [{ id: 0, alliance: 'blue', spec, startIndex: 0 }]);
+  try {
+    return rolloutIn(w, E, from, to, p, trace);
+  } finally {
+    dispose(w); // its 3D engine: a route search plays thousands of these
+  }
+}
+function rolloutIn(w: World, E: Eff, from: Pose, to: Pose, p: Params, trace: boolean): Rollout {
   const r = w.robots[0];
   r.pos = { x: from.x, y: from.y };
   r.heading = from.h ?? 0;

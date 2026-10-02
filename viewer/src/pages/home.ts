@@ -25,9 +25,14 @@ export function renderHome(): void {
   if (sel.value !== H.profile) sel.value = H.profile;
   const s = H.status;
   const busy = H.busy.v1 ? `The generational run “${H.busy.v1}” is training: one trainer at a time.` : H.busy.playbook ? `The ${H.busy.playbook} AUTO playbook is being built: it needs every core.` : '';
-  $<HTMLButtonElement>('homeTrain').disabled = !!s?.running || !!busy;
-  $<HTMLButtonElement>('homePause').disabled = !s?.running;
-  sel.disabled = !!s?.running;
+  // ONE control: Start (or Continue) while stopped, Stop while it trains
+  const run = !!s?.running;
+  $('homeTrain').hidden = run;
+  $('homePause').hidden = !run;
+  $<HTMLButtonElement>('homeTrain').disabled = !!busy;
+  setText($('homeTrain'), s?.totals.matches ? 'Continue training' : 'Start training');
+  setText($('homeCtlNote'), run ? 'Stop any time: every lesson and result is kept (only the matches in play are dropped).' : s?.totals.matches ? `Stopped. Continue picks up where it left off (${fmt(s.totals.matches)} matches so far).` : 'It trains until you stop it.');
+  sel.disabled = run;
   const ex = s?.champion.exam;
   setHTML($('homeExam'), ex ? `${ex.mean.toFixed(1)}<span class="u">PTS</span>` : '—');
   $('homeExam').classList.toggle('none', !ex);
@@ -39,11 +44,21 @@ export function renderHome(): void {
         ? `<span class="chip">± ${ex.ci95.toFixed(1)} · ${ex.n} fixed matches</span>${s.champion.learned ? `<span class="chip ${ex.vsBase.mean >= 0 ? 'up' : 'down'}">${sgn(ex.vsBase.mean)} ± ${ex.vsBase.ci95.toFixed(1)} vs no-learning</span>` : '<span class="chip">the no-learning robot: the first network has to beat it</span>'}<span class="chip">worst tenth ${ex.cvar10.toFixed(0)}</span>`
         : '<span class="sub">The no-learning robot takes the exam first.</span>',
   );
-  setText($('homeState'), !s ? 'Idle' : s.running ? (s.improving === 'flat' ? 'Flat' : 'Training') : 'Paused');
+  // which brain plays: always the champion, never simply the newest network
+  const ch = s?.champion;
+  setHTML(
+    $('homeModel'),
+    !s || !ch
+      ? ''
+      : ch.learned
+        ? `<b>The robot plays with network #${ch.id}</b>, the best one proven on the exam. A newer network takes over only if it beats it on the same ${ex?.n ?? ''} matches (${s.totals.promotions} promoted, ${s.totals.rejections} not). <a href="/api/export/v2-champion.json?profile=${encodeURIComponent(H.profile)}" download>Download it</a>`
+        : `<b>The robot plays with its hand-written skills</b>: no trained network has beaten them on the exam yet (${s.totals.rejections} tried). A network takes over only when the exam proves it better, never just because it is newer.`,
+  );
+  setText($('homeState'), !s ? 'Idle' : s.running ? (s.improving === 'flat' ? 'Flat' : 'Training') : 'Stopped');
   $('homeState').className = `v${s?.running ? ' on' : ''}`;
   const a = s?.activity;
   // (while it trains, the live picture says exactly what it is doing: live.ts keeps this current)
-  setText($('homeDoing'), !s?.running ? (s ? 'press Train to carry on' : ' ') : S.live?.running ? trainStage(S.live).short : a?.evaluating ? `exam of #${a.evaluating.id} ${a.evaluating.done}/${a.evaluating.total}` : a?.learning ? 'learning a new candidate' : `playing · ${fmt(s.nextLearnIn)} lessons to the next candidate`);
+  setText($('homeDoing'), !s?.running ? (s ? 'press Continue training' : ' ') : S.live?.running ? trainStage(S.live).short : a?.evaluating ? `exam of #${a.evaluating.id} ${a.evaluating.done}/${a.evaluating.total}` : a?.learning ? 'learning a new candidate' : `playing · ${fmt(s.nextLearnIn)} lessons to the next candidate`);
   setText($('homeCpu'), s?.running ? pct(s.cpu) : '—');
   setText($('homeHours'), s ? `${s.totals.hours.toFixed(1)} h · ${fmt(s.totals.matches)} matches` : ' ');
   setText($('homeLabels'), s ? fmt(s.totals.labels) : '0');
@@ -134,7 +149,7 @@ $('homeTrain').onclick = async () => {
   try {
     S.home = await post<HomeV>('/api/home/train', { profile: $<HTMLSelectElement>('homeProfile').value });
     renderHome();
-    toast('Training: it keeps going until you pause.');
+    toast('Training: it keeps going until you stop it.');
   } catch (e) {
     toast((e as Error).message, true);
   }
@@ -143,7 +158,7 @@ $('homePause').onclick = async () => {
   try {
     S.home = await post<HomeV>('/api/home/pause', {});
     renderHome();
-    toast('Paused.');
+    toast('Stopped. Everything it learned is kept.');
   } catch (e) {
     toast((e as Error).message, true);
   }
@@ -162,6 +177,7 @@ interface SetupV {
   teamplays: number | null;
 }
 let setupAt = 0;
+let setupShown = false;
 export async function loadSetup(force = false): Promise<void> {
   if (!force && Date.now() - setupAt < 20_000) return;
   setupAt = Date.now();
@@ -174,11 +190,16 @@ export async function loadSetup(force = false): Promise<void> {
       { ok: u.service, title: 'The studio runs by itself', detail: u.service ? 'installed: starts at login, restarts after a crash' : 'in Terminal: ./start.sh --install', go: u.service ? undefined : ['copy:./start.sh --install', 'Copy'] },
       { ok: u.notify, title: 'Notifications are on', detail: u.notify ? 'new champions, a finished playbook, problems' : 'switched off below' },
       { ok: !!u.run, title: 'Training has started', detail: u.run ? `champion ${u.run.champion ? `#${u.run.champion}` : '(no-learning)'}${u.run.exam !== null ? ` · exam ${u.run.exam.toFixed(1)}` : ''}` : 'press Train above' },
-      { ok: (u.teamplays ?? 0) >= 3, title: 'Team plays are searched', detail: u.teamplays ? `beside ${u.teamplays} kinds of partner: training plays inside the winners` : 'while training is paused: the plays that win beside each partner', go: (u.teamplays ?? 0) >= 3 ? undefined : ['plays', 'Open'] },
-      { ok: (u.playbook?.entries ?? 0) >= 20, title: 'The AUTO playbook is built', detail: u.playbook ? `${u.playbook.entries} current plans` : 'while training is paused', go: (u.playbook?.entries ?? 0) >= 20 ? undefined : ['playbook', 'Open'] },
+      { ok: (u.teamplays ?? 0) >= 3, title: 'Team plays are searched', detail: u.teamplays ? `beside ${u.teamplays} kinds of partner: training plays inside the winners` : 'while training is stopped: the plays that win beside each partner', go: (u.teamplays ?? 0) >= 3 ? undefined : ['plays', 'Open'] },
+      { ok: (u.playbook?.entries ?? 0) >= 20, title: 'The AUTO playbook is built', detail: u.playbook ? `${u.playbook.entries} current plans` : 'while training is stopped', go: (u.playbook?.entries ?? 0) >= 20 ? undefined : ['playbook', 'Open'] },
     ];
     const done = items.filter((i) => i.ok).length;
-    setText($('setupScore'), `${done} of ${items.length}`);
+    setText($('setupScore'), done === items.length ? `all ${done} done ✓` : `${done} of ${items.length}`);
+    // open while something is left to do (then it is the user's to open or close)
+    if (!setupShown) {
+      setupShown = true;
+      $<HTMLDetailsElement>('setupCard').open = done < items.length;
+    }
     setHTML(
       $('setupList'),
       items
@@ -249,6 +270,7 @@ interface NotifyV {
 }
 const NT_LABEL: [string, string][] = [['enabled', 'On'], ['champion', 'New champion'], ['playbook', 'Playbook finished'], ['problems', 'Problems and crashes'], ['sound', 'Sound']];
 function renderNotify(n: NotifyV): void {
+  setText($('ntSum'), n.settings.enabled ? 'on' : 'off');
   setHTML($('ntToggles'), NT_LABEL.map(([k, l]) => `<label class="switch${k !== 'enabled' && !n.settings.enabled ? ' off' : ''}"><input type="checkbox" data-nt="${k}" ${n.settings[k] ? 'checked' : ''} ${k !== 'enabled' && !n.settings.enabled ? 'disabled' : ''}/>${l}</label>`).join(''));
   setHTML($('ntRecent'), n.recent.length ? n.recent.slice(0, 4).map((r) => `<div>${new Date(r.time).toLocaleTimeString()} · <b>${esc(r.title)}</b>: ${esc(r.body)}</div>`).join('') : n.mac === false ? 'macOS only.' : 'Nothing sent yet.');
 }

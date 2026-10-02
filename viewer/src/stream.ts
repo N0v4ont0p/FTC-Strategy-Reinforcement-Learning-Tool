@@ -93,7 +93,7 @@ function show(st: Stream & { head: LiveHead }): void {
 /** following, with no match to show yet */
 function waiting(): void {
   shown = null;
-  setCaption(`<span class="sub">${S.live?.running ? 'Waiting for training’s next match: it appears as soon as a core starts it.' : 'Training is paused: press Train on Home and its matches play here as they happen.'}</span>`);
+  setCaption(`<span class="sub">${S.live?.running ? 'Waiting for training’s next match: it appears as soon as a core starts it.' : 'Training is stopped: press Continue training on Home and its matches play here as they happen.'}</span>`);
   $('think').hidden = true;
   renderTransport();
 }

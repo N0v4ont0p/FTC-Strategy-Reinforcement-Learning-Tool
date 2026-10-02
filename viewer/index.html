@@ -37,6 +37,7 @@
     <div id="activity" class="activity" hidden>
       <div class="acts" id="acts" role="status" aria-live="off" aria-label="Running now"></div>
       <button id="actWatch" type="button" class="small" hidden><i class="rec" aria-hidden="true"></i>Watch live</button>
+      <button id="actStop" type="button" class="quiet small" hidden>Stop training</button>
       <div class="actline" aria-hidden="true"><div id="actFill"></div></div>
     </div>
 
@@ -152,20 +153,21 @@
             <div>
               <p class="eyebrow">Training · continuous</p>
               <h1>Home</h1>
-              <p class="lead">One button. The robot plays full matches beside every kind of partner and thinks ahead at its decisions; every decision it thinks through is a lesson. A new network takes over only after the fixed exam proves it clearly better, never worse in its bad matches.</p>
+              <p class="lead">Start training and leave it. The robot plays full matches, thinks ahead at its decisions and learns from them. Stop whenever you like: nothing learned is lost.</p>
             </div>
           </header>
-          <div class="notice" id="homeCarried" hidden></div>
           <div class="hero">
             <div>
               <div class="k">Exam · our robot alone, every partner and opponent</div>
               <div class="score none" id="homeExam">—</div>
-              <div class="line" id="homeExamLine"><span class="sub">press Train: nothing has been learned yet</span></div>
+              <div class="line" id="homeExamLine"><span class="sub">press Start training: nothing has been learned yet</span></div>
+              <p class="model" id="homeModel"></p>
             </div>
             <div class="ctl">
               <select id="homeProfile" aria-label="Robot to train"></select>
-              <button id="homeTrain" type="button" class="big">Train</button>
-              <button id="homePause" type="button" class="quiet">Pause</button>
+              <button id="homeTrain" type="button" class="big">Start training</button>
+              <button id="homePause" type="button" class="big stop" hidden>Stop training</button>
+              <p class="ctlnote" id="homeCtlNote"></p>
             </div>
           </div>
           <div class="notice bad" id="homeProblems" role="alert" hidden></div>
@@ -182,37 +184,38 @@
             <div class="stat"><div class="k">Lessons</div><div class="v" id="homeLabels">0</div><div class="s" id="homeRate">decisions learned from</div></div>
             <div class="stat"><div class="k">Champion</div><div class="v" id="homeChamp">—</div><div class="s" id="homeChampWhen">&nbsp;</div></div>
           </div>
-          <div class="card" id="setupCard">
-            <div class="cardhead"><h2>Ready to train</h2><span class="sub" id="setupScore"></span></div>
+          <details class="card" id="setupCard">
+            <summary><h2>Ready to train</h2><span class="sub" id="setupScore"></span></summary>
             <ol class="checklist" id="setupList"></ol>
-          </div>
+          </details>
           <div class="card">
             <div class="cardhead"><h2>Exam by hours of training</h2><span class="sub" id="homeTrend"></span></div>
             <canvas id="homeChart" class="chart" height="170" aria-label="The champion's exam score by hours of training, with the no-learning robot as a reference line"></canvas>
             <div class="chartlegend" id="homeLegend"></div>
           </div>
-          <div class="cols">
-            <div class="card"><div class="cardhead"><h2>Beside each partner</h2></div><div id="homePartners" class="table"></div></div>
-            <div class="card"><div class="cardhead"><h2>Against each opponent</h2></div><div id="homeOpponents" class="table"></div></div>
+          <div class="card">
+            <div class="cardhead"><h2>Candidates</h2><span class="sub" id="homeLearner"></span></div>
+            <div id="homeCands" class="table"></div>
+            <div class="hint carried" id="homeCarried" hidden></div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>Watch the champion</h2><a id="dlChampV2" class="btn quiet small" href="#" download hidden>Download network</a></div>
             <div class="row"><select id="watchSel" aria-label="Exam match to watch" class="grow"></select><button id="watchGo" type="button">Watch</button></div>
             <p class="hint">Any of its exam matches, replayed exactly on the field: beside each kind of partner, against each kind of opponent.</p>
           </div>
-          <div class="card">
-            <div class="cardhead"><h2>Candidates</h2><span class="sub" id="homeLearner"></span></div>
-            <div id="homeCands" class="table"></div>
+          <div class="cols">
+            <div class="card"><div class="cardhead"><h2>Beside each partner</h2></div><div id="homePartners" class="table"></div></div>
+            <div class="card"><div class="cardhead"><h2>Against each opponent</h2></div><div id="homeOpponents" class="table"></div></div>
           </div>
           <div class="card">
             <div class="cardhead"><h2>What it is doing</h2></div>
             <div id="homeLog" class="log"></div>
           </div>
-          <div class="card">
-            <div class="cardhead"><h2>Notifications</h2><button id="ntTest" type="button" class="quiet small">Send a test</button></div>
+          <details class="card">
+            <summary><h2>Notifications</h2><span class="sub" id="ntSum"></span></summary>
             <div class="toggles" id="ntToggles"></div>
-            <div id="ntRecent" class="sub"></div>
-          </div>
+            <div class="row"><div id="ntRecent" class="sub grow"></div><button id="ntTest" type="button" class="quiet small">Send a test</button></div>
+          </details>
         </div>
 
         <!-- ───────── ROBOT ───────── -->

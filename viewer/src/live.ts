@@ -208,7 +208,7 @@ function renderTiles(t: TrainLive): void {
       setText(T.kind, 'Core');
       setText(T.el2, '');
       setText(T.ttl, 'Idle');
-      setText(T.ts, t.running ? 'waiting for work' : 'paused');
+      setText(T.ts, t.running ? 'waiting for work' : 'stopped');
       T.fill.style.transform = 'scaleX(0)';
       setText(T.ph, '');
       setText(T.sc, '');

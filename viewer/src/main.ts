@@ -69,7 +69,7 @@ function renderPill(): void {
     : tp?.running
       ? `Team plays ${tp.done}/${tp.total} · ${((100 * (tp.done + (tp.matchesTotal ? (tp.matches ?? 0) / tp.matchesTotal : 0))) / Math.max(1, tp.total)).toFixed(0)} %`
       : '';
-  const t = job || (!s ? 'Not training' : `${s.name} · ${s.running ? 'training' : 'paused'}${ex ? ` · exam ${ex.mean.toFixed(1)}` : ''}${s.champion.learned ? ` · #${s.champion.id}` : ''}`);
+  const t = job || (!s ? 'Not training' : `${s.name} · ${s.running ? 'training' : 'stopped'}${ex ? ` · exam ${ex.mean.toFixed(1)}` : ''}${s.champion.learned ? ` · #${s.champion.id}` : ''}`);
   setText($('pillText'), t);
   $('pill').className = `pill${job ? ' busy' : s?.running ? ' on' : ''}`;
   $('pill').dataset.go = pb?.running ? 'playbook' : tp?.running ? 'plays' : 'home';

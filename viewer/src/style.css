@@ -223,6 +223,15 @@ details.card[open] > summary::before { transform: rotate(90deg); }
 .hero .line { margin-top: 8px; color: var(--mist); font-size: 12.5px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .hero .ctl { display: flex; flex-direction: column; gap: 8px; align-items: stretch; min-width: 170px; }
 .hero .ctl select { height: 34px; }
+.hero .ctl button.stop { background: transparent; color: var(--red); box-shadow: inset 0 0 0 1.5px rgba(255, 93, 77, 0.6); }
+.hero .ctl button.stop:hover { background: var(--red-soft); }
+.hero .ctlnote { margin: 0; font-size: 11.5px; color: var(--dust); max-width: 210px; line-height: 1.45; }
+/* which brain the robot plays with: always the champion */
+.hero .model { margin: 12px 0 0; font-size: 12.5px; color: var(--mist); max-width: 60ch; line-height: 1.5; }
+.hero .model b { color: var(--chalk); font-weight: 600; }
+details.card > summary .sub { margin-left: auto; }
+.hint.carried p { margin: 0; }
+#actStop { flex: none; color: var(--red); box-shadow: inset 0 0 0 1px rgba(255, 93, 77, 0.45); }
 .chip { display: inline-flex; align-items: center; gap: 5px; font: 600 12px/1 var(--f-mono); padding: 4px 8px; border-radius: 999px; background: var(--deck-3); color: var(--mist); }
 .chip.up { background: var(--leaf-soft); color: var(--leaf); }
 .chip.down { background: var(--red-soft); color: var(--red); }

@@ -189,7 +189,7 @@ export async function loadSetup(force = false): Promise<void> {
       { ok: u.envelope === 'measured', title: 'Its shooting envelope is measured', detail: u.envelope === 'measured' ? 'measured for this build in DSIM’s 3D physics' : u.envelope === 'nearest' ? 'measured at another size of this build: close' : 'not measured: training uses REAL-v0’s', go: u.envelope === 'measured' ? undefined : ['robot', 'Measure'] },
       { ok: u.service, title: 'The studio runs by itself', detail: u.service ? 'installed: starts at login, restarts after a crash' : 'in Terminal: ./start.sh --install', go: u.service ? undefined : ['copy:./start.sh --install', 'Copy'] },
       { ok: u.notify, title: 'Notifications are on', detail: u.notify ? 'new champions, a finished playbook, problems' : 'switched off below' },
-      { ok: !!u.run, title: 'Training has started', detail: u.run ? `champion ${u.run.champion ? `#${u.run.champion}` : '(no-learning)'}${u.run.exam !== null ? ` · exam ${u.run.exam.toFixed(1)}` : ''}` : 'press Train above' },
+      { ok: !!u.run, title: 'Training has started', detail: u.run ? `champion ${u.run.champion ? `#${u.run.champion}` : '(no-learning)'}${u.run.exam !== null ? ` · exam ${u.run.exam.toFixed(1)}` : ''}` : 'press Start training above' },
       { ok: (u.teamplays ?? 0) >= 3, title: 'Team plays are searched', detail: u.teamplays ? `beside ${u.teamplays} kinds of partner: training plays inside the winners` : 'while training is stopped: the plays that win beside each partner', go: (u.teamplays ?? 0) >= 3 ? undefined : ['plays', 'Open'] },
       { ok: (u.playbook?.entries ?? 0) >= 20, title: 'The AUTO playbook is built', detail: u.playbook ? `${u.playbook.entries} current plans` : 'while training is stopped', go: (u.playbook?.entries ?? 0) >= 20 ? undefined : ['playbook', 'Open'] },
     ];
@@ -245,7 +245,7 @@ function renderStageEmpty(): void {
       ? `Training is playing right now: watch its match live, thinking ahead at each decision${examReady ? ', or the champion’s exam matches, playbook plans, routes and mistakes, exactly as DSIM played them' : ''}.`
       : examReady
         ? 'Watch the champion play an exam match, a playbook plan, a route or a mistake, exactly as DSIM played it.'
-        : 'Matches play here exactly as DSIM played them: the champion’s exam, a playbook plan, a route, a mistake. The first exam runs when you press Train.',
+        : 'Matches play here exactly as DSIM played them: the champion’s exam, a playbook plan, a route, a mistake. The first exam runs when you press Start training.',
   );
 }
 bus.on('train', renderStageEmpty);

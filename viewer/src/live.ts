@@ -4,8 +4,8 @@
 // search, a shooting envelope being measured, a match played again in DSIM to watch it.
 // Everything here that can be clicked is built once and then only updated (text, widths), so a click
 // never lands on an element being replaced.
-import { fmt, type JobKind, type LiveJob, type TrainLive } from './data';
-import { $, PARTNER_LABEL, dur, on, setHTML, setText, sgn } from './ui';
+import { fmt, post, type JobKind, type LiveJob, type TrainLive } from './data';
+import { $, PARTNER_LABEL, act, dur, on, setHTML, setText, sgn } from './ui';
 import { S, bus } from './state';
 import { follow, following, liveAvailable, shownId } from './stream';
 
@@ -102,11 +102,14 @@ export function renderActivity(): void {
   const any = items.size > 0;
   $('activity').hidden = !any;
   $('actWatch').hidden = !(t?.running && liveAvailable() && !following());
+  $('actStop').hidden = !t?.running;
   $('actFill').style.transform = `scaleX(${Math.max(0, Math.min(1, lead ?? 0)).toFixed(4)})`;
   $('activity').classList.toggle('train', !!t?.running);
 }
 on<HTMLButtonElement>($('acts'), 'button[data-go]', (b) => bus.emit('go', b.dataset.go));
 $('actWatch').onclick = () => follow();
+// stop training from any page (Home's Continue training carries on; nothing learned is lost)
+$('actStop').onclick = () => void act(post('/api/home/pause', {}), 'Stopped. Everything it learned is kept.');
 bus.on('activity', renderActivity);
 bus.on('pill', renderActivity); // (the playbook's and the team plays' progress)
 

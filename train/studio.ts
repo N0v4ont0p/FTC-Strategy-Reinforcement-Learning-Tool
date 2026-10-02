@@ -42,7 +42,9 @@ const bin = (n: string): string => join(ROOT, 'dsim-main', 'node_modules', '.bin
 try {
   const r = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(800) });
   if (r.status < 500) {
-    console.log(`A studio is already running at http://localhost:${port} — not starting a second one.`);
+    // (usually the service from ./start.sh --install, running in the background with no window: open it)
+    console.log(`The studio is already running at http://localhost:${port} (in the background) — opening it. To quit it: ./start.sh --stop`);
+    if (!flag('no-open')) spawn('open', [`http://localhost:${port}`], { stdio: 'ignore', detached: true }).unref();
     process.exit(0);
   }
 } catch {

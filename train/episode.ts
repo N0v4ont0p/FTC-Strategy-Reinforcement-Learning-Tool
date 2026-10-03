@@ -179,6 +179,7 @@ export interface Searched {
   at: 'think' | 'begin';
   chosen: number; // what the robot did
   net: number; // what its network alone would have done
+  hand?: number; // the job the hand-written order would have taken (the residual network's reference)
   robot?: number; // 0 = ours, 1 = the partner (searchPartner)
   q: (number | null)[];
   se: (number | null)[];
@@ -825,9 +826,12 @@ export class Episode {
       this.think({ at: 'round', tick: d.tick, robot: who, r, alive: [...alive], q: q.map(r1) });
       if (r === S.rounds.length - 1) break; // the final comparison is on this round's draws
       if (alive.length <= 2) continue; // two left: both go on to the longer, better-sampled round
-      // the better half go on; the network's own choice always does (it is what gets overruled)
+      // the better half go on; the network's own choice always does (it is what gets overruled).
+      // Values that do not separate them (more than half of the first rounds: nothing happens
+      // differently in 10 s) are no reason to drop one: then the robot's own preference decides, not
+      // where an option happens to sit in the list
       const keep = Math.max(2, Math.ceil(alive.length / 2));
-      const order = alive.map((i, j) => [i, j] as const).sort((a, b) => q[b[0]]! - q[a[0]]! || a[0] - b[0]);
+      const order = alive.map((i, j) => [i, j] as const).sort((a, b) => q[b[0]]! - q[a[0]]! || d.scores[b[0]] - d.scores[a[0]] || a[0] - b[0]);
       const next = order.slice(0, keep).map(([i]) => i);
       if (!next.includes(d.chosen) && alive.includes(d.chosen)) next[next.length - 1] = d.chosen;
       alive = alive.filter((i) => next.includes(i));
@@ -850,7 +854,7 @@ export class Episode {
       P.thinking = false;
       this.clock(this.w, true);
     }
-    return { tick: d.tick, at: d.at, chosen: best, net: d.chosen, robot: who, q, se, n, depth, rq };
+    return { tick: d.tick, at: d.at, chosen: best, net: d.chosen, hand: d.hand, robot: who, q, se, n, depth, rq };
   }
 
   /** the whole life, with lessons / search at the decisions when asked */

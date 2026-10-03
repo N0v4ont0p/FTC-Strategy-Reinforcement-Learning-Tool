@@ -51,8 +51,8 @@ export function renderHome(): void {
     !s || !ch
       ? ''
       : ch.learned
-        ? `<b>The robot plays with network #${ch.id}</b>, the best one proven on the exam. A newer network takes over only if it beats it on the same ${ex?.n ?? ''} matches (${s.totals.promotions} promoted, ${s.totals.rejections} not). <a href="/api/export/v2-champion.json?profile=${encodeURIComponent(H.profile)}" download>Download it</a>`
-        : `<b>The robot plays with its hand-written skills</b>: no trained network has beaten them on the exam yet (${s.totals.rejections} tried). A network takes over only when the exam proves it better, never just because it is newer.`,
+        ? `<b>The robot plays with its hand-written skills, overruled by network #${ch.id}</b> where that network learned better (the best proven on the exam). A newer network takes over only if it beats it on the same ${ex?.n ?? ''} matches (${s.totals.promotions} promoted, ${s.totals.rejections} not). <a href="/api/export/v2-champion.json?profile=${encodeURIComponent(H.profile)}" download>Download it</a>`
+        : `<b>The robot plays with its hand-written skills</b>: no trained network has beaten them on the exam yet (${s.totals.rejections} tried). A network only ever overrules them where it learned better, and takes over only when the exam proves it, never just because it is newer.`,
   );
   setText($('homeState'), !s ? 'Idle' : s.running ? (s.improving === 'flat' ? 'Flat' : 'Training') : 'Stopped');
   $('homeState').className = `v${s?.running ? ' on' : ''}`;
@@ -102,13 +102,28 @@ export function renderHome(): void {
   dl.hidden = !s?.champion.learned;
   dl.href = `/api/export/v2-champion.json?profile=${encodeURIComponent(H.profile)}`;
   const L = s?.learner;
-  setText($('homeLearner'), L?.last ? `last lesson: agrees with the search ${pct(L.last.agree)} of held-out decisions, gives away ${L.last.regret.toFixed(1)} pts each · learning rate ${L.lr.toPrecision(2)}` : '');
+  const Lr = L?.last;
+  setText(
+    $('homeLearner'),
+    !Lr
+      ? ''
+      : Lr.overrule === undefined
+        ? `last lesson: agrees with the search ${pct(Lr.agree)} of held-out decisions`
+        : Lr.overrule > 0
+          ? `last lesson: overrules the hand-written skills at ${(100 * Lr.overrule).toFixed(1)}% of held-out decisions, ${sgn(Lr.gain ?? 0, 2)} pts each`
+          : 'last lesson: found nothing worth overruling the hand-written skills for (yet)',
+  );
   setHTML(
     $('homeCands'),
     s?.candidates.length
-      ? `<table><thead><tr><th>#</th><th class="l">Verdict</th><th title="paired with the champion on the same exam matches">vs champion</th><th>Matches</th><th title="held-out decisions where its first choice is the search's">Agrees</th></tr></thead><tbody>${[...s.candidates]
+      ? `<table><thead><tr><th>#</th><th class="l">Verdict</th><th title="exam points per match, paired with the champion on the same exam matches">vs champion</th><th>Exam matches</th><th title="held-out decisions: how often it overrules the hand-written skills, and the points per decision that gains (the search's values)">Overrules</th></tr></thead><tbody>${[...s.candidates]
           .reverse()
-          .map((q) => `<tr><td>${q.id}</td><td class="l">${q.verdict === 'promoted' ? '<span class="badge ok">★ promoted</span>' : '<span class="badge">not better</span>'}</td><td class="${q.diff.mean > 0 ? 'gain' : ''}">${sgn(q.diff.mean)} ± ${q.diff.ci95.toFixed(1)}</td><td>${q.n}</td><td>${pct(q.learn.agree)}</td></tr>`)
+          .map((q) => {
+            const over = q.learn.overrule === undefined ? `<span class="sub">old kind</span>` : q.learn.overrule > 0 ? `${(100 * q.learn.overrule).toFixed(1)}% · ${sgn(q.learn.gain ?? 0, 2)}` : '<span class="sub">never</span>';
+            return q.verdict === 'skipped'
+              ? `<tr><td>${q.id}</td><td class="l"><span class="badge" title="no gain over the champion on held-out decisions, so it did not sit the exam">no gain: not examined</span></td><td>—</td><td>0</td><td>${over}</td></tr>`
+              : `<tr><td>${q.id}</td><td class="l">${q.verdict === 'promoted' ? '<span class="badge ok">★ promoted</span>' : '<span class="badge">not better</span>'}</td><td class="${q.diff.mean > 0 ? 'gain' : ''}">${sgn(q.diff.mean)} ± ${q.diff.ci95.toFixed(1)}</td><td>${q.n}</td><td>${over}</td></tr>`;
+          })
           .join('')}</tbody></table>`
       : `<p class="hint">${s?.running ? `The first candidate is learned after ${fmt(s.nextLearnIn)} more decisions.` : 'None yet.'}</p>`,
   );

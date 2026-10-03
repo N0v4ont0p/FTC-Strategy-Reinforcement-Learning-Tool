@@ -148,7 +148,7 @@ function tracks(t: TrainLive): string {
   // (while #next is being learned, the lessons count toward the one after it)
   row(have >= need ? 'done' : 'on', `Lessons toward candidate #${t.learning ? t.next + 1 : t.next}`, 'every decision it thinks through in a match is one', have / Math.max(1, need), have >= need ? `${fmt(have)} · enough${t.exam ? ': learns after this exam' : ''}` : `${fmt(have)} of ${fmt(need)}${eta}`);
   const L = learnerOf(t)?.p;
-  if (t.learning) row('on', `Learning candidate #${t.next}`, 'one fit per learning rate: the best on held-out decisions becomes the candidate', L?.k === 'learn' ? L.frac : null, L?.k === 'learn' ? `rate ${L.lr + 1} of ${L.lrs} · epoch ${L.epoch + 1} of ${L.epochs}${L.loss !== null ? ` · loss ${L.loss.toFixed(3)}` : ''}` : 'starting');
+  if (t.learning) row('on', `Learning candidate #${t.next}`, 'it may only overrule the hand-written skills where it is sure: one fit per learning rate, the best on held-out decisions', L?.k === 'learn' ? L.frac : null, L?.k === 'learn' ? `rate ${L.lr + 1} of ${L.lrs} · epoch ${L.epoch + 1} of ${L.epochs}${L.loss !== null ? ` · loss ${L.loss.toFixed(3)}` : ''}` : 'starting');
   else row('wait', `Learning candidate #${t.next}`, `starts at ${fmt(need)} lessons${t.exam ? ', after the exam in progress' : ''}`, null, '');
   const E = t.exam;
   if (E) {
@@ -157,7 +157,7 @@ function tracks(t: TrainLive): string {
     const zero = Math.max(0, Math.min(1, -E.lo / span));
     const meter = `<div class="evid" title="The evidence so far (a sequential test on the paired differences): it stops at the right end (better: promoted) or the left (not better)"><span>not better</span><span class="et"><i style="left:${(100 * zero).toFixed(1)}%"></i><b style="left:${(100 * at).toFixed(1)}%"></b></span><span>better</span></div>`;
     row('on', `Candidate #${E.id}’s exam`, 'paired with the champion on the same matches', E.done / Math.max(1, E.total), `${E.done} of ${E.total}${E.mean !== null ? ` · ${sgn(E.mean)} pts a match` : ''}`, meter);
-  } else row('wait', 'The exam', 'a new candidate sits it right after learning', null, '');
+  } else row('wait', 'The exam', 'after learning, if the candidate gains over the champion on held-out decisions', null, '');
   const X = t.searchExam;
   if (X) row('on', `Thinking-ahead exam of champion #${X.champion}`, 'the champion alone vs thinking ahead: the gap is what is left to learn', X.done / Math.max(1, X.total), `${X.done} of ${X.total}`);
   return rows.join('');

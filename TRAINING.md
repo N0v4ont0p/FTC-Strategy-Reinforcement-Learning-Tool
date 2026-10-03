@@ -164,6 +164,43 @@ search shows the same: which partner of how many, matches played of about how ma
 Measured (quick budget, our start F3): alone 51.7 ± 4.4 AUTO points against 31.6 for the robot's own
 AUTO; planned jointly with a second REAL-v1, 72.8 against 53.6.
 
+## Why 31 candidates got worse, and the residual network (2026-10-02)
+
+The run `real-v1` trained 31 candidates; all lost the exam, by 32 points at first and 72 later, while
+the robot itself (the hand-written skills, exam 180.5) never changed. Diagnosed on its 12,902 stored
+decisions:
+
+- The search keeps the hand-written choice **79%** of the time. The networks matched it **25%**
+  and the search's verdict **28%**: chance level for the number of options (57% with 2, 11% with 8).
+  A near-random chooser replacing good skills costs ~70 points a match.
+- The network chose *every* option itself and was never told what the hand-written order picks.
+- It was fitted to each option's value from the search's rounds, but in **55%** of decisions the
+  first round (10 s ahead) cannot tell the options apart: mostly noise. The training loss never fell
+  (held-out 0.073 before, 0.074 after), and the learning rate halved itself from 0.004 to 0.0013.
+- The halving dropped tied options by their place in the list.
+
+What changed:
+
+- **The residual network** (`train/policy.ts` `RES_PREFIX`). The hand-written order stays in charge;
+  the network reads each option with a flag on the hand-written pick and only **overrules** it for an
+  option it rates higher by more than its **margin**. A network that never overrules plays exactly
+  like the hand-written skills (gate 13 checks the frames are identical).
+- **The learner** (`train/entlearn.ts`) fits the search's verdict (softmax cross-entropy), 12 passes,
+  learning rates 0.001 / 0.002 / 0.004 every time. A tenth of the matches chooses the learning rate and
+  the margin (the one that gains most over the hand-written pick, by the search's own paired values;
+  Infinity when none gains); another tenth measures the gain over the champion's picks.
+- **No exam without held-out gain**: a candidate that gains nothing over the champion on held-out
+  decisions is recorded as *no gain: not examined* and learning goes on (36+ exam matches saved each
+  time). Home's Candidates table shows how often each overrules and what it gains.
+- **The search** breaks ties by the robot's own preference, and records the hand-written pick with
+  every decision (a `hand` column in the Store; older rows use the robot's own choice).
+
+On the run's data today the learner reproduces the hand-written choice (79%) and finds no overrule
+that holds up on held-out decisions, so it does not overrule yet: training no longer makes the robot
+worse, and candidates sit the exam only once the data shows a real gain. Most of the search's
+overrules (1,225 of 2,708) pick a *farther* group on the field than the nearest one: situational
+(contention, timing), which the network has to learn from more lessons.
+
 ## One button: continuous training (v2 phases 3–4)
 
 The **Home** tab is the new way to train: pick the robot, press **Train**, and it goes on until

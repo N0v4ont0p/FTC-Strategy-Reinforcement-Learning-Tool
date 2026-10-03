@@ -46,7 +46,7 @@ import { mineRoutes, type RouteLibrary } from './routes';
 import { PLAYS, SOLO_PLAYS, type Play } from './teamplay';
 import { TeamPlaybook } from './teamplaybook';
 import { Store } from './store';
-import { entGenome, labelRows, type EntFitReport, type LearnArgs, type LearnResult } from './entlearn';
+import { labelRows, residualGenome, type EntFitReport, type LearnArgs, type LearnResult } from './entlearn';
 import { ENT_PREFIX } from './policy';
 import type { OpponentKind, PartnerKind } from './team';
 import type { Frame } from './episode';
@@ -83,6 +83,7 @@ export interface V2Config {
   learnEvery: number; // new labels between learner runs
   learnWindow: number; // newest labels the learner reads
   epochs: number;
+  examGate?: number; // points per decision a candidate must gain over the champion on held-out decisions to sit the exam (default EXAM_MIN_GAIN)
   examSeeds: number; // exam matches per partner kind
   partners: (PartnerKind | 'none')[];
   opponents: OpponentKind[]; // the red alliances matches bring (the exam: each seed its own, in turn)
@@ -96,7 +97,7 @@ export const v2Defaults = (profile: string): V2Config => ({
   window: 1800,
   learnEvery: 400,
   learnWindow: 40_000,
-  epochs: 4,
+  epochs: 12, // (4 until 2026-10-02: too few passes to learn anything from noisy labels)
   examSeeds: 24,
   partners: ['none', 'real', 'skimmer', 'sniper', 'hauler', 'parker'],
   opponents: ['none', 'presets', 'mirror', 'defense'],
@@ -120,7 +121,7 @@ export interface CandidateRecord {
   time: string;
   id: number;
   lr: number;
-  verdict: 'promoted' | 'rejected';
+  verdict: 'promoted' | 'rejected' | 'skipped'; // skipped: no gain over the champion on held-out decisions, so no exam
   n: number; // exam matches played
   diff: MeanCi; // paired, candidate − champion
   learn: EntFitReport;
@@ -179,6 +180,10 @@ export interface AuditPoint {
 /** how the champion alone compares with the champion thinking ahead (MASTERPLAN phase 4's pass
  * condition: the network alone reaches the search): this many solo exam matches, at most this often */
 const SEARCH_EXAM = { n: 6, everyHours: 6 };
+/** the learner's learning rates: one fit each, the best on the validation tenth wins */
+const LEARN_RATES = [0.001, 0.002, 0.004];
+/** points per decision a candidate must gain over the champion on held-out decisions to sit the exam */
+const EXAM_MIN_GAIN = 0.01;
 
 /** the SPRT's evidence on paired differences: the log-likelihood ratio of "better by delta" over
  * "not better", and the bounds where it decides (lo: not better, hi: better) */
@@ -217,7 +222,7 @@ function freshState(name: string, config: V2Config, start: string | null): V2Sta
     version: V2_VERSION, name, config, created: now(), running: false,
     champion: { id: 0, genome: null, born: now(), exam: [] },
     base: null,
-    learner: { genome: start ?? entGenome(seedOf(name, 'learner')), lr: 0.002, runs: 0, last: null, before: null, tried: [] },
+    learner: { genome: start ?? residualGenome(seedOf(name, 'learner')), lr: 0.002, runs: 0, last: null, before: null, tried: [] },
     nextId: 1, actorSeq: 0, labelsAtLearn: 0,
     totals: { matches: 0, labels: 0, examMatches: 0, wallSeconds: 0, busySeconds: 0, promotions: 0, rejections: 0 },
     history: [], candidates: [], searchExam: null, audits: [],
@@ -313,6 +318,8 @@ export class Continuous extends EventEmitter {
       this.save();
     }
     this.st.audits ??= [];
+    // 2026-10-02: the learner trains a residual network for 12 passes (runs saved with the old 4 move on)
+    if (this.st.config.epochs === 4) this.st.config.epochs = 12;
     this.store = new Store(join(this.dir, 'store.db'));
   }
   get name(): string {
@@ -714,14 +721,15 @@ export class Continuous extends EventEmitter {
     this.learning = true;
     const pool = this.pool;
     const L = this.st.learner;
-    const args: LearnArgs = { store: join(this.dir, 'store.db'), start: L.genome, lrs: [L.lr / 2, L.lr, L.lr * 2], epochs: c.epochs, window: c.learnWindow, seed: seedOf(this.st.name, 'learn', L.runs), maxSeconds: 900 };
+    // fixed learning rates (it used to halve them whenever learning did not help, down to almost nothing)
+    const args: LearnArgs = { store: join(this.dir, 'store.db'), start: L.genome, champion: this.st.champion.genome, lrs: LEARN_RATES, epochs: c.epochs, window: c.learnWindow, seed: seedOf(this.st.name, 'learn', L.runs), maxSeconds: 900 };
     this.st.labelsAtLearn = this.st.totals.labels;
     this.say(`learning from the newest ${Math.min(c.learnWindow, this.st.totals.labels)} decisions`);
     this.run<LearnResult>({ module: '../train/entlearn.ts', fn: 'learnJob', args }, PRI.learner, { kind: 'learner', label: `Learning candidate #${this.st.nextId} from the newest ${Math.min(c.learnWindow, this.st.totals.labels).toLocaleString('en-US')} decisions` })
       .then((r) => {
         if (pool !== this.pool) return;
         L.genome = r.genome;
-        L.lr = Math.min(0.02, Math.max(1e-4, r.lr));
+        L.lr = r.lr;
         L.runs++;
         L.last = r.report;
         L.before = r.before;
@@ -729,7 +737,20 @@ export class Continuous extends EventEmitter {
         const id = this.st.nextId++;
         const pruned = this.store.pruneDecisions(STORE_KEEP);
         if (pruned) this.say(`the Store keeps the newest ${STORE_KEEP.toLocaleString('en-US')} decisions (${pruned} older ones dropped)`);
-        this.say(`candidate #${id}: held-out agrees with the search ${(100 * r.report.agree).toFixed(0)}% (was ${(100 * r.before.agree).toFixed(0)}%), gives away ${r.report.regret.toFixed(1)} pts per decision (was ${r.before.regret.toFixed(1)}); learning rate ${r.lr.toPrecision(2)}`);
+        const R = r.report;
+        const said = Number.isFinite(R.margin)
+          ? `overrules the hand-written order at ${(100 * R.overrule).toFixed(1)}% of held-out decisions, ${R.gain >= 0 ? '+' : ''}${R.gain.toFixed(2)} pts each over it, ${R.vsChampion >= 0 ? '+' : ''}${R.vsChampion.toFixed(2)} over the champion`
+          : 'no overrule gained anything on held-out decisions: it plays exactly like the hand-written order';
+        // NO GAIN ON HELD-OUT DECISIONS, NO EXAM: a candidate that is not better than the champion
+        // where the search can tell is not worth 36+ exam matches (it keeps learning from here)
+        if (!(R.vsChampion > (c.examGate ?? EXAM_MIN_GAIN))) {
+          this.st.candidates = [...this.st.candidates.slice(-49), { time: now(), id, lr: r.lr, verdict: 'skipped', n: 0, diff: { mean: 0, ci95: 0, n: 0 }, learn: R }];
+          this.st.totals.rejections++;
+          this.say(`candidate #${id}: ${said} — not examined (no gain over the champion on held-out decisions)`);
+          this.save();
+          return;
+        }
+        this.say(`candidate #${id}: ${said}; learning rate ${r.lr.toPrecision(2)}`);
         this.pending = { ...r, id };
         this.save();
         void this.evaluate();

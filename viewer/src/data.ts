@@ -131,6 +131,19 @@ export const fmt = (n: number): string => Math.round(n).toLocaleString('en-US');
 export const bytes = (n: number): string => (n < 1e6 ? `${Math.max(1, Math.round(n / 1e3))} KB` : n < 1e9 ? `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB` : `${(n / 1e9).toFixed(1)} GB`);
 export const TRACK_STRIDE = 3; // ticks between swarm samples (train/episode.ts)
 export const TRACK_FIELDS = 7; // x, y, heading, turret, turret2, hopper, option kind
+/** what the learner reports on held-out decisions (train/entlearn.ts EntFitReport); the residual
+ * network's numbers (margin, gain, overrule, vsChampion) exist from 2026-10-02 on (margin null: it
+ * never overrules) */
+export interface LearnReportV {
+  agree: number;
+  regret: number;
+  train: number;
+  test: number;
+  margin?: number | null;
+  gain?: number;
+  overrule?: number;
+  vsChampion?: number;
+}
 export const AUTO_START = 240; // DSIM's 4 s pre-match countdown, in ticks
 export const PLAY_TICKS = (30 + 8 + 120) * 60; // AUTO, the transition and TELEOP, in ticks
 
@@ -232,8 +245,8 @@ export interface HomeStatusV {
   trend: number | null;
   improving: 'improving' | 'flat' | null;
   history: { time: string; hours: number; labels: number; champion: number; exam: number; vsBase: number }[];
-  candidates: { time: string; id: number; lr: number; verdict: 'promoted' | 'rejected'; n: number; diff: MeanCiV; learn: { agree: number; regret: number; train: number } }[];
-  learner: { lr: number; runs: number; last: { agree: number; regret: number; train: number; test: number } | null; before: { agree: number; regret: number } | null };
+  candidates: { time: string; id: number; lr: number; verdict: 'promoted' | 'rejected' | 'skipped'; n: number; diff: MeanCiV; learn: LearnReportV }[];
+  learner: { lr: number; runs: number; last: LearnReportV | null; before: { agree: number; regret: number } | null };
   totals: { matches: number; labels: number; examMatches: number; hours: number; promotions: number; rejections: number };
   labelsPerHour: number | null;
   nextLearnIn: number;

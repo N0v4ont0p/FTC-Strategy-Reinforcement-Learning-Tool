@@ -44,9 +44,10 @@ export interface DecisionRow {
   rd?: Float32Array; // luck draws per round
   v?: number; // points still to come from here (the state value's target)
   net?: number; // the network's own choice
+  hand?: number; // the hand-written order's job (the residual network's reference; older rows: none)
 }
 /** columns added after version 1 (added in place: an older store keeps its rows) */
-const ADDED: [string, string][] = [['opt', 'BLOB'], ['rq', 'BLOB'], ['rd', 'BLOB'], ['v', 'REAL'], ['net', 'INT']];
+const ADDED: [string, string][] = [['opt', 'BLOB'], ['rq', 'BLOB'], ['rd', 'BLOB'], ['v', 'REAL'], ['net', 'INT'], ['hand', 'INT']];
 export interface StateRow {
   gen: number;
   tag: string; // why it is interesting: 'late-game', 'near-mistake', 'drill:<kind>', …
@@ -118,9 +119,9 @@ export class Store {
     return Number(r.lastInsertRowid);
   }
   addDecisions(rows: DecisionRow[]): void {
-    const st = this.s('INSERT INTO decisions(match, gen, tick, robot, k, chosen, best, obs, feats, q, se, n, ents, source, opt, rq, rd, v, net) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const st = this.s('INSERT INTO decisions(match, gen, tick, robot, k, chosen, best, obs, feats, q, se, n, ents, source, opt, rq, rd, v, net, hand) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const d of rows)
-      st.run(d.match, d.gen, d.tick, d.robot, d.q.length, d.chosen, d.best, blob(d.obs), blob(d.feats), blob(d.q), blob(d.se), blob(d.n), blob(d.ents), d.source, blob(d.opt), blob(d.rq), blob(d.rd), d.v ?? null, d.net ?? null);
+      st.run(d.match, d.gen, d.tick, d.robot, d.q.length, d.chosen, d.best, blob(d.obs), blob(d.feats), blob(d.q), blob(d.se), blob(d.n), blob(d.ents), d.source, blob(d.opt), blob(d.rq), blob(d.rd), d.v ?? null, d.net ?? null, d.hand ?? null);
   }
   count(table: 'matches' | 'decisions' | 'states' | 'plans'): number {
     return Number((this.s(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number | bigint }).n);
@@ -136,6 +137,7 @@ export class Store {
       ents: r.ents ? f32(r.ents as Uint8Array) : undefined, source: String(r.source),
       ...(r.opt ? { opt: f32(r.opt as Uint8Array) } : {}), ...(r.rq ? { rq: f32(r.rq as Uint8Array) } : {}), ...(r.rd ? { rd: f32(r.rd as Uint8Array) } : {}),
       ...(r.v !== null && r.v !== undefined ? { v: Number(r.v) } : {}), ...(r.net !== null && r.net !== undefined ? { net: Number(r.net) } : {}),
+      ...(r.hand !== null && r.hand !== undefined ? { hand: Number(r.hand) } : {}),
     }));
   }
   /** keep at most `keep` decisions (the newest): the store must not grow without bound */

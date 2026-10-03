@@ -7,7 +7,7 @@
 // The genome also carries three STYLE genes the skills read (how they execute, not what).
 import { BB, cmd, type Controller, type RobotCommand, type World } from '../harness/dsim';
 import type { Resolved } from '../harness/profiles';
-import { Mlp, fromB64, styleOffset, type NetShape } from './net';
+import { Mlp, fromB64, styleOffset, toB64, type NetShape } from './net';
 import { N_ENT, N_OBS, N_OPT_IN, encode, encodeEnts, optInput } from './obs';
 import { EntNet, layout, type EntInput, type EntShape } from './entnet';
 import type { Sample } from './bc';
@@ -35,18 +35,45 @@ export type PolicyKind = 'net' | 'greedy';
  * robot and element as a set, each option with where it goes. A genome is "ent1:" + base64 */
 export const ENT_SHAPE: EntShape = { G: N_OBS, F: N_ENT, O: N_OPT_IN, D: 32, A: 16, H: 32, style: STYLE.length };
 export const ENT_PREFIX = 'ent1:';
-export type NetParams = Float32Array | { ent: Float32Array };
-export const isEnt = (g: string | null | undefined): boolean => !!g && g.startsWith(ENT_PREFIX);
-/** a genome string (v1 MLP or entity network) → what a Brain takes */
+/** THE RESIDUAL NETWORK (2026-10-02). Entity networks that chose every option themselves never beat
+ * the hand-written order: 31 candidates, all 32–78 points worse, picking no better than chance (the
+ * search keeps the hand-written choice 79% of the time; they matched it 25%). Now the hand-written
+ * order (greedyScore) stays in charge: the network sees which option it would take and only OVERRULES
+ * it for an option it rates higher by more than its MARGIN — chosen on held-out decisions by the
+ * learner, and infinite when overruling gained nothing there (it then plays exactly like the
+ * hand-written skills). A genome is "res1:" + margin + ":" + base64; its option rows carry one more
+ * input, the hand-written pick (RES_SHAPE) */
+export const RES_PREFIX = 'res1:';
+export const RES_SHAPE: EntShape = { ...ENT_SHAPE, O: N_OPT_IN + 1 };
+export type NetParams = Float32Array | { ent: Float32Array; margin?: number };
+export const isEnt = (g: string | null | undefined): boolean => !!g && (g.startsWith(ENT_PREFIX) || g.startsWith(RES_PREFIX));
+export const isResidual = (g: string | null | undefined): boolean => !!g && g.startsWith(RES_PREFIX);
+/** a genome string (v1 MLP, entity network or residual network) → what a Brain takes */
 export function decodeGenome(g: string | null | undefined): NetParams | null {
   if (!g) return null;
+  if (isResidual(g)) {
+    const rest = g.slice(RES_PREFIX.length);
+    const c = rest.indexOf(':');
+    return { ent: fromB64(rest.slice(c + 1)), margin: Number(rest.slice(0, c)) };
+  }
   return isEnt(g) ? { ent: fromB64(g.slice(ENT_PREFIX.length)) } : fromB64(g);
+}
+/** a residual network's genome (margin Infinity: it never overrules) */
+export const resGenome = (p: Float32Array, margin: number): string => `${RES_PREFIX}${margin}:${toB64(p)}`;
+/** the options as the residual network reads them: each row + 1 when it is the hand-written pick */
+export function withHand(o: Float32Array, k: number, hand: number): Float32Array {
+  const out = new Float32Array(k * (N_OPT_IN + 1));
+  for (let j = 0; j < k; j++) {
+    out.set(o.subarray(j * N_OPT_IN, (j + 1) * N_OPT_IN), j * (N_OPT_IN + 1));
+    out[j * (N_OPT_IN + 1) + N_OPT_IN] = j === hand ? 1 : 0;
+  }
+  return out;
 }
 /** a genome's skill-setting genes (raw), or the defaults for none */
 export function genomeStyle(g: string | null | undefined): number[] {
   const p = decodeGenome(g);
   if (!p) return [...STYLE_DEFAULT_GENES];
-  const [arr, at] = p instanceof Float32Array ? [p, styleOffset(SHAPE)] : [p.ent, layout(ENT_SHAPE).style];
+  const [arr, at] = p instanceof Float32Array ? [p, styleOffset(SHAPE)] : [p.ent, layout(p.margin !== undefined ? RES_SHAPE : ENT_SHAPE).style];
   return Array.from(arr.subarray(at, at + STYLE.length));
 }
 
@@ -88,6 +115,7 @@ export interface DecisionPoint {
   opts: Option[];
   scores: number[];
   chosen: number; // the option it went for (hp: pressed alongside)
+  hand: number; // the job the hand-written order would take here (the residual network's reference)
   current: number; // index of the job it was doing (think), -1 at a begin
   obs: Float32Array | null; // the observation, when asked for (lessons, search)
   ent: EntInput | null; // the entity view, when asked for (the entity network's labels)
@@ -103,6 +131,11 @@ export class Brain {
   private net: Mlp | null;
   private ent: EntNet | null = null;
   private entIn: EntInput | null = null;
+  /** a residual network's margin (null: the network, if any, chooses by itself) */
+  private margin: number | null = null;
+  /** at this decision: the hand-written order's job, and the residual network's ratings */
+  private handNow = -1;
+  private resQ: Float32Array | null = null;
   private style: Style;
   private obs = new Float32Array(N_OBS);
   private x = new Float32Array(N_OBS + N_OPT_FEATS);
@@ -166,7 +199,10 @@ export class Brain {
     o: { mode?: BrainMode; board?: AllianceBoard | null; parkSlot?: number; play?: Play | null; seat?: number } = {},
   ) {
     this.net = params instanceof Float32Array ? new Mlp(SHAPE, share(params)) : null;
-    if (params && !(params instanceof Float32Array)) this.ent = share(new EntNet(ENT_SHAPE, share(params.ent)));
+    if (params && !(params instanceof Float32Array)) {
+      this.margin = params.margin ?? null;
+      this.ent = share(new EntNet(this.margin !== null ? RES_SHAPE : ENT_SHAPE, share(params.ent)));
+    }
     this.style = decodeStyle(this.net ? this.net.style() : this.ent ? this.ent.style() : null);
     share(prof);
     this.mode = o.mode ?? 'play';
@@ -182,7 +218,8 @@ export class Brain {
   /** a different network from now on (a drill's hand-over); the skill settings stay */
   setNet(params: NetParams | null): void {
     this.net = params instanceof Float32Array ? new Mlp(SHAPE, share(params)) : null;
-    this.ent = params && !(params instanceof Float32Array) ? share(new EntNet(ENT_SHAPE, share(params.ent))) : null;
+    this.margin = params && !(params instanceof Float32Array) ? (params.margin ?? null) : null;
+    this.ent = params && !(params instanceof Float32Array) ? share(new EntNet(this.margin !== null ? RES_SHAPE : ENT_SHAPE, share(params.ent))) : null;
   }
   follow(steps: PlanStep[]): void {
     this.plan = steps;
@@ -197,9 +234,12 @@ export class Brain {
     return this.cur;
   }
 
-  private score(w: World, r: World['robots'][number], opts: Option[]): number[] {
+  /** each option's score, and (handNow) the job the hand-written order would take: `ci` is the job
+   * in progress at a re-think (-1 at a job start) */
+  private score(w: World, r: World['robots'][number], opts: Option[], ci = -1): number[] {
     if (this.net || this.ent || this.samples || this.wantObs) encode(w, r, this.prof, this.obs);
     this.entIn = null;
+    this.resQ = null;
     if (this.ent || this.wantEnts) {
       const { e, n } = encodeEnts(w, r);
       this.entIn = { g: this.obs, e, n, o: optInput(r, opts, this.role, w), k: opts.length };
@@ -207,16 +247,37 @@ export class Brain {
     // the team play's role: its preference, in seconds (greedy) or points (a network)
     const role = this.role;
     const bias = (o: Option): number => (role ? roleBias(role, o, w) : 0);
-    if (this.ent) {
+    if (this.ent && this.margin === null) {
       const q = this.ent.forward(this.entIn!).q;
-      return opts.map((o, i) => q[i] + bias(o) * PTS_PER_S);
+      const sc = opts.map((o, i) => q[i] + bias(o) * PTS_PER_S);
+      this.handNow = this.handJob(sc, opts, ci);
+      return sc;
     }
-    return opts.map((o) => {
+    const sc = opts.map((o) => {
       if (!this.net) return greedyScore(o, r.hopper.length >= this.cap) + bias(o);
       this.x.set(this.obs, 0);
       this.x.set(o.feats, N_OBS);
       return this.net.forward(this.x)[0] + bias(o) * PTS_PER_S;
     });
+    this.handNow = this.handJob(sc, opts, ci);
+    // a residual network rates the options knowing the hand-written pick (overrule() decides)
+    if (this.ent) this.resQ = Float32Array.from(this.ent.forward({ ...this.entIn!, o: withHand(this.entIn!.o, opts.length, this.handNow) }).q);
+    return sc;
+  }
+  /** the job these scores take: the best at a job start; at a re-think the best only when it beats
+   * the job in progress by the stick (the human player's button is pressed alongside, never a job) */
+  private handJob(sc: number[], opts: Option[], ci: number): number {
+    const best = argmaxWhere(sc, (k) => opts[k].kind !== 'hp');
+    if (ci < 0) return best;
+    return best >= 0 && best !== ci && sc[best] > sc[ci] + this.style.stick ? best : ci;
+  }
+  /** a residual network's say: another job only when it rates it higher than the hand-written pick by
+   * more than its margin */
+  private overrule(h: number, opts: Option[]): number {
+    const q = this.resQ;
+    if (!q || h < 0 || this.margin === null) return h;
+    const j = argmaxWhere(Array.from(q), (k) => opts[k].kind !== 'hp');
+    return j >= 0 && j !== h && q[j] - q[h] > this.margin ? j : h;
   }
   /** the human player's button needs nothing from the robot: pressing it is done ALONGSIDE the job
    * (it used to be a job of its own and cut sweeps in two) */
@@ -249,7 +310,7 @@ export class Brain {
     return i;
   }
   private note(w: World, at: 'think' | 'begin', opts: Option[], sc: number[], chosen: number, current: number): void {
-    if (opts.length > 1) this.last = { tick: w.tick, at, opts, scores: sc, chosen, current, obs: this.wantObs ? new Float32Array(this.obs) : null, ent: this.wantEnts && this.entIn ? { ...this.entIn, g: new Float32Array(this.obs) } : null };
+    if (opts.length > 1) this.last = { tick: w.tick, at, opts, scores: sc, chosen, hand: this.handNow, current, obs: this.wantObs ? new Float32Array(this.obs) : null, ent: this.wantEnts && this.entIn ? { ...this.entIn, g: new Float32Array(this.obs) } : null };
     this.entIn = null;
   }
 
@@ -336,7 +397,7 @@ export class Brain {
         const opts = roleFilter(this.role, options(w, r, this.pilot, this.cap, this.banned, (o) => held.holds(o), avoid), w, (o) => held.holds(o));
         const ci = opts.findIndex((o) => o.feats[F_CURRENT] === 1);
         if (ci >= 0 && opts.length > 1) {
-          const sc = this.score(w, r, opts);
+          const sc = this.score(w, r, opts, ci);
           if (this.force) {
             const commit = this.force.commit;
             const fi = this.forced(w, opts);
@@ -352,11 +413,13 @@ export class Brain {
             const hp = opts.findIndex((o) => o.kind === 'hp');
             const pressed = hp >= 0 && sc[hp] > sc[ci] + style.stick;
             if (pressed) this.pressHp(w, opts[hp], opts.length);
-            const best = argmaxWhere(sc, (k) => opts[k].kind !== 'hp');
-            if (best >= 0 && best !== ci && sc[best] > sc[ci] + style.stick) {
-              this.note(w, 'think', opts, sc, best, ci);
+            // the hand-written order's job (switch when something beats the job in progress by the
+            // stick), unless a residual network overrules it
+            const job = this.overrule(this.handNow, opts);
+            if (job !== ci) {
+              this.note(w, 'think', opts, sc, job, ci);
               this.finish('switched', w.tick);
-              this.begin(w, r, opts, best, sc);
+              this.begin(w, r, opts, job, sc);
               c = null;
             } else {
               this.note(w, 'think', opts, sc, pressed ? hp : ci, ci);
@@ -384,6 +447,9 @@ export class Brain {
           } else {
             if (this.plan && this.stopAtFree && !this.free) this.free = { tick: w.tick, opts, scores: sc };
             i = argmaxWhere(sc, () => true);
+            // a residual network overruling the hand-written job starts its own (no button press with it)
+            const job = this.overrule(this.handNow, opts);
+            if (job !== this.handNow) i = job;
           }
           this.note(w, 'begin', opts, sc, i, -1);
           this.begin(w, r, opts, i, sc);

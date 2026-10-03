@@ -36,9 +36,9 @@ import { VALUE_SHAPE, fitValue } from './value';
 import { DatabaseSync } from 'node:sqlite';
 import { SEARCH2, type Search2Spec } from './episode';
 import { EntNet, entInit, layout, type EntShape } from './entnet';
-import { ENT_PREFIX, ENT_SHAPE, decodeGenome, genomeStyle } from './policy';
+import { ENT_SHAPE, RES_PREFIX, RES_SHAPE, decodeGenome, genomeStyle, resGenome } from './policy';
 import { N_ENT, N_OPT_IN } from './obs';
-import { entEval, entFit, entGenome, labelRows, learnJob, toLabels } from './entlearn';
+import { bestMargin, entEval, entFit, entGenome, labelRows, learnJob, residualGenome, toLabels } from './entlearn';
 import { Continuous, V2_DIR, examList, sameMistake, sprt, v2Defaults, type AuditEntry } from './continuous';
 import { mineRoutes } from './routes';
 import { OPPONENT_KINDS } from './team';
@@ -697,13 +697,37 @@ const s2a = runEpisode(s2args(null));
   st.tx(() => st.addDecisions(rows));
   const back = toLabels(st.decisions({ source: 'search2' }));
   st.close();
-  check('13 store: searched decisions keep every round\'s values, the draws, the entity view and the points still to come (an older store gains the columns)', back.length === L.length && back.every((b) => b.rq.length === QUICK2.rounds.length * b.x.k && b.rd[1] === 3 && Number.isFinite(b.v) && b.x.o.length === b.x.k * N_OPT_IN) && back.some((b) => b.rq.some(Number.isNaN)));
-  // the learner fits them
-  const before = entEval(g0.ent, back);
-  const fit = entFit(g0.ent, back, back, { epochs: 40, lr: 0.003, batch: 4, seed: 1 });
-  check('13 learner: fitting the searched values lowers the loss on them (and never touches the skill genes)', fit.report.lossTest < before.lossTest * 0.8 && fit.p.subarray(layout(ENT_SHAPE).style).every((v, i) => v === g0.ent[layout(ENT_SHAPE).style + i]), `loss ${before.lossTest.toFixed(3)} → ${fit.report.lossTest.toFixed(3)}`);
-  const lj = learnJob({ store: tmpDb, start: gA, lrs: [0.001, 0.002, 0.004], epochs: 2, window: 1000, seed: 1 });
-  check('13 learner: as a worker job it reads the Store, tries each learning rate and keeps the best on held-out decisions', lj.genome.startsWith(ENT_PREFIX) && lj.tried.length === 3 && lj.tried.some((t) => t.lr === lj.lr));
+  check('13 store: searched decisions keep every round\'s values, the draws, the entity view, the points still to come and the hand-written pick (an older store gains the columns)', back.length === L.length && back.every((b) => b.rq.length === QUICK2.rounds.length * b.x.k && b.rd[1] === 3 && Number.isFinite(b.v) && b.x.o.length === b.x.k * (N_OPT_IN + 1) && b.hand >= 0 && b.x.o[b.hand * (N_OPT_IN + 1) + N_OPT_IN] === 1) && back.some((b) => b.rq.some(Number.isNaN)));
+  // the learner fits them (the residual network: the search's verdict, the hand-written pick flagged)
+  const r0 = decodeGenome(residualGenome(5)) as { ent: Float32Array };
+  const before = entEval(r0.ent, back);
+  const fit = entFit(r0.ent, back, back, { epochs: 40, lr: 0.003, batch: 4, seed: 1 });
+  const sty = layout(RES_SHAPE).style;
+  check('13 learner: fitting the search\'s verdicts lowers the loss on them (and never touches the skill genes)', fit.report.lossTest < before.lossTest * 0.8 && fit.p.subarray(sty).every((v, i) => v === r0.ent[sty + i]), `loss ${before.lossTest.toFixed(3)} → ${fit.report.lossTest.toFixed(3)}`);
+  const learnMsgs: JobProgress[] = [];
+  setProgressSink((p) => learnMsgs.push(p as JobProgress));
+  let lj: ReturnType<typeof learnJob>;
+  try {
+    lj = learnJob({ store: tmpDb, start: gA, champion: null, lrs: [0.001, 0.002, 0.004], epochs: 2, window: 1000, seed: 1 });
+  } finally {
+    setProgressSink(null);
+  }
+  const lps = learnMsgs.filter((m) => m.k === 'learn');
+  check('13 learner: as a worker job it reads the Store, tries each learning rate, keeps the best on the validation tenth and makes a residual network (from a plain entity network too); it reports each learning rate as it goes (the studio\'s learner tile)', lj.genome.startsWith(RES_PREFIX) && lj.tried.length === 3 && lj.tried.some((t) => t.lr === lj.lr) && [0, 1, 2].every((i) => lps.some((m) => m.k === 'learn' && m.lr === i && m.lrs === 3 && m.epochs === 2)));
+  // THE RESIDUAL NETWORK: the hand-written order stays in charge
+  const eH = runEpisode(argsE(null as unknown as string));
+  const eR = runEpisode(argsE(residualGenome(5)));
+  const eR0 = runEpisode(argsE(resGenome(r0.ent, 0)));
+  check('13 residual: one that never overrules (margin Infinity: no gain found) plays exactly like the hand-written order; one that always may (margin 0) plays its own match', eR.reward === eH.reward && eR.ticks === eH.ticks && JSON.stringify(eR.parts) === JSON.stringify(eH.parts) && eR0.ticks > 9000 && JSON.stringify(eR0.parts) !== JSON.stringify(eH.parts), `hand-written ${eH.reward}, never overrules ${eR.reward}, margin 0 ${eR0.reward}`);
+  // the margin: where every overrule loses, none is kept (Infinity)
+  const losing = back.map((b) => {
+    const rq = Float32Array.from(b.rq);
+    for (let r = 0; r < b.rd.length; r++) rq[r * b.x.k + b.hand] = 1e3;
+    return { ...b, rq };
+  });
+  const mWin = bestMargin(fit.p, back);
+  const mLose = bestMargin(fit.p, losing);
+  check('13 residual: the margin is the one that gains most on held-out decisions; where every overrule loses, it never overrules', mLose.margin === Infinity && mLose.gain === 0 && mWin.gain >= 0, `margin ${mWin.margin} (+${mWin.gain.toFixed(2)} pts/decision); all losing: ${mLose.margin}`);
   rmSync(tmpDb, { force: true });
   for (const sfx of ['-wal', '-shm']) rmSync(tmpDb + sfx, { force: true });
   // the pool's queue: evaluator work jumps the actors
@@ -734,7 +758,7 @@ const s2a = runEpisode(s2args(null));
   // the whole engine, small: baseline exam → actors → learner → a candidate on the exam → a verdict; pause; reopen
   const name = '_check-v2';
   rmSync(join(V2_DIR, name), { recursive: true, force: true });
-  const cfg = { ...v2Defaults(V1P), workers: 6, search: QUICK2, window: 600, learnEvery: 12, learnWindow: 5000, epochs: 3, examSeeds: 1, partners: ['none', 'parker'] as ('none' | 'parker')[], sprt: { ...S, minN: 2, chunk: 2 } };
+  const cfg = { ...v2Defaults(V1P), workers: 6, search: QUICK2, window: 600, learnEvery: 12, learnWindow: 5000, epochs: 3, examSeeds: 1, examGate: -Infinity, partners: ['none', 'parker'] as ('none' | 'parker')[], sprt: { ...S, minN: 2, chunk: 2 } };
   const c = new Continuous(name, cfg);
   const t0 = Date.now();
   let peak = 0;
@@ -764,14 +788,20 @@ const s2a = runEpisode(s2args(null));
       open = m.id;
     } else if (m.k === 'end' && m.id === open) open = null;
   }
+  const liveOk = {
+    firstExam: pics.some((p) => p.base !== null && p.base.done > 0),
+    clocks: pics.some((p) => p.jobs.some((j) => (j.kind === 'actor' || j.kind === 'drill') && j.p?.k === 'match' && j.p.frac > 0)),
+    examEvidence: pics.some((p) => p.exam !== null && p.exam.done > 0 && p.exam.lo < 0 && p.exam.hi > 0),
+    streamsEnd: heads.size > 0 && [...heads].every((id) => ends.has(id)),
+    oneAtATime,
+    stopsClean: pics.at(-1)!.running === false && pics.at(-1)!.jobs.length === 0,
+  };
   check(
-    '13 live: the picture shows every stage as it happens (the first exam counted, matches with their clocks, the learner\'s epochs, the candidate\'s exam with its evidence), and one match at a time streams to the field from its first frame to its end',
-    pics.some((p) => p.base !== null && p.base.done > 0) &&
-      pics.some((p) => p.jobs.some((j) => (j.kind === 'actor' || j.kind === 'drill') && j.p?.k === 'match' && j.p.frac > 0)) &&
-      pics.some((p) => p.learning && p.jobs.some((j) => j.kind === 'learner' && j.p?.k === 'learn')) &&
-      pics.some((p) => p.exam !== null && p.exam.done > 0 && p.exam.lo < 0 && p.exam.hi > 0) &&
-      heads.size > 0 && [...heads].every((id) => ends.has(id)) && oneAtATime && pics.at(-1)!.running === false && pics.at(-1)!.jobs.length === 0,
-    `${pics.length} pictures, ${heads.size} matches streamed`,
+    // (the learner's own reports are checked with the learner: on this little data it learns faster
+    // than the picture's half-second)
+    '13 live: the picture shows every stage as it happens (the first exam counted, matches with their clocks, the candidate\'s exam with its evidence), and one match at a time streams to the field from its first frame to its end',
+    Object.values(liveOk).every(Boolean),
+    `${pics.length} pictures, ${heads.size} matches streamed${Object.values(liveOk).every(Boolean) ? '' : ` — failing: ${Object.keys(liveOk).filter((k) => !liveOk[k as keyof typeof liveOk]).join(', ')}`}`,
   );
   c.store.close();
   c2.store.close();

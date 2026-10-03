@@ -1,6 +1,6 @@
 # S1 Motion Lab — report
 
-Generated 2026-09-30 by `harness/s1/check.ts` from `outputs/s1/*.json`. DSIM pinned (`harness/dsim-pin.json`). All times are DSIM ticks at 60 Hz, shown in seconds.
+Generated 2026-10-03 by `harness/s1/check.ts` from `outputs/s1/*.json`. DSIM pinned (`harness/dsim-pin.json`). All times are DSIM ticks at 60 Hz, shown in seconds.
 
 ## Gate
 
